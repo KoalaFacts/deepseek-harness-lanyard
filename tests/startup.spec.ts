@@ -27,12 +27,18 @@ function parse(argv: string[]): WebStartupValues | Error {
 describe('the lanyard web command line', () => {
   it('publishes the stock flag family unchanged', () => {
     expect(parse(['--host', '127.0.0.1', '--port', '8080'])).toEqual({
-      host: '127.0.0.1', port: 8080, trustedHosts: [],
+      host: '127.0.0.1', port: 8080, trustedHosts: [], openBrowser: true,
     })
   })
 
   it('publishes nothing when the invocation named no flags but the defaults', () => {
-    expect(parse([])).toEqual({ trustedHosts: [] })
+    expect(parse([])).toEqual({ trustedHosts: [], openBrowser: true })
+  })
+
+  it('carries the shipped --no-open flag, which replacing the row must not drop', () => {
+    // The consuming row defaults openBrowser to true, so a provider that
+    // omitted the field would disable this flag without any error.
+    expect(parse(['--no-open'])).toEqual({ trustedHosts: [], openBrowser: false })
   })
 
   it('accepts the all-interfaces bind upstream refuses, given a pairing token', () => {
@@ -40,7 +46,7 @@ describe('the lanyard web command line', () => {
     // program.error() here, because without authentication the bind hands
     // remote code execution to the network.
     expect(parse(['--host', '0.0.0.0', '--pairing-token-env', 'DSH_PAIRING_TOKEN'])).toEqual({
-      host: '0.0.0.0', trustedHosts: [], pairingTokenEnv: 'DSH_PAIRING_TOKEN',
+      host: '0.0.0.0', trustedHosts: [], openBrowser: true, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
     })
   })
 
@@ -58,7 +64,7 @@ describe('the lanyard web command line', () => {
       '--pairing-token-env', 'DSH_PAIRING_TOKEN',
       '--trusted-host', 'app.internal', 'app2.internal',
     ])).toEqual({
-      trustedHosts: ['app.internal', 'app2.internal'], pairingTokenEnv: 'DSH_PAIRING_TOKEN',
+      trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
     })
   })
 
@@ -67,7 +73,7 @@ describe('the lanyard web command line', () => {
   })
 
   it('carries --keep-awake through, and omits it when absent', () => {
-    expect(parse(['--keep-awake'])).toEqual({ trustedHosts: [], keepAwake: true })
+    expect(parse(['--keep-awake'])).toEqual({ trustedHosts: [], openBrowser: true, keepAwake: true })
     expect(parse([])).not.toHaveProperty('keepAwake')
   })
 

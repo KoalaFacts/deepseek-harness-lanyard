@@ -10,7 +10,10 @@
  *
  * It parses the same flag family as the stock provider so nothing else in the
  * composition changes: rows keep injecting `webStartup` and reading it from
- * lazy config.
+ * lazy config. That contract is total — a shipped row reading a field this
+ * provider does not publish would silently fall back to its schema default —
+ * so `tests/webstartup-contract.spec.ts` checks it against the shipped
+ * `@deepseek-ai/dsh-web-app` patch rather than against a copy of it.
  * @module
  */
 
@@ -37,6 +40,8 @@ export interface WebStartupValues {
   port?: number
   /** Explicit `--trusted-host` authorities, in argument order. */
   trustedHosts: string[]
+  /** `--no-open` inverted: whether to open the Web UI in the default browser. */
+  openBrowser: boolean
   /** `--pairing-token-env`: the credential reference holding the pairing token. */
   pairingTokenEnv?: string
   /** `--keep-awake`, absent when the invocation did not name it. */
@@ -46,6 +51,8 @@ export interface WebStartupValues {
 /** The web flag family, as commander parsed it. */
 interface WebOptions {
   host?: string
+  /** Commander's `--no-open` counterpart: true unless the flag was passed. */
+  open?: boolean
   port?: string
   trustedHost?: string[]
   pairingTokenEnv?: string
@@ -62,6 +69,7 @@ export function webCommand(): Command {
     .description('Serve the DeepSeek Harness browser UI (lanyard: LAN serving behind a pairing token).')
     .helpOption('-h, --help', 'show this help')
     .option('--host <host>', 'bind host; 0.0.0.0 serves the LAN and requires --pairing-token-env')
+    .option('--no-open', 'do not open the Web UI in the default browser')
     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
     .option('--trusted-host <authority...>', 'extra authority the /api browser-trust fence accepts (host or host:port; repeatable; requires a pairing token)')
     .option('--pairing-token-env <name>', `name of the credential holding the pairing token every non-loopback client must present (${PAIRING_TOKEN_REQUIREMENT}); read from the environment, the credential store, or a .env layer`)
@@ -69,6 +77,7 @@ export function webCommand(): Command {
     .addHelpText('after', `
 Examples:
   dsh --profile web                          serve on the composed host and port
+  dsh --profile web --no-open                serve without opening a browser
   dsh --profile web --port 8080              serve on another port
   DSH_PAIRING_TOKEN=$(node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))") \\
     dsh --profile web --host 0.0.0.0 --pairing-token-env DSH_PAIRING_TOKEN
@@ -98,6 +107,9 @@ export function resolveStartupValues(program: Command): WebStartupValues {
     program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
   }
   return {
+    // Always published, like the shipped provider: the consuming row's schema
+    // defaults it to true, so omitting it would quietly disable `--no-open`.
+    openBrowser: options.open ?? true,
     ...options.host !== undefined && { host: options.host },
     ...options.port !== undefined && { port: Number(options.port) },
     trustedHosts: options.trustedHost ?? [],

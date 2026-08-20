@@ -39,6 +39,7 @@ Open that link once on the other device. The page stores the token, strips it fr
 |---|---|
 | `--host <host>` | bind host; `0.0.0.0` serves the LAN and requires a pairing token |
 | `--port <port>` | listen port; `0` lets the OS pick |
+| `--no-open` | do not open the Web UI in the default browser (shipped flag, preserved) |
 | `--pairing-token-env <name>` | credential holding the pairing token (at least 16 characters of `A-Za-z0-9_-`) |
 | `--trusted-host <authority...>` | extra authority the `/api` Host fence accepts; requires a pairing token |
 | `--keep-awake` | hold the platform sleep inhibitor while `dsh` serves |
@@ -85,6 +86,7 @@ The consequence is that `bootstrapAuthToken` is serialized into the page through
 - **The SPA shell itself is anonymous.** `dsh-host-frontend-static` claims the webserver's *fallback* seat, which is not a route registration, so the built frontend is served without admission. That is deliberate — the shell has to load before it can hold a token — but it means the dist is readable by any LAN peer.
 - **Self-signed certificate.** Each device accepts it once. The SAN carries the LAN addresses sampled at generation, so a network change re-prompts the warning; serving still works, because admission never depends on the certificate.
 - **Two readiness lines.** `@deepseek-ai/dsh-web-app` prints its own `dsh web:` line with a hardcoded `http://`; this plugin leaves that row unmodified and prints the corrected scheme and the pairing link beside it.
+- **Replacing a row means owning its whole contract.** `lanyard-startup` must publish every `webStartup` field the shipped rows read, and the patch must disable ids that still exist upstream — a missing field falls back to a schema default and a renamed id is skipped with a warning, so both fail quietly. `tests/webstartup-contract.spec.ts` checks both against the installed `@deepseek-ai/dsh-web-app`, not a copy of it.
 - **Version-coupled to the carrier.** `GatedWebServer` subclasses `@deepseek-ai/dsh-host-webserver`. TLS additionally needs the inherited `node:http` server; if a future version stops exposing it, the plugin fails its load loudly rather than quietly serving plaintext. Re-run the suite on every harness upgrade.
 
 ## Upstream issues this plugin does not fix
