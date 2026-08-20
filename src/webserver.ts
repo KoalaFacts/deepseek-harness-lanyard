@@ -28,25 +28,52 @@ import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { admit, assertPairingToken, isLoopbackAddress } from './admission.ts'
 import { GENERATE_TOKEN_HINT, resolvePairingToken } from './credentials.ts'
 
+/**
+ * Every route path this gate keys on is owned by a *client-side* package —
+ * `API_PATH` in `dsh-client-connection`, `EVENTS_ENDPOINT` in
+ * `dsh-client-hmr`, the bundle prefix in `dsh-client-modules` — so none of them
+ * is this plugin's to hardcode. They are schema defaults a deployment can
+ * restate, per the harness rule that anything two deployments may set
+ * differently is a configuration field.
+ *
+ * Two of them fail OPEN when they drift: an `/api` prefix that no longer
+ * matches makes every endpoint read as unprivileged, and a reload endpoint that
+ * moved is no longer pinned. {@link GatedWebServer} therefore warns about any
+ * configured path that no row ever claimed, so a rename surfaces as a
+ * diagnostic instead of as a quietly widened surface.
+ */
+
+/** Route prefix owning every api request; `dsh-client-connection`'s `API_PATH`. */
+export const DEFAULT_API_PATH_PREFIX = '/api'
+
 /** Endpoints pinned to a loopback peer even for an authenticated caller. */
-const PRIVILEGED_METHODS = new Set([
+export const DEFAULT_PRIVILEGED_METHODS: readonly string[] = [
   'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
   'host.pickDirectory', 'host.openPath',
   'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
   'credentials.describe', 'credentials.set', 'credentials.unset',
   'llm.discoverModels',
-])
+]
 
 /**
  * Typert Gateway namespaces a paired device may reach. The Gateway claims every
  * `namespace/method` a live remote service exposes, so this space grows with the
  * composition; anything unlisted is loopback-only, which keeps a service this
- * build has never seen from becoming LAN-reachable merely by appearing.
+ * build has never seen from becoming LAN-reachable merely by appearing. A
+ * deployment adds its own namespace deliberately — the default denies.
  */
-const PAIRED_NAMESPACES = new Set(['commands', 'goals', 'messageFeedback'])
+export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = ['commands', 'goals', 'messageFeedback']
 
 /** Routes served without admission: the browser must load the shell before it holds a token. */
-const DEFAULT_PUBLIC_PATHS = ['/plugins']
+export const DEFAULT_PUBLIC_PATHS: readonly string[] = ['/plugins']
+
+/**
+ * Suffixes excluded from every public path. `/plugins` must stay anonymous so
+ * the shell can boot before a token exists, but the client bundles it serves
+ * carry source maps, and handing a LAN peer the full client source for free is
+ * not part of "load the shell".
+ */
+export const DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES: readonly string[] = ['.map']
 
 /**
  * Routes a paired device may not reach at all, whatever it presents.
@@ -57,15 +84,21 @@ const DEFAULT_PUBLIC_PATHS = ['/plugins']
  * that combination is a socket sink, and pairing buys a remote device nothing
  * it could use.
  */
-const LOOPBACK_ONLY_PATHS = new Set(['/plugins/events'])
+export const DEFAULT_LOOPBACK_ONLY_PATHS: readonly string[] = ['/plugins/events']
 
-/**
- * Suffix excluded from every public path. `/plugins` must stay anonymous so the
- * shell can boot before a token exists, but the client bundles it serves carry
- * source maps, and handing a LAN peer the full client source for free is not
- * part of "load the shell".
- */
-const PUBLIC_PATH_EXCLUDED_SUFFIX = '.map'
+/** How an `/api` endpoint's reachability is decided, as one deployment classified it. */
+export interface EndpointAuthority {
+  /** Dot-form methods pinned to a loopback peer. */
+  privilegedMethods: ReadonlySet<string>
+  /** Gateway namespaces a paired device may reach; anything else is pinned. */
+  pairedNamespaces: ReadonlySet<string>
+}
+
+/** The shipped classification, used when a caller names none. */
+export const DEFAULT_ENDPOINT_AUTHORITY: EndpointAuthority = {
+  privilegedMethods: new Set(DEFAULT_PRIVILEGED_METHODS),
+  pairedNamespaces: new Set(DEFAULT_PAIRED_NAMESPACES),
+}
 
 /** Gated carrier config: the upstream listen fields plus this plugin's own. */
 export interface Config {
@@ -90,6 +123,16 @@ export interface Config {
   tlsKeyPath?: string
   /** Route paths served without admission; defaults to the client-bundle prefix. */
   publicPaths?: string[]
+  /** Suffixes a public path does not cover; defaults to source maps. */
+  publicPathExcludedSuffixes?: string[]
+  /** Route paths no paired device may reach; defaults to the dev reload channel. */
+  loopbackOnlyPaths?: string[]
+  /** Route prefix owning api requests; defaults to `dsh-client-connection`'s. */
+  apiPathPrefix?: string
+  /** Dot-form api methods pinned to a loopback peer. */
+  privilegedMethods?: string[]
+  /** Gateway namespaces a paired device may reach; anything else is pinned. */
+  pairedNamespaces?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -99,7 +142,12 @@ export const Config: z<Config> = z.object({
   pairingToken: z.string(),
   tlsCertPath: z.string(),
   tlsKeyPath: z.string(),
-  publicPaths: z.array(String).default(DEFAULT_PUBLIC_PATHS),
+  publicPaths: z.array(String).default([...DEFAULT_PUBLIC_PATHS]),
+  publicPathExcludedSuffixes: z.array(String).default([...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]),
+  loopbackOnlyPaths: z.array(String).default([...DEFAULT_LOOPBACK_ONLY_PATHS]),
+  apiPathPrefix: z.string().default(DEFAULT_API_PATH_PREFIX),
+  privilegedMethods: z.array(String).default([...DEFAULT_PRIVILEGED_METHODS]),
+  pairedNamespaces: z.array(String).default([...DEFAULT_PAIRED_NAMESPACES]),
 })
 
 /**
@@ -108,18 +156,26 @@ export const Config: z<Config> = z.object({
  * namespace, so a method added to an unlisted namespace inherits the pin rather
  * than defaulting to reachable.
  * @param endpoint - endpoint identity, either `method` or `namespace/method`.
+ * @param authority - this deployment's classification; defaults to the shipped one.
  * @returns true when only a loopback peer may reach it.
  */
-export function isPrivilegedEndpoint(endpoint: string): boolean {
-  if (PRIVILEGED_METHODS.has(endpoint)) return true
+export function isPrivilegedEndpoint(
+  endpoint: string, authority: EndpointAuthority = DEFAULT_ENDPOINT_AUTHORITY,
+): boolean {
+  if (authority.privilegedMethods.has(endpoint)) return true
   const separator = endpoint.indexOf('/')
-  return separator !== -1 && !PAIRED_NAMESPACES.has(endpoint.slice(0, separator))
+  return separator !== -1 && !authority.pairedNamespaces.has(endpoint.slice(0, separator))
 }
 
-/** The endpoint an `/api` request addresses, or undefined when its path carries none. */
-function endpointOf(pathname: string): string | undefined {
-  if (!pathname.startsWith('/api/')) return undefined
-  const rest = pathname.slice('/api/'.length)
+/**
+ * The endpoint an api request addresses, or undefined when its path carries none.
+ * @param pathname - the request pathname.
+ * @param prefix - the configured api route prefix.
+ */
+function endpointOf(pathname: string, prefix: string): string | undefined {
+  const base = `${prefix}/`
+  if (!pathname.startsWith(base)) return undefined
+  const rest = pathname.slice(base.length)
   return rest.length > 0 ? rest : undefined
 }
 
@@ -145,6 +201,12 @@ export class GatedWebServer extends WebServer {
 
   private readonly gate: Config
   private readonly publicPaths: string[]
+  private readonly publicPathExcludedSuffixes: string[]
+  private readonly loopbackOnlyPaths: string[]
+  private readonly apiPathPrefix: string
+  private readonly authority: EndpointAuthority
+  /** Route paths some row actually claimed, for the drift warning below. */
+  private readonly claimedPaths = new Set<string>()
   /** Resolved before the socket binds, so no request can arrive while it is still undefined. */
   private token: string | undefined
   private tls: TlsServer | undefined
@@ -172,7 +234,45 @@ export class GatedWebServer extends WebServer {
       )
     }
     this.gate = config
-    this.publicPaths = config.publicPaths ?? DEFAULT_PUBLIC_PATHS
+    this.publicPaths = config.publicPaths ?? [...DEFAULT_PUBLIC_PATHS]
+    this.publicPathExcludedSuffixes = config.publicPathExcludedSuffixes ?? [...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]
+    this.loopbackOnlyPaths = config.loopbackOnlyPaths ?? [...DEFAULT_LOOPBACK_ONLY_PATHS]
+    this.apiPathPrefix = config.apiPathPrefix ?? DEFAULT_API_PATH_PREFIX
+    this.authority = {
+      privilegedMethods: new Set(config.privilegedMethods ?? DEFAULT_PRIVILEGED_METHODS),
+      pairedNamespaces: new Set(config.pairedNamespaces ?? DEFAULT_PAIRED_NAMESPACES),
+    }
+  }
+
+  /**
+   * Configured route paths, and whether each one is load-bearing for admission.
+   * Every entry is owned by a client-side package, so a rename upstream leaves
+   * this deployment's configuration pointing at nothing.
+   */
+  private configuredPaths(): { path: string; failsOpen: boolean }[] {
+    return [
+      // A prefix that matches nothing makes every endpoint read as
+      // unprivileged, so the configuration plane stops being pinned.
+      { path: this.apiPathPrefix, failsOpen: true },
+      // A pin that matches nothing leaves the route merely token-gated.
+      ...this.loopbackOnlyPaths.map(path => ({ path, failsOpen: true })),
+      // A public path that matches nothing only refuses more than intended.
+      ...this.publicPaths.map(path => ({ path, failsOpen: false })),
+    ]
+  }
+
+  /**
+   * Warn about configured paths no row claimed. Called once the tree has
+   * settled, because consumers register during their own activation.
+   */
+  private reportUnclaimedPaths(): void {
+    for (const { path, failsOpen } of this.configuredPaths()) {
+      if (this.claimedPaths.has(path)) continue
+      this.ctx.logger.warn(
+        `lanyard: no route claimed ${JSON.stringify(path)}; it is owned by a client-side package and may have been `
+        + `renamed in this harness version${failsOpen ? ' — until this configuration is corrected that surface is less guarded than intended' : ''}`,
+      )
+    }
   }
 
   /** The port clients reach: the TLS listener when serving HTTPS, else the inherited one. */
@@ -200,6 +300,13 @@ export class GatedWebServer extends WebServer {
     // must be in place before the socket that carries requests exists.
     this.token = this.gate.pairingToken ?? await resolvePairingToken(this.ctx, this.gate.pairingTokenEnv)
     await super[Service.init]()
+    // Consumers register during their own activation, so the claim set is only
+    // complete once the tree has settled. A hand-built context has no Loader
+    // and therefore no settle point — reporting there would warn about paths
+    // whose rows simply have not mounted yet.
+    const settled = this.ctx.get('loader')?.await() as Promise<unknown> | undefined
+    // A failed boot reports itself; this row stays quiet.
+    void settled?.then(() => { this.reportUnclaimedPaths() }, () => {})
     const { tlsCertPath, tlsKeyPath } = this.gate
     if (tlsCertPath === undefined || tlsKeyPath === undefined) return
     const routed = assertServer((this as unknown as { server: unknown }).server)
@@ -229,14 +336,15 @@ export class GatedWebServer extends WebServer {
   private permits(req: IncomingMessage, routePath: string): boolean {
     /* v8 ignore next -- node always sets url on server requests */
     const pathname = new URL(req.url ?? '/', 'http://x').pathname
-    if (LOOPBACK_ONLY_PATHS.has(routePath)) return isLoopbackAddress(req.socket.remoteAddress)
-    if (this.publicPaths.includes(routePath) && !pathname.endsWith(PUBLIC_PATH_EXCLUDED_SUFFIX)) return true
+    if (this.loopbackOnlyPaths.includes(routePath)) return isLoopbackAddress(req.socket.remoteAddress)
+    const excluded = this.publicPathExcludedSuffixes.some(suffix => pathname.endsWith(suffix))
+    if (this.publicPaths.includes(routePath) && !excluded) return true
     if (!admit(req, this.token)) return false
-    const endpoint = endpointOf(pathname)
+    const endpoint = endpointOf(pathname, this.apiPathPrefix)
     if (endpoint === undefined) return true
     // Pairing authenticates a device; the configuration plane additionally
     // requires being at the machine, so it never travels to a paired device.
-    return !isPrivilegedEndpoint(endpoint) || isLoopbackAddress(req.socket.remoteAddress)
+    return !isPrivilegedEndpoint(endpoint, this.authority) || isLoopbackAddress(req.socket.remoteAddress)
   }
 
   /**
@@ -246,6 +354,7 @@ export class GatedWebServer extends WebServer {
    */
   override register(route: WebRoute): () => void {
     const inner = route.handler
+    this.claimedPaths.add(route.path)
     return super.register({
       ...route,
       handler: async (req, res) => {
@@ -267,6 +376,7 @@ export class GatedWebServer extends WebServer {
    */
   override registerUpgrade(route: WebUpgradeRoute): () => void {
     const inner = route.handler
+    this.claimedPaths.add(route.path)
     return super.registerUpgrade({
       ...route,
       handler: (req, socket, head) => {

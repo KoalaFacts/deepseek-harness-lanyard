@@ -58,6 +58,36 @@ Five rows, two of which take seats the shipped composition already had.
 | `lanyard-keep-awake` | — | holds the platform sleep inhibitor under `--keep-awake` |
 | `lanyard-pairing` | — | injects the browser half into `index.html` and prints the pairing link |
 
+### Configuring the gate
+
+Every route path the gate keys on is owned by a **client-side** package, not by this plugin: `API_PATH` in `dsh-client-connection`, `EVENTS_ENDPOINT` in `dsh-client-hmr`, the bundle prefix in `dsh-client-modules`. Any of them can be renamed by a harness upgrade or replaced by a deployment that mounts a different plugin, so all of them are configuration fields with schema defaults rather than constants.
+
+| Field | Default | Effect if stale |
+|---|---|---|
+| `apiPathPrefix` | `/api` | **fails open** — every endpoint reads as unprivileged, so the configuration plane stops being pinned |
+| `loopbackOnlyPaths` | `['/plugins/events']` | **fails open** — the reload channel is only token-gated, not pinned |
+| `publicPaths` | `['/plugins']` | fails closed — the shell cannot load |
+| `publicPathExcludedSuffixes` | `['.map']` | fails closed — maps served like bundles |
+| `privilegedMethods` | the pinned dot-form methods | **fails open** — an unpinned method reaches a paired device |
+| `pairedNamespaces` | `commands`, `goals`, `messageFeedback` | fails closed — an unlisted namespace is loopback-only |
+
+Because two of these fail open, `GatedWebServer` warns once the tree settles about any configured path **no row ever claimed**, naming which ones leave a surface less guarded than intended. A rename upstream surfaces as a diagnostic instead of as a quietly widened LAN surface.
+
+To change one, restate the whole row in your profile's `cordis.patch.yml` — a patch replaces a row's entire `config`:
+
+```yaml
+- id: lanyard-webserver
+  config:
+    host: !!js ctx.webStartup.host ?? '127.0.0.1'
+    port: !!js ctx.webStartup.port ?? 3080
+    pairingTokenEnv: !!js ctx.webStartup.pairingTokenEnv
+    tlsCertPath: !!js ctx.lanyardTls.paths?.certPath
+    tlsKeyPath: !!js ctx.lanyardTls.paths?.keyPath
+    # Reach a namespace your own plugin exposes. Anything unlisted stays
+    # loopback-only, so this list only ever widens deliberately.
+    pairedNamespaces: [commands, goals, messageFeedback, myPlugin]
+```
+
 ### The gate
 
 Every consumer registers its routes through `ctx.webServer.register` and `registerUpgrade`. `GatedWebServer` overrides both, so admission runs in front of every route the composition serves without any consumer knowing:
@@ -93,8 +123,8 @@ The consequence is that `bootstrapAuthToken` is serialized into the page through
 
 Found while building this, verified, and deliberately left alone — each is a harness-side decision, not a plugin one:
 
-- **`host.listDirectory` / `host.createDirectory` are unpinned** while `host.pickDirectory` / `host.openPath` are, so a paired device can enumerate the host filesystem and `mkdir`. Pinning them here would break the browse-mode directory picker, which is the surface a remote device is *supposed* to use.
-- **`/api/respond` is unpinned**, so a paired device can answer approval prompts.
+- **`host.listDirectory` / `host.createDirectory` are unpinned** while `host.pickDirectory` / `host.openPath` are, so a paired device can enumerate the host filesystem and `mkdir`. Pinning them by default would break the browse-mode directory picker, which is the surface a remote device is *supposed* to use — so the choice is yours: add them to `privilegedMethods` if your deployment does not need remote directory browsing.
+- **`/api/respond` is unpinned**, so a paired device can answer approval prompts. Add it to `privilegedMethods` to keep approvals at the machine.
 
 ## Development
 
