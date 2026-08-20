@@ -6,6 +6,11 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
+    // Explicit, never inferred: TypeScript 6+ refuses to infer the common
+    // source directory, and an inferred rootDir would silently emit to
+    // lib/src/, breaking every path in the package `exports` map. A consumer
+    // installing from git builds with whatever TypeScript resolves there.
+    "rootDir": "src",
     "outDir": "lib",
     "declarationDir": "lib/types",
     "declarationMap": false,

@@ -53,6 +53,7 @@
     "cordis.patch.yml"
   ],
   "scripts": {
+    "prepare": "tsc -p tsconfig.build.json --noCheck",
     "build": "tsc -p tsconfig.build.json && node scripts/verify-build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
