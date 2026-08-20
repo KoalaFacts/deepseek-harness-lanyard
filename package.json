@@ -1,0 +1,88 @@
+{
+  "name": "@koalafacts/lanyard",
+  "version": "0.1.0",
+  "description": "Secure LAN access for the DeepSeek Harness web GUI: pairing-token admission and self-signed TLS, as an out-of-tree dsh plugin",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KoalaFacts/deepseek-harness-lanyard.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./admission": {
+      "types": "./lib/types/admission.d.ts",
+      "default": "./lib/admission.js"
+    },
+    "./webserver": {
+      "types": "./lib/types/webserver.d.ts",
+      "default": "./lib/webserver.js"
+    },
+    "./tls": {
+      "types": "./lib/types/tls.d.ts",
+      "default": "./lib/tls.js"
+    },
+    "./startup": {
+      "types": "./lib/types/startup.d.ts",
+      "default": "./lib/startup.js"
+    },
+    "./pairing": {
+      "types": "./lib/types/pairing.d.ts",
+      "default": "./lib/pairing.js"
+    },
+    "./keep-awake": {
+      "types": "./lib/types/keep-awake.d.ts",
+      "default": "./lib/keep-awake.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/verify-build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.7",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "selfsigned": "^3.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.7",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.8",
+    "yaml": "^2.9.0"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  }
+}
