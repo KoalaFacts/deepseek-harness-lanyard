@@ -3,7 +3,10 @@ import jsQR from 'jsqr'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import { pairingAnnouncement, renderPairingQr, shouldDrawQr, type Config as PairingConfig } from '../src/pairing.ts'
+import {
+  fitsTerminal, pairingAnnouncement, renderPairingQr, renderedWidth, shouldDrawQr, terminalColumns,
+  type Config as PairingConfig,
+} from '../src/pairing.ts'
 import * as Pairing from '../src/pairing.ts'
 import { AUTH_COOKIE_NAME } from '../src/admission.ts'
 
@@ -116,10 +119,34 @@ describe('the pairing QR code', () => {
     expect(rows.every(row => row.startsWith('████') && row.endsWith('████'))).toBe(true)
   })
 
-  it('fits an ordinary terminal', async () => {
-    const rows = (await renderPairingQr(link, false)).split('\n').filter(row => row.trim() !== '')
-    expect(rows.length).toBeLessThan(30)
-    expect([...(rows[0] ?? '')].length).toBeLessThan(50)
+  it('fits an ordinary 80-column terminal at the length a real link reaches', async () => {
+    // The size follows the link's length, so this is the property that keeps a
+    // realistic deployment scannable rather than wrapped.
+    const realistic = 'https://192.168.100.200:31080/#auth=' + 'a'.repeat(43)
+    const code = await renderPairingQr(realistic, false)
+    expect(fitsTerminal(code, 80)).toBe(true)
+    expect(code.split('\n').filter(row => row.length > 0).length).toBeLessThan(30)
+  })
+
+  it('measures its width ignoring the escape codes it is wrapped in', async () => {
+    const coloured = await renderPairingQr(link)
+    const plain = await renderPairingQr(link, false)
+    // Counting escape codes as width would make every code look unfittable.
+    expect(renderedWidth(coloured)).toBe(renderedWidth(plain))
+  })
+
+  it('treats an unreported terminal width as unknown, not as narrow', () => {
+    // A pty with no window size reports 0. Reading that as a zero-column
+    // terminal refuses every code, which a real boot under `script` showed.
+    expect(terminalColumns(0)).toBe(80)
+    expect(terminalColumns(undefined)).toBe(80)
+    expect(terminalColumns(120)).toBe(120)
+  })
+
+  it('reports not fitting rather than printing a code that would wrap', async () => {
+    const code = await renderPairingQr(link, false)
+    expect(fitsTerminal(code, renderedWidth(code))).toBe(true)
+    expect(fitsTerminal(code, renderedWidth(code) - 1)).toBe(false)
   })
 })
 

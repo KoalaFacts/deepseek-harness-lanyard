@@ -9,6 +9,11 @@ declare module 'qrcode-terminal' {
   }
   const qrcodeTerminal: {
     /**
+     * Set the error-correction level for subsequent renders.
+     * @param level - L, M, Q or H, in increasing redundancy and size.
+     */
+    setErrorLevel: (level: 'L' | 'M' | 'Q' | 'H') => void
+    /**
      * Render `text` as a QR code drawn with block characters.
      * @param text - the payload to encode.
      * @param options - rendering options.

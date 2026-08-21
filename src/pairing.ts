@@ -85,6 +85,32 @@ export interface PairingAnnouncement {
 const QUIET_ZONE_MODULES = 4
 
 /**
+ * Error correction for the code.
+ *
+ * `M` costs nothing over `L` at the length a pairing link actually reaches,
+ * and buys tolerance for the glare and focus of a phone camera pointed at a
+ * screen. `Q` and `H` are materially larger for redundancy this never needs:
+ * the code is on a monitor, not printed on a crate.
+ */
+const ERROR_CORRECTION = 'M'
+
+/** Terminal width assumed when stdout does not report a usable one. */
+const ASSUMED_COLUMNS = 80
+
+/**
+ * The terminal width to lay the code out against.
+ *
+ * `process.stdout.columns` is not simply present-or-absent: a pty with no
+ * window size set reports 0, which is not a narrow terminal but an unknown
+ * one. Treating it as narrow refuses to print a code that would have fitted
+ * perfectly well.
+ * @param reported - `process.stdout.columns`, verbatim.
+ */
+export function terminalColumns(reported: number | undefined): number {
+  return reported !== undefined && reported > 0 ? reported : ASSUMED_COLUMNS
+}
+
+/**
  * Bright white on black, held for the whole code.
  *
  * `qrcode-terminal` draws the LIGHT modules as block characters and leaves the
@@ -111,6 +137,29 @@ function withQuietZone(rendered: string): string {
 }
 
 /**
+ * Width of a rendered block, in terminal columns.
+ * @param rendered - a block, with or without escape codes.
+ */
+export function renderedWidth(rendered: string): number {
+  const rows = rendered.replace(/\u001B\[[0-9;]*m/g, '').split('\n').filter(row => row.length > 0)
+  return Math.max(0, ...rows.map(row => [...row].length))
+}
+
+/**
+ * Whether a rendered code fits the terminal it is about to be printed to.
+ *
+ * A code wider than the terminal wraps, and a wrapped code is not a code — it
+ * is noise that no camera will ever read. Better to print the link alone and
+ * say so. The size follows the link's length, so a long host or an unusually
+ * long token is what pushes it over.
+ * @param rendered - the block about to be printed.
+ * @param columns - the terminal width.
+ */
+export function fitsTerminal(rendered: string, columns: number): boolean {
+  return renderedWidth(rendered) <= columns
+}
+
+/**
  * Render a pairing link as a QR code for the terminal.
  * @param link - the pairing URL to encode, token fragment included.
  * @param colour - emit ANSI colours; false honours `NO_COLOR`.
@@ -118,6 +167,7 @@ function withQuietZone(rendered: string): string {
  */
 export function renderPairingQr(link: string, colour = true): Promise<string> {
   return new Promise((resolve) => {
+    qrcodeTerminal.setErrorLevel(ERROR_CORRECTION)
     qrcodeTerminal.generate(link, { small: true }, (rendered: string) => {
       const bordered = withQuietZone(rendered)
       if (!colour) return resolve(bordered)
@@ -179,9 +229,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     if (lines.pair === undefined) return
     console.log(`lanyard: pair a device by opening ${lines.pair} once`)
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
-    console.log('lanyard: or scan this with the phone')
     // https://no-color.org — an explicit request not to emit escape codes.
-    console.log(await renderPairingQr(lines.pair, process.env.NO_COLOR === undefined))
+    const code = await renderPairingQr(lines.pair, process.env.NO_COLOR === undefined)
+    const columns = terminalColumns(process.stdout.columns)
+    if (!fitsTerminal(code, columns)) {
+      console.log(`lanyard: the code needs ${String(renderedWidth(code))} columns and this terminal has ${String(columns)}, so open the link above instead`)
+      return
+    }
+    // Its own block, so the code has clear space above and below it rather
+    // than butting against whatever the boot printed either side.
+    console.log(`\nlanyard: or scan this with the phone\n\n${code}\n`)
   }
   // Same readiness contract as the shipped URL line: wait for the Loader tree,
   // or print at once in a hand-built context that has no Loader.
