@@ -25,7 +25,39 @@ import { request } from 'node:https'
 import type { OutgoingHttpHeaders } from 'node:http'
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
-export const CLI_VERSION = process.env.DSH_E2E_VERSION ?? '0.1.1-rc.1'
+
+/**
+ * The CLI release the suites pin to by default, so an ordinary run is
+ * reproducible. `DSH_E2E_VERSION=newest` tracks the registry instead — what
+ * the nightly does, because this plugin's real exposure is upstream drift.
+ */
+const DEFAULT_CLI_VERSION = '0.1.1-rc.1'
+
+/**
+ * The most recently published version of a package.
+ *
+ * Not the `latest` dist-tag: these packages publish prereleases without moving
+ * that tag, so `latest` still points at an ancient build. The registry lists
+ * versions in publish order, which is the notion "newest release" means here.
+ * @param name - the package to look up.
+ * @returns the last published version string.
+ */
+export function newestPublished(name: string): string {
+  const listed: unknown = JSON.parse(run('npm', ['view', name, 'versions', '--json']))
+  const versions = Array.isArray(listed) ? (listed as string[]) : [String(listed)]
+  const newest = versions.at(-1)
+  if (newest === undefined) throw new Error(`no published versions found for ${name}`)
+  return newest
+}
+
+/** Resolve the requested CLI release. An empty variable is unset, as CI writes it. */
+function resolveCliVersion(): string {
+  const requested = process.env.DSH_E2E_VERSION
+  if (requested === undefined || requested === '') return DEFAULT_CLI_VERSION
+  return requested === 'newest' ? newestPublished('@deepseek-ai/dsh') : requested
+}
+
+export const CLI_VERSION: string = resolveCliVersion()
 export const TOKEN = 'e2e-token_0123456789-abcdef'
 
 const BOOT_TIMEOUT_MS = 180_000

@@ -176,6 +176,21 @@ npm run test:e2e:browser   # do the pairing flow in a real browser
 
 Set `LANYARD_CHROMIUM=/path/to/chrome` when the machine already provides a Chromium whose build does not match this Playwright version, so the suite runs without downloading a second browser.
 
+### Nightly
+
+Push CI runs the e2e against a pinned `dsh` release. `.github/workflows/nightly.yml` covers the other failure mode: this plugin composes against **published** `@deepseek-ai/dsh` packages that move on their own schedule, and it replaces two shipped rows — so an upstream release can break it while nothing in this repo changes. That is not hypothetical; it is how the shipped `--no-open` flag went missing once.
+
+The nightly tracks the newest published release and runs the pinned one beside it, so a failure is interpretable:
+
+| Result | Meaning |
+|---|---|
+| newest fails, pinned passes | upstream drift — this plugin needs updating |
+| both fail | a regression here, or infrastructure |
+
+It also re-runs the row-contract test against the newest published `@deepseek-ai/dsh-web-app`, not the lockfile pin — the pin is reproducible, but it is not what a user installs. A scheduled failure opens (or comments on) a single tracking issue.
+
+`DSH_E2E_VERSION=newest` works locally too, and takes the most recently published version rather than the `latest` dist-tag, which these packages leave pointing at an old build.
+
 Both suites are TypeScript run directly by Node, which strips the types itself — no build step, no runner dependency, and `npm run typecheck` covers them alongside `src/` and `tests/`. That needs Node ≥ 22.18, which the package already requires.
 
 Two deliberate choices in the HTTP script. It tests against the **published** CLI rather than a harness checkout, because a source checkout composes something no user runs — and testing against published packages is what caught a shipped flag going missing. And it distinguishes a refusal by *this gate* from one by `dsh-client-connection`'s own Host fence, which answers 403 as well; without that distinction several checks passed for the wrong reason.
