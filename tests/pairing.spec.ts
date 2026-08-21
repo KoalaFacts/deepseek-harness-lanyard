@@ -41,13 +41,18 @@ describe('the pairing QR code', () => {
   /**
    * Decode a rendered block the way a phone camera would.
    *
-   * Asserting the block "looks like a QR" would pass for something no camera
-   * can read, which would make the feature useless while the suite stayed
-   * green. So the half-block rows are expanded back into a module matrix,
-   * painted as a bitmap, and put through an independent decoder.
+   * Two things this must not do. Describing the block ("looks square, uses
+   * block characters") would pass for something no camera can read. And
+   * decoding with inversion enabled would accept a code whose polarity is
+   * backwards — which is what the encoder emits unaided, since it draws the
+   * LIGHT modules as block characters and assumes a dark terminal. So the
+   * colours this plugin actually prints are applied here, and inversion is
+   * refused.
    */
   function decode(rendered: string): string | undefined {
-    const rows = rendered.split('\n').filter(row => row.length > 0)
+    // Block characters are painted bright white by the emitted escape codes,
+    // the background black; strip the codes and honour that mapping.
+    const rows = rendered.replace(/\u001B\[[0-9;]*m/g, '').split('\n').filter(row => row.length > 0)
     // Every character carries two vertically stacked modules.
     const modules = rows.flatMap((row) => {
       const top: boolean[] = []
@@ -64,8 +69,9 @@ describe('the pairing QR code', () => {
     const pixels = new Uint8ClampedArray(width * scale * height * scale * 4)
     for (let y = 0; y < height * scale; y++) {
       for (let x = 0; x < width * scale; x++) {
-        const lit = modules[Math.floor(y / scale)]?.[Math.floor(x / scale)] === true
-        const value = lit ? 0 : 255
+        // A block character is a LIGHT module (white); a space is dark.
+        const lightModule = modules[Math.floor(y / scale)]?.[Math.floor(x / scale)] === true
+        const value = lightModule ? 255 : 0
         const at = (y * width * scale + x) * 4
         pixels[at] = value
         pixels[at + 1] = value
@@ -73,7 +79,7 @@ describe('the pairing QR code', () => {
         pixels[at + 3] = 255
       }
     }
-    return jsQR(pixels, width * scale, height * scale)?.data
+    return jsQR(pixels, width * scale, height * scale, { inversionAttempts: 'dontInvert' })?.data
   }
 
   it('decodes back to the exact pairing link', async () => {
@@ -86,10 +92,34 @@ describe('the pairing QR code', () => {
     expect(decode(await renderPairingQr(other))).toBe(other)
   })
 
+  it('pins the colours that make the polarity right in any terminal', async () => {
+    // The decode above proves the LAYOUT: block characters are the light
+    // modules. It cannot prove what a terminal paints them, because stripping
+    // the escape codes and assuming that mapping would pass whether or not the
+    // codes were emitted. So the contract is asserted directly: block
+    // characters must be painted bright white (light modules) and the
+    // background black (dark modules). Without this the encoder's own output
+    // inverts on a light theme.
+    const rows = (await renderPairingQr(link)).split('\n')
+    expect(rows.every(row => row.startsWith('\u001B[97;40m') && row.endsWith('\u001B[0m'))).toBe(true)
+  })
+
+  it('emits no escape codes when colour is declined', async () => {
+    expect(await renderPairingQr(link, false)).not.toContain('\u001B')
+  })
+
+  it('carries a light border, so it does not merge into the terminal', async () => {
+    const rows = (await renderPairingQr(link, false)).split('\n').filter(row => row.length > 0)
+    const first = rows[0] ?? ''
+    // A full row of light modules, top and bottom, and the same at each side.
+    expect([...first].every(character => character === '█')).toBe(true)
+    expect(rows.every(row => row.startsWith('████') && row.endsWith('████'))).toBe(true)
+  })
+
   it('fits an ordinary terminal', async () => {
-    const rows = (await renderPairingQr(link)).split('\n').filter(row => row.trim() !== '')
-    expect(rows.length).toBeLessThan(25)
-    expect([...(rows[0] ?? '')].length).toBeLessThan(45)
+    const rows = (await renderPairingQr(link, false)).split('\n').filter(row => row.trim() !== '')
+    expect(rows.length).toBeLessThan(30)
+    expect([...(rows[0] ?? '')].length).toBeLessThan(50)
   })
 })
 

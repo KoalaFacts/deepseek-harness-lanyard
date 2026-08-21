@@ -79,13 +79,50 @@ export interface PairingAnnouncement {
 }
 
 /**
+ * Light border a scanner needs around the code, in modules. Below this the
+ * dark modules at the edge merge into a dark terminal background.
+ */
+const QUIET_ZONE_MODULES = 4
+
+/**
+ * Bright white on black, held for the whole code.
+ *
+ * `qrcode-terminal` draws the LIGHT modules as block characters and leaves the
+ * dark ones as background, which means it silently assumes a dark terminal: on
+ * a light theme every module inverts, and a scanner that does not try both
+ * polarities sees nothing. Pinning both colours makes the code render the same
+ * way — and at full contrast — whatever theme it lands in.
+ */
+const LIGHT_ON_DARK = '\u001B[97;40m'
+const RESET = '\u001B[0m'
+
+/**
+ * Surround the code with a light border, so it does not run into the terminal
+ * background. Each character is two modules tall, hence the halved row count.
+ * @param rendered - the raw block from the encoder.
+ */
+function withQuietZone(rendered: string): string {
+  const rows = rendered.split('\n').filter(row => row.length > 0)
+  const width = [...(rows[0] ?? '')].length
+  const side = '█'.repeat(QUIET_ZONE_MODULES)
+  const full = '█'.repeat(width + QUIET_ZONE_MODULES * 2)
+  const border = Array.from({ length: QUIET_ZONE_MODULES / 2 }, () => full)
+  return [...border, ...rows.map(row => `${side}${row}${side}`), ...border].join('\n')
+}
+
+/**
  * Render a pairing link as a QR code for the terminal.
  * @param link - the pairing URL to encode, token fragment included.
+ * @param colour - emit ANSI colours; false honours `NO_COLOR`.
  * @returns the rendered block, drawn with half-height characters.
  */
-export function renderPairingQr(link: string): Promise<string> {
+export function renderPairingQr(link: string, colour = true): Promise<string> {
   return new Promise((resolve) => {
-    qrcodeTerminal.generate(link, { small: true }, (rendered: string) => { resolve(rendered) })
+    qrcodeTerminal.generate(link, { small: true }, (rendered: string) => {
+      const bordered = withQuietZone(rendered)
+      if (!colour) return resolve(bordered)
+      resolve(bordered.split('\n').map(row => `${LIGHT_ON_DARK}${row}${RESET}`).join('\n'))
+    })
   })
 }
 
@@ -143,7 +180,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     console.log(`lanyard: pair a device by opening ${lines.pair} once`)
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     console.log('lanyard: or scan this with the phone')
-    console.log(await renderPairingQr(lines.pair))
+    // https://no-color.org — an explicit request not to emit escape codes.
+    console.log(await renderPairingQr(lines.pair, process.env.NO_COLOR === undefined))
   }
   // Same readiness contract as the shipped URL line: wait for the Loader tree,
   // or print at once in a hand-built context that has no Loader.
