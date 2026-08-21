@@ -126,6 +126,16 @@ Found while building this, verified, and deliberately left alone — each is a h
 - **`host.listDirectory` / `host.createDirectory` are unpinned** while `host.pickDirectory` / `host.openPath` are, so a paired device can enumerate the host filesystem and `mkdir`. Pinning them by default would break the browse-mode directory picker, which is the surface a remote device is *supposed* to use — so the choice is yours: add them to `privilegedMethods` if your deployment does not need remote directory browsing.
 - **`/api/respond` is unpinned**, so a paired device can answer approval prompts. Add it to `privilegedMethods` to keep approvals at the machine.
 
+## Peer dependencies
+
+They are declared `optional`, which needs explaining because they are not optional to the code.
+
+In a `dsh` profile the harness packages come from the **installation**, never from the profile: profiles install with `autoInstallPeers: false` and resolve them through the maintained flat fallback at `$DSH_HOME/profiles/node_modules`. pnpm therefore sees six absent peers and warns on every `dsh plugin add`, while resolution works perfectly.
+
+No version range can fix that while upstream ships prereleases. npm semver admits a prerelease only when a comparator shares its exact `major.minor.patch`, so the current release `0.1.1-rc.1` satisfies nothing — not `^0.1.0-rc.7`, not `>=0.1.0-rc.7`, not even `*`. A union range naming each prerelease line would rot on every upstream minor.
+
+`optional` states the true relationship: the package manager must not try to satisfy these, because the host does. The ranges stay as documentation of the supported window, and version compatibility is enforced where it can actually be checked — `assertServer()` at load, the unclaimed-path warning once the tree settles, the row-contract test, and the nightly against the newest published release.
+
 ## Verifying it
 
 ```sh
