@@ -72,7 +72,7 @@ describe('the bundle patch', () => {
     // Nothing downstream changes: rows keep injecting `webStartup`, so the
     // replacement must publish that service under a row of its own.
     const startup = inserted.find(row => row.id === 'lanyard-startup')
-    expect(startup?.name).toBe('@koalafacts/lanyard/startup')
+    expect(startup?.name).toBe('@koalafacts/deepseek-harness-lanyard/startup')
     expect(startup?.config).toBeUndefined()
   })
 

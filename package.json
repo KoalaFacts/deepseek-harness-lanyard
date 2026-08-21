@@ -1,5 +1,5 @@
 {
-  "name": "@koalafacts/lanyard",
+  "name": "@koalafacts/deepseek-harness-lanyard",
   "version": "0.1.0",
   "description": "Secure LAN access for the DeepSeek Harness web GUI: pairing-token admission and self-signed TLS, as an out-of-tree dsh plugin",
   "license": "MIT",

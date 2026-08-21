@@ -1,5 +1,5 @@
 /**
- * `@koalafacts/lanyard` — secure LAN access for the DeepSeek Harness web GUI,
+ * `@koalafacts/deepseek-harness-lanyard` — secure LAN access for the DeepSeek Harness web GUI,
  * as an out-of-tree `dsh` plugin bundle.
  *
  * The bundle is composed through `cordis.patch.yml`, which loads each row from

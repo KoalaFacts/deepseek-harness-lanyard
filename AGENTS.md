@@ -4,7 +4,7 @@ Guidance for coding agents (including Claude Code) working in this repository. `
 
 ## What this is
 
-`@koalafacts/lanyard` is an **out-of-tree `dsh` plugin bundle** that makes `dsh web` safe to bind on `0.0.0.0`: a pairing token plus self-signed TLS. It publishes to npm and installs with `dsh plugin --profile web add @koalafacts/lanyard`.
+`@koalafacts/deepseek-harness-lanyard` is an **out-of-tree `dsh` plugin bundle** whose purpose is using the `dsh` web GUI from a phone on your own network. It makes binding `0.0.0.0` safe with a pairing token plus self-signed TLS. It publishes to npm and installs with `dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard`.
 
 **It changes no harness source, and must not start.** It composes over the shipped tree through `cordis.patch.yml`, which is the documented extension mechanism ([bundle authoring](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/user/develop/basic/publish.md)). Everything here is judged by that constraint.
 
@@ -81,6 +81,7 @@ Inherited from the harness; follow them so this reads like the code it composes 
 - **Registrations are effects** — every contribution goes through `ctx.effect()`, and a registry's `register()` returns the disposer.
 - **Misconfiguration fails loud at load.** Never silently skip a missing referent, and never fall back to a weaker security posture.
 - **Secrets travel as credential references, never values.** Config surfaces are echoed by `dsh --dump-config`, the plugin-inventory RPC, and crash dumps.
+- **`README.md` and `README.zh.md` are a pair.** A user-visible change updates both, following the harness's bilingual docs convention.
 - ESM, `strict: true`, `.ts` extensions on local relative imports. Every module and export carries concise JSDoc for its non-obvious contract; do not restate the code.
 - **Peer dependencies are declared `optional`** because the *installation* provides them, not the profile. No version range can express the supported window while upstream ships prereleases — npm semver admits a prerelease only when a comparator shares its exact `major.minor.patch`. Compatibility is enforced at load and in CI, not by the range.
 
