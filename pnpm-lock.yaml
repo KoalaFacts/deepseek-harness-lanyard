@@ -11,6 +11,9 @@ importers:
       commander:
         specifier: ^15.0.0
         version: 15.0.0
+      qrcode-terminal:
+        specifier: ^0.12.0
+        version: 0.12.0
       selfsigned:
         specifier: ^3.0.1
         version: 3.0.1
@@ -39,6 +42,9 @@ importers:
       '@types/node':
         specifier: ^22.19.0
         version: 22.20.1
+      jsqr:
+        specifier: ^1.4.0
+        version: 1.4.0
       playwright:
         specifier: ^1.62.1
         version: 1.62.1
@@ -1613,6 +1619,9 @@ packages:
     resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
     hasBin: true
 
+  jsqr@1.4.0:
+    resolution: {integrity: sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==}
+
   koffi@3.1.6:
     resolution: {integrity: sha512-ln60chEb3o7Du1ayjwl6BFiNN1wZK+3cTM2wWGiHLEzCY/FdTIN1ER5VWDwHq7J/j4tSnnrHaH5ABS1EO6+6ag==}
 
@@ -1745,6 +1754,10 @@ packages:
   powershell-utils@0.2.0:
     resolution: {integrity: sha512-ZlsFlG7MtSFCoc5xreOvBAozCJ6Pf06opgJjh9ONEv418xpZSAzNjstD36C6+JwOnfSqOW/9uDkqKjezTdxZhw==}
     engines: {node: '>=20'}
+
+  qrcode-terminal@0.12.0:
+    resolution: {integrity: sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ==}
+    hasBin: true
 
   react-dom@19.2.8:
     resolution: {integrity: sha512-rVprimfGBG3DR+Tq0IQG2DT5PxKth1WIGDmj5yPmlzr4YBe7uyE+Du4oVqTDXZSHGGGXRtTJEGSSePyQCMBglQ==}
@@ -3515,6 +3528,8 @@ snapshots:
     dependencies:
       argparse: 2.0.1
 
+  jsqr@1.4.0: {}
+
   koffi@3.1.6:
     optionalDependencies:
       '@koromix/koffi-darwin-arm64': 3.1.6
@@ -3628,6 +3643,8 @@ snapshots:
   powershell-utils@0.1.0: {}
 
   powershell-utils@0.2.0: {}
+
+  qrcode-terminal@0.12.0: {}
 
   react-dom@19.2.8(react@18.3.1):
     dependencies:

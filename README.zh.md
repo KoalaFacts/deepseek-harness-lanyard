@@ -25,10 +25,11 @@ export DSH_PAIRING_TOKEN="$(node -e "console.log(require('crypto').randomBytes(2
 dsh --profile web --host 0.0.0.0 --pairing-token-env DSH_PAIRING_TOKEN
 ```
 
-启动时会打印配对链接：
+启动时会打印配对链接，以及它对应的二维码：
 
 ```
 lanyard: pair a device by opening https://192.168.1.5:3080/#auth=<token> once
+lanyard: or scan this with the phone
 ```
 
 ### 命令行参数
@@ -44,7 +45,9 @@ lanyard: pair a device by opening https://192.168.1.5:3080/#auth=<token> once
 
 ## 手机这边
 
-把打印出来的链接打开一次。页面会把令牌存下来，同时从地址栏里抹掉，之后每次访问都自动带上，直接输 `https://192.168.1.5:3080` 就能进。想用起来更像个 App，可以添加到主屏幕。
+拿手机对着终端里的二维码扫一下，配对就算完成了。令牌是二十几个随机字符，没人应该拿手机键盘去敲它。（链接也一并打印出来了，想发给自己也行。）
+
+扫完之后，页面会把令牌存下来，同时从地址栏里抹掉，之后每次访问都自动带上，直接输 `https://192.168.1.5:3080` 就能进。想用起来更像个 App，可以添加到主屏幕。
 
 有三件事需要心里有数：
 

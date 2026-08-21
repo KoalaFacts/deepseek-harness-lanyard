@@ -25,10 +25,11 @@ export DSH_PAIRING_TOKEN="$(node -e "console.log(require('crypto').randomBytes(2
 dsh --profile web --host 0.0.0.0 --pairing-token-env DSH_PAIRING_TOKEN
 ```
 
-The pairing link is printed on startup:
+On startup it prints the pairing link and a QR code of it:
 
 ```
 lanyard: pair a device by opening https://192.168.1.5:3080/#auth=<token> once
+lanyard: or scan this with the phone
 ```
 
 ### Flags
@@ -44,7 +45,9 @@ The token is named by **reference**, never by value, so no configuration surface
 
 ## On the phone
 
-Open the printed link once. The page stores the token, strips it from the address bar, and presents it on every later visit — so plain `https://192.168.1.5:3080` works from then on. Add it to your home screen if you want it to open like an app.
+Point the camera at the QR code in the terminal. That is the whole pairing step — the token is a couple of dozen random characters, and nobody should be typing that on a phone keyboard. (The link is printed too, if you would rather send it to yourself.)
+
+The page then stores the token, strips it from the address bar, and presents it on every later visit, so plain `https://192.168.1.5:3080` works from then on. Add it to your home screen if you want it to open like an app.
 
 Three things to expect:
 

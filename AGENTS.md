@@ -85,6 +85,7 @@ Inherited from the harness; follow them so this reads like the code it composes 
 - **Secrets travel as credential references, never values.** Config surfaces are echoed by `dsh --dump-config`, the plugin-inventory RPC, and crash dumps.
 - **`README.md` and `README.zh.md` are a pair.** A user-visible change updates both, following the harness's bilingual docs convention.
 - ESM, `strict: true`, `.ts` extensions on local relative imports. Every module and export carries concise JSDoc for its non-obvious contract; do not restate the code.
+- **Dependency weight is part of the choice.** This runs inside someone's `dsh` install, so a runtime dependency's own tree matters: the terminal QR uses `qrcode-terminal` (zero dependencies) rather than `qrcode`, which pulls `yargs` and `pngjs`.
 - **Peer dependencies are declared `optional`** because the *installation* provides them, not the profile. No version range can express the supported window while upstream ships prereleases — npm semver admits a prerelease only when a comparator shares its exact `major.minor.patch`. Compatibility is enforced at load and in CI, not by the range.
 
 ## Verification

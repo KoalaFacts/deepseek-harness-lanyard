@@ -18,6 +18,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import qrcodeTerminal from 'qrcode-terminal'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { injectPairingBootstrap } from './browser-auth.ts'
 import { resolvePairingToken } from './credentials.ts'
@@ -54,12 +55,19 @@ export interface Config {
   pairingToken?: string
   /** Print the pairing line once the tree has settled. */
   printPairingUrl: boolean
+  /**
+   * Draw the pairing link as a QR code beneath it. The link carries a 24-byte
+   * token in its fragment, which is miserable to type on a phone keyboard;
+   * scanning is the point of this plugin's whole workflow.
+   */
+  printPairingQr: boolean
 }
 
 export const Config: z<Config> = z.object({
   pairingTokenEnv: z.string(),
   pairingToken: z.string(),
   printPairingUrl: z.boolean().default(true),
+  printPairingQr: z.boolean().default(true),
 })
 
 /** What the pairing line says for one bind, or undefined when there is nothing to pair. */
@@ -68,6 +76,29 @@ export interface PairingAnnouncement {
   local?: string
   /** The pairing link to open once on the other device. */
   pair?: string
+}
+
+/**
+ * Render a pairing link as a QR code for the terminal.
+ * @param link - the pairing URL to encode, token fragment included.
+ * @returns the rendered block, drawn with half-height characters.
+ */
+export function renderPairingQr(link: string): Promise<string> {
+  return new Promise((resolve) => {
+    qrcodeTerminal.generate(link, { small: true }, (rendered: string) => { resolve(rendered) })
+  })
+}
+
+/**
+ * Whether to draw the QR code: asked for, and somewhere it can be read.
+ *
+ * Block characters piped into a log file are noise, and nobody scans a log
+ * file, so a non-terminal stdout skips it while the link itself still prints.
+ * @param wanted - the configured `printPairingQr`.
+ * @param isTerminal - whether stdout is a TTY.
+ */
+export function shouldDrawQr(wanted: boolean, isTerminal: boolean): boolean {
+  return wanted && isTerminal
 }
 
 /**
@@ -104,23 +135,27 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!config.printPairingUrl) return
   const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
   const lanAddress = runtime?.lanAddresses[0]
-  const announce = (): void => {
+  const announce = async (): Promise<void> => {
     const { scheme, port } = ctx.webServer as unknown as SchemeAwareServer
     const lines = pairingAnnouncement(scheme ?? 'http', port, lanAddress, token)
     if (lines.local !== undefined) console.log(`lanyard: serving TLS — the local URL is ${lines.local}`)
-    if (lines.pair !== undefined) console.log(`lanyard: pair a device by opening ${lines.pair} once`)
+    if (lines.pair === undefined) return
+    console.log(`lanyard: pair a device by opening ${lines.pair} once`)
+    if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
+    console.log('lanyard: or scan this with the phone')
+    console.log(await renderPairingQr(lines.pair))
   }
   // Same readiness contract as the shipped URL line: wait for the Loader tree,
   // or print at once in a hand-built context that has no Loader.
   const settled = ctx.get('loader')?.await()
   if (settled === undefined) {
-    announce()
+    await announce()
     return
   }
-  void settled.then(() => {
+  void settled.then(async () => {
     // The tree can be disposed while the boot was in flight (an early SIGTERM);
     // a pairing link for a dead server would only mislead.
-    if (ctx.get('webServer') !== undefined) announce()
+    if (ctx.get('webServer') !== undefined) await announce()
     // Loader reports a failed boot; this row only stays quiet.
   }, () => {})
 }
