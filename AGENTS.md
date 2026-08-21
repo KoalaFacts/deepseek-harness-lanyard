@@ -29,7 +29,7 @@ npx vitest run -t 'refuses an anonymous LAN peer'
 
 Useful environment variables:
 
-- `DSH_E2E_VERSION` — a `dsh` version, or `newest` to track the registry. Empty is treated as unset.
+- `DSH_E2E_VERSION` — a dist-tag or exact version. Defaults to `latest`; empty is treated as unset.
 - `DSH_E2E_KEEP=1` — keep the throwaway workspace for inspection.
 - `LANYARD_CHROMIUM` — a Chromium binary, when the machine's build does not match this Playwright version.
 
@@ -100,4 +100,8 @@ Four layers, each covering what the one below cannot:
 
 Both e2e suites exit **2 with a loud SKIPPED message** where they cannot run (no LAN interface, no Playwright) rather than passing vacuously.
 
-CI runs all four on pull requests; a nightly re-runs the e2e against the newest published `dsh` with the pinned one beside it, so a failure says whether it is upstream drift or a regression here.
+**Nothing pins `dsh`.** A plugin that only works against one frozen release is not working, and pinning the CLI would not pin anything anyway — `dsh` floats its own dependencies through `^` ranges. The suites install a dist-tag: `latest` by default, which is what a person installing today gets, and the nightly adds `next`, upstream's prerelease line, so a breaking change surfaces before it reaches users.
+
+An install that cannot resolve is not a test result. `dsh` publishes as a wave of packages that depend on each other by range, so between the first and last publish its own graph is briefly unresolvable; the suites recognise that and exit 2 SKIPPED rather than reporting a failure nobody can act on. A missing version of the package actually requested stays a real error — see `tests/install-classification.spec.ts`.
+
+CI runs all four on pull requests, and the nightly re-runs the e2e on both channels.

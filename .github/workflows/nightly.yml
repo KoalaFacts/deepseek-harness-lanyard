@@ -1,16 +1,16 @@
 name: nightly
 
-# Push CI already runs the e2e against a pinned dsh release. This exists for
-# the other failure mode: this plugin composes against PUBLISHED
-# @deepseek-ai/dsh packages that move on their own schedule, and it replaces
-# two shipped rows — so an upstream release can break it while nothing in this
-# repo changes. That is not hypothetical; it is how the shipped --no-open flag
-# went missing once already.
+# Push CI runs the e2e against `latest` — what a person installing dsh today
+# gets. This exists for the other failure mode: this plugin composes against
+# PUBLISHED @deepseek-ai/dsh packages that move on their own schedule, and it
+# replaces two shipped rows, so an upstream release can break it while nothing
+# in this repo changes. That is how the shipped --no-open flag went missing.
 #
-# So the nightly tracks the newest published release, and runs the pinned one
-# beside it to keep a failure interpretable:
-#   newest fails, pinned passes  → upstream drift, this plugin needs updating
-#   both fail                    → our regression, or infrastructure
+# Nothing is pinned here. A plugin that only works against a frozen version is
+# not working. The two legs are upstream's own release channels:
+#   latest → what users have now
+#   next   → upstream's prerelease line, so a breaking change surfaces here
+#            before it reaches anyone
 
 on:
   schedule:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       cli_version:
-        description: 'dsh version to test (blank = newest published)'
+        description: 'dsh version or dist-tag to test (blank = the matrix legs)'
         required: false
         type: string
 
@@ -35,7 +35,7 @@ jobs:
       # Both legs always run: which of them fails is the whole diagnostic.
       fail-fast: false
       matrix:
-        channel: [pinned, newest]
+        channel: [latest, next]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -48,23 +48,22 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: npx playwright install --with-deps chromium
 
-      # An empty DSH_E2E_VERSION means "the pinned default" — the harness
-      # treats unset and empty alike, because this is what CI writes.
       - name: Drive the gate over real TLS
         env:
-          DSH_E2E_VERSION: ${{ inputs.cli_version || (matrix.channel == 'newest' && 'newest' || '') }}
+          DSH_E2E_VERSION: ${{ inputs.cli_version || matrix.channel }}
         run: npm run test:e2e
 
       - name: Drive the pairing flow in a browser
         env:
-          DSH_E2E_VERSION: ${{ inputs.cli_version || (matrix.channel == 'newest' && 'newest' || '') }}
+          DSH_E2E_VERSION: ${{ inputs.cli_version || matrix.channel }}
         run: npm run test:e2e:browser
 
   contract:
     # The unit suite checks the webStartup contract against whatever the
-    # lockfile resolved, which is not what a user installs. Here it runs
-    # against the newest published bundle, which is.
-    name: row contract (newest bundle)
+    # lockfile resolved, which goes stale. Here it runs against upstream's
+    # current prerelease line — for the library packages that is `next`, since
+    # they leave `latest` on an abandoned 0.0.1 build.
+    name: row contract (next bundle)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -78,12 +77,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
-      - name: Install the newest published web-app bundle over the pin
-        run: |
-          newest=$(npm view @deepseek-ai/dsh-web-app versions --json | node -e \
-            'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=JSON.parse(s);console.log(Array.isArray(v)?v.at(-1):v)})')
-          echo "testing against @deepseek-ai/dsh-web-app@$newest"
-          pnpm add -D "@deepseek-ai/dsh-web-app@$newest"
+      - name: Install the current web-app bundle over the lockfile pin
+        run: pnpm add -D @deepseek-ai/dsh-web-app@next
 
       - run: npm run test
 
@@ -107,11 +102,14 @@ jobs:
               `The nightly run failed: ${run}`,
               '',
               'Read which leg failed before assuming a regression here:',
-              '- **newest fails, pinned passes** — an upstream release changed something this',
-              '  plugin depends on. It replaces the `web-startup` and `webserver` rows, so a',
-              '  renamed row id is skipped with only a warning, and a new `webStartup` field',
-              '  falls back to a schema default. Both fail quietly.',
-              '- **both fail** — a regression in this repo, or infrastructure.',
+              '- **`next` fails, `latest` passes** — an upstream prerelease changed something',
+              '  this plugin depends on, and it has not reached users yet. This plugin replaces',
+              '  the `web-startup` and `webserver` rows, so a renamed row id is skipped with',
+              '  only a warning, and a new `webStartup` field falls back to a schema default.',
+              '  Both fail quietly, which is what the row-contract test is for.',
+              '- **`latest` fails too** — it has reached users. Treat as urgent.',
+              '- **a job exited 2 with SKIPPED** — the registry could not serve a complete',
+              '  `dsh` graph at that moment. Nothing was tested; no action needed.',
             ].join('\n')
             // One tracking issue, commented on rather than reopened nightly.
             const open = await github.rest.issues.listForRepo({

@@ -27,38 +27,90 @@ import type { OutgoingHttpHeaders } from 'node:http'
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /**
- * The CLI release the suites pin to by default, so an ordinary run is
- * reproducible. `DSH_E2E_VERSION=newest` tracks the registry instead — what
- * the nightly does, because this plugin's real exposure is upstream drift.
+ * Which `dsh` to test against.
+ *
+ * Nothing is pinned. A plugin that only works against one frozen release is
+ * not working, and a pinned suite proves nothing about the install a person
+ * actually performs — it also cannot be pinned honestly, because `dsh` floats
+ * its own dependencies through `^` ranges, so pinning the CLI pins nothing
+ * below it.
+ *
+ * `latest` is the CLI's own dist-tag: what `npm i -g @deepseek-ai/dsh` gives
+ * you today. `DSH_E2E_VERSION` takes any other tag (`next` is upstream's
+ * prerelease channel, and what the nightly adds) or an exact version, for
+ * pinning deliberately while bisecting a failure.
  */
-const DEFAULT_CLI_VERSION = '0.1.1-rc.1'
+const DEFAULT_CLI_SPEC = 'latest'
+
+/** Resolve the requested release. An empty variable is unset, as CI writes it. */
+function resolveCliSpec(): string {
+  const requested = process.env.DSH_E2E_VERSION
+  return requested === undefined || requested === '' ? DEFAULT_CLI_SPEC : requested
+}
+
+export const CLI_SPEC: string = resolveCliSpec()
+export const TOKEN = 'e2e-token_0123456789-abcdef'
 
 /**
- * The most recently published version of a package.
+ * Registry states that mean "this could not be tested", not "this is broken".
  *
- * Not the `latest` dist-tag: these packages publish prereleases without moving
- * that tag, so `latest` still points at an ancient build. The registry lists
- * versions in publish order, which is the notion "newest release" means here.
- * @param name - the package to look up.
- * @returns the last published version string.
+ * `dsh` publishes as a wave of packages depending on each other by `^` range,
+ * so between the first and last publish its own graph does not resolve. That
+ * is an upstream publish state; it says nothing about this plugin, and
+ * reporting it as a test failure sends someone hunting a regression that does
+ * not exist.
  */
-export function newestPublished(name: string): string {
-  const listed: unknown = JSON.parse(run('npm', ['view', name, 'versions', '--json']))
-  const versions = Array.isArray(listed) ? (listed as string[]) : [String(listed)]
-  const newest = versions.at(-1)
-  if (newest === undefined) throw new Error(`no published versions found for ${name}`)
-  return newest
+export const CLI_PACKAGE = '@deepseek-ai/dsh'
+
+/**
+ * The dependency an install failure could not resolve, or undefined when the
+ * failure was something else.
+ * @param reported - the failing command's combined output.
+ * @returns the package name, without the range that follows it.
+ */
+export function unresolvedDependency(reported: string): string | undefined {
+  const missing = /No matching version found for (\S+)/.exec(reported)?.[1]
+  if (missing === undefined) return undefined
+  // "@scope/name@^1.2.3" — the range separator is the LAST @, since a scoped
+  // name opens with one.
+  const separator = missing.lastIndexOf('@')
+  return separator > 0 ? missing.slice(0, separator) : missing
 }
 
-/** Resolve the requested CLI release. An empty variable is unset, as CI writes it. */
-function resolveCliVersion(): string {
-  const requested = process.env.DSH_E2E_VERSION
-  if (requested === undefined || requested === '') return DEFAULT_CLI_VERSION
-  return requested === 'newest' ? newestPublished('@deepseek-ai/dsh') : requested
+/**
+ * Whether an install failure is upstream mid-publish rather than a real one.
+ *
+ * `dsh` publishes as a wave of packages that depend on each other by `^`
+ * range, so between the first and last publish its own graph does not resolve.
+ * That says nothing about this plugin. A missing version of the package we
+ * actually asked for is different — that is a bad spec, and a real error.
+ * @param reported - the failing command's combined output.
+ * @param requested - the package this suite asked to install.
+ */
+export function isUpstreamGraphIncomplete(reported: string, requested: string): boolean {
+  const unresolved = unresolvedDependency(reported)
+  return unresolved !== undefined && unresolved !== requested
 }
 
-export const CLI_VERSION: string = resolveCliVersion()
-export const TOKEN = 'e2e-token_0123456789-abcdef'
+/**
+ * Install the CLI under test, separating "upstream is unusable right now" from
+ * a real failure. Exits 2 with a loud SKIPPED for the former, like the suites
+ * do for a host with no LAN interface — never silently green.
+ * @param workspace - the throwaway directory to install into.
+ * @param spec - the version or dist-tag to install.
+ */
+function installCli(workspace: string, spec: string): void {
+  try {
+    run('pnpm', ['add', `${CLI_PACKAGE}@${spec}`], { cwd: workspace })
+  } catch (error) {
+    const reported = String(error)
+    if (!isUpstreamGraphIncomplete(reported, CLI_PACKAGE)) throw error
+    console.error(`lanyard e2e: ${CLI_PACKAGE}@${spec} does not currently install — the registry has no ${String(unresolvedDependency(reported))} it depends on.`)
+    console.error('lanyard e2e: that is an upstream publish state, not a verdict on this plugin. Nothing was tested.')
+    console.error('lanyard e2e: SKIPPED (not passed).')
+    process.exit(2)
+  }
+}
 
 const BOOT_TIMEOUT_MS = 180_000
 
@@ -202,9 +254,9 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     const { name, version } = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Manifest
     const tarball = join(workspace, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
 
-    console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${CLI_VERSION}`)
+    console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${CLI_SPEC}`)
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
-    run('pnpm', ['add', `@deepseek-ai/dsh@${CLI_VERSION}`], { cwd: workspace })
+    installCli(workspace, CLI_SPEC)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
     const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home, DSH_E2E_TOKEN: TOKEN }
 
