@@ -4,6 +4,7 @@ on:
   push:
     branches: ['**']
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
@@ -20,3 +21,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # typecheck, then the suite, then the build gate that loads the artifact.
       - run: npm run check
+
+  e2e:
+    # Installs the published dsh CLI and boots it with this plugin installed,
+    # then drives the gate from the runner's own LAN address over real TLS.
+    # Slower than `check` and needs the network, so it is its own job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npm run test:e2e

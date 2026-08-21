@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer, { type WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { generate } from 'selfsigned'
-import { GatedWebServer } from '../src/webserver.ts'
+import { GatedWebServer, REFUSAL_BODY } from '../src/webserver.ts'
 import { lanIpv4Addresses } from '../src/tls.ts'
 
 const TOKEN = 'pairing-token_0123456789-ab'
@@ -161,7 +161,7 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     const handler = await gatedHandler('/api')
     const anonymous = response()
     await handler(req('/api/session.list', '192.168.1.5'), anonymous)
-    expect([anonymous.status, anonymous.body]).toEqual([403, 'forbidden'])
+    expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
 
     for (const headers of [{ cookie: `dsh_auth=${TOKEN}` }, { authorization: `Bearer ${TOKEN}` }]) {
       const paired = response()
@@ -229,7 +229,8 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     let destroyed = false
     const socket = { write: (chunk: string) => written.push(chunk), destroy: () => { destroyed = true } }
     captured[0]?.handler(req('/api/events', '192.168.1.5'), socket, Buffer.alloc(0))
-    expect([written[0], destroyed, negotiated]).toEqual(['HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n', true, false])
+    expect([written[0]?.startsWith('HTTP/1.1 403 Forbidden'), written[0]?.endsWith(REFUSAL_BODY), destroyed, negotiated])
+      .toEqual([true, true, true, false])
   })
 })
 

@@ -64,6 +64,16 @@ export const DEFAULT_PRIVILEGED_METHODS: readonly string[] = [
  */
 export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = ['commands', 'goals', 'messageFeedback']
 
+/**
+ * Body of a refusal this gate issued.
+ *
+ * Deliberately not the bare `forbidden` that `dsh-client-connection`'s own Host
+ * fence answers with: an operator reading a 403, and the end-to-end suite
+ * deciding whether admission or the Host fence refused, cannot tell two
+ * identical bodies apart.
+ */
+export const REFUSAL_BODY = 'lanyard: forbidden'
+
 /** Routes served without admission: the browser must load the shell before it holds a token. */
 export const DEFAULT_PUBLIC_PATHS: readonly string[] = ['/plugins']
 
@@ -360,7 +370,7 @@ export class GatedWebServer extends WebServer {
       handler: async (req, res) => {
         if (!this.permits(req, route.path)) {
           res.writeHead(403)
-          res.end('forbidden')
+          res.end(REFUSAL_BODY)
           return
         }
         await inner(req, res)
@@ -381,7 +391,7 @@ export class GatedWebServer extends WebServer {
       ...route,
       handler: (req, socket, head) => {
         if (!this.permits(req, route.path)) {
-          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
           socket.destroy()
           return
         }

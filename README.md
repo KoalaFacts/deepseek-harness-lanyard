@@ -126,14 +126,37 @@ Found while building this, verified, and deliberately left alone — each is a h
 - **`host.listDirectory` / `host.createDirectory` are unpinned** while `host.pickDirectory` / `host.openPath` are, so a paired device can enumerate the host filesystem and `mkdir`. Pinning them by default would break the browse-mode directory picker, which is the surface a remote device is *supposed* to use — so the choice is yours: add them to `privilegedMethods` if your deployment does not need remote directory browsing.
 - **`/api/respond` is unpinned**, so a paired device can answer approval prompts. Add it to `privilegedMethods` to keep approvals at the machine.
 
-## Development
+## Verifying it
 
 ```sh
 pnpm install
-npm run check      # typecheck, test, build (the build gate loads the artifact)
+npm run check      # typecheck, unit suite, build (the build gate loads the artifact)
+npm run test:e2e   # boot a real dsh with this plugin and drive the gate
 ```
 
-The suite runs against published `@deepseek-ai/dsh-*` packages, so no harness checkout is needed. One test connects to the machine's own LAN address to prove TLS preserves the peer address; it is skipped, not silently passed, on a host with no non-loopback IPv4.
+`npm run check` runs against published `@deepseek-ai/dsh-*` packages, so no harness checkout is needed. One test connects to the machine's own LAN address to prove TLS preserves the peer address; it is skipped, not silently passed, on a host with no non-loopback IPv4.
+
+`npm run test:e2e` is the one that answers "does this actually work". It packs the plugin as a publishable tarball, installs the **published** `@deepseek-ai/dsh` CLI into a throwaway `DSH_HOME`, runs `dsh plugin add`, boots `dsh --profile web --host 0.0.0.0`, and then drives the running server from the machine's own LAN address over real TLS:
+
+```
+  ok   the bundle joined the profile layer stack
+  ok   the replacement provider owns the command line
+  ok   and still offers the shipped flags it replaced
+  ok   the pairing link names the LAN address, the TLS scheme, and the token
+  ok   an anonymous LAN peer is refused
+  ok   a LAN peer with the wrong token is refused
+  ok   a paired LAN peer reaches the api
+  ok   a Bearer token is accepted too
+  ok   the configuration plane stays at the machine, even for a paired device
+  ok   an unclassified Gateway namespace is refused for a paired device
+  ok   the uncapped dev reload channel is refused for a paired device
+  ok   a source map is refused anonymously
+  ok   the loopback peer reaches the configuration plane
+  ok   the shell loads for an anonymous LAN peer
+  ok   and carries the pairing bootstrap, so the link can adopt the token
+```
+
+Two deliberate choices in that script. It tests against the **published** CLI rather than a harness checkout, because a source checkout composes something no user runs — and testing against published packages is what caught a shipped flag going missing. And it distinguishes a refusal by *this gate* from one by `dsh-client-connection`'s own Host fence, which answers 403 as well; without that distinction several checks passed for the wrong reason.
 
 ## License
 
