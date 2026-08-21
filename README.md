@@ -1,4 +1,4 @@
-# lanyard
+# DeepSeek Harness Lanyard
 
 Secure LAN access for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web GUI: a pairing token and self-signed TLS, shipped as an out-of-tree `dsh` plugin.
 
