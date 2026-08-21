@@ -1,8 +1,11 @@
 name: ci
 
 on:
+  # A branch with an open pull request would otherwise run everything twice —
+  # two chromium installs and two full dsh boots per push. Pull requests carry
+  # branch coverage; push covers the default branch after a merge.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
