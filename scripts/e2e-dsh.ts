@@ -3,14 +3,14 @@
  * a plugin, the patch really takes the seats it disables, and a paired device
  * on the LAN reaches exactly what it should over real TLS.
  *
- * Usage:  node scripts/e2e-dsh.mjs
- *         DSH_E2E_VERSION=0.1.1-rc.1 node scripts/e2e-dsh.mjs
- *         DSH_E2E_KEEP=1 node scripts/e2e-dsh.mjs   (keep the workspace)
+ * Usage:  node scripts/e2e-dsh.ts
+ *         DSH_E2E_VERSION=0.1.1-rc.1 node scripts/e2e-dsh.ts
+ *         DSH_E2E_KEEP=1 node scripts/e2e-dsh.ts   (keep the workspace)
  */
 
 import {
   TOKEN, admitted, probe, recorder, refused, requireLan, run, withDshDeployment,
-} from './dsh-harness.mjs'
+} from './dsh-harness.ts'
 
 const lan = requireLan()
 const { check, report } = recorder()

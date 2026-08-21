@@ -176,6 +176,8 @@ npm run test:e2e:browser   # do the pairing flow in a real browser
 
 Set `LANYARD_CHROMIUM=/path/to/chrome` when the machine already provides a Chromium whose build does not match this Playwright version, so the suite runs without downloading a second browser.
 
+Both suites are TypeScript run directly by Node, which strips the types itself — no build step, no runner dependency, and `npm run typecheck` covers them alongside `src/` and `tests/`. That needs Node ≥ 22.18, which the package already requires.
+
 Two deliberate choices in the HTTP script. It tests against the **published** CLI rather than a harness checkout, because a source checkout composes something no user runs — and testing against published packages is what caught a shipped flag going missing. And it distinguishes a refusal by *this gate* from one by `dsh-client-connection`'s own Host fence, which answers 403 as well; without that distinction several checks passed for the wrong reason.
 
 ## License

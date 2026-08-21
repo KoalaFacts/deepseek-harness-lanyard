@@ -16,28 +16,43 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+  name: string
+  exports: Record<string, unknown>
+}
 
 for (const subpath of Object.keys(manifest.exports)) {
   if (subpath.endsWith('.json') || subpath.endsWith('.yml')) continue
   const specifier = subpath === '.' ? manifest.name : `${manifest.name}${subpath.slice(1)}`
-  const loaded = await import(specifier)
+  const loaded = await import(specifier) as Record<string, unknown>
   assert.ok(Object.keys(loaded).length > 0, `${specifier} loaded but exported nothing`)
 }
 
-const { pairingBootstrapScript } = await import(`${manifest.name}`)
+const { pairingBootstrapScript } = await import(manifest.name) as {
+  pairingBootstrapScript: () => string
+}
+
+/** What the fake page recorded while the built bootstrap ran against it. */
+interface FakePage {
+  stored: Record<string, string>
+  cookie: string
+}
+
 const token = 'pairing-token_0123456789-ab'
-const page = { stored: {}, cookie: '' }
+const page: FakePage = { stored: {}, cookie: '' }
 runInNewContext(pairingBootstrapScript().replace(/^<script>/, '').replace(/<\/script>$/, ''), {
   URLSearchParams,
   location: { hash: `#auth=${token}`, pathname: '/', search: '', protocol: 'https:' },
   localStorage: {
-    getItem: key => page.stored[key] ?? null,
-    setItem: (key, value) => { page.stored[key] = value },
+    getItem: (key: string): string | null => page.stored[key] ?? null,
+    setItem: (key: string, value: string): void => { page.stored[key] = value },
   },
-  document: { set cookie(value) { page.cookie = value }, get cookie() { return page.cookie } },
-  history: { replaceState: () => {} },
+  document: {
+    set cookie(value: string) { page.cookie = value },
+    get cookie(): string { return page.cookie },
+  },
+  history: { replaceState: (): void => {} },
 })
 assert.equal(page.cookie, `dsh_auth=${token}; path=/; SameSite=Strict; Secure`,
   'the built pairing bootstrap did not publish the cookie; the build rewrote its serialized body')
