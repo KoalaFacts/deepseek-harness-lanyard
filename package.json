@@ -58,7 +58,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run build",
-    "test:e2e": "node scripts/e2e-dsh.mjs"
+    "test:e2e": "node scripts/e2e-dsh.mjs",
+    "test:e2e:browser": "node scripts/e2e-browser.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -81,6 +82,7 @@
     "@deepseek-ai/dsh-web-app": "0.1.0-rc.8",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.19.0",
+    "playwright": "^1.62.1",
     "typescript": "~5.9.3",
     "vitest": "^4.1.8",
     "yaml": "^2.9.0"

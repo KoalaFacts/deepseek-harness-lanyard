@@ -39,3 +39,22 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: npm run test:e2e
+
+  browser:
+    # The pairing flow as a person performs it: open the link once in a real
+    # browser, then use the bare address. Everything else proves the bootstrap
+    # as source; only a browser proves the cookie is attached to a real fetch.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:browser

@@ -132,6 +132,7 @@ Found while building this, verified, and deliberately left alone — each is a h
 pnpm install
 npm run check      # typecheck, unit suite, build (the build gate loads the artifact)
 npm run test:e2e   # boot a real dsh with this plugin and drive the gate
+npm run test:e2e:browser   # do the pairing flow in a real browser
 ```
 
 `npm run check` runs against published `@deepseek-ai/dsh-*` packages, so no harness checkout is needed. One test connects to the machine's own LAN address to prove TLS preserves the peer address; it is skipped, not silently passed, on a host with no non-loopback IPv4.
@@ -156,7 +157,26 @@ npm run test:e2e   # boot a real dsh with this plugin and drive the gate
   ok   and carries the pairing bootstrap, so the link can adopt the token
 ```
 
-Two deliberate choices in that script. It tests against the **published** CLI rather than a harness checkout, because a source checkout composes something no user runs — and testing against published packages is what caught a shipped flag going missing. And it distinguishes a refusal by *this gate* from one by `dsh-client-connection`'s own Host fence, which answers 403 as well; without that distinction several checks passed for the wrong reason.
+`npm run test:e2e:browser` covers the half no amount of source-level testing can. Everything else proves the bootstrap as *source* — unit tests evaluate the emitted string against fake globals, the build gate evaluates the built artifact, the HTTP suite finds it in the served index. Only a browser proves that `document.cookie` accepts the attribute string, that the fragment is really stripped, that the cookie is attached to a same-origin `/api` fetch over a self-signed origin, and that it survives a reload at the bare address. Chromium is driven through exactly what a person does:
+
+```
+  ok   an unpaired browser is refused by the gate
+  ok   and stored nothing to present later
+  ok   the browser adopted the token from the fragment
+  ok   and republished it as the pairing cookie
+  ok   the fragment was stripped from the address bar
+  ok   leaving the bare authority
+  ok   the paired page reaches the api, cookie attached by the browser alone
+  ok   a later visit to the bare address needs no link
+  ok   and still reaches the api
+  ok   while the configuration plane stays refused, even paired
+  ok   a malformed fragment token is not stored
+  ok   and never reaches the cookie it could have extended
+```
+
+Set `LANYARD_CHROMIUM=/path/to/chrome` when the machine already provides a Chromium whose build does not match this Playwright version, so the suite runs without downloading a second browser.
+
+Two deliberate choices in the HTTP script. It tests against the **published** CLI rather than a harness checkout, because a source checkout composes something no user runs — and testing against published packages is what caught a shipped flag going missing. And it distinguishes a refusal by *this gate* from one by `dsh-client-connection`'s own Host fence, which answers 403 as well; without that distinction several checks passed for the wrong reason.
 
 ## License
 
