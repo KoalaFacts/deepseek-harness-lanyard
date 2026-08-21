@@ -1,7 +1,17 @@
 {
   "name": "@koalafacts/deepseek-harness-lanyard",
   "version": "0.1.0",
-  "description": "Secure LAN access for the DeepSeek Harness web GUI: pairing-token admission and self-signed TLS, as an out-of-tree dsh plugin",
+  "description": "Use the DeepSeek Harness web GUI from your phone: pair a device once, then reach dsh over your own network",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "mobile",
+    "phone",
+    "remote-access",
+    "lan",
+    "pairing"
+  ],
   "license": "MIT",
   "type": "module",
   "repository": {

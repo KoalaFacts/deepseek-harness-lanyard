@@ -1,6 +1,8 @@
 /**
- * `@koalafacts/deepseek-harness-lanyard` — secure LAN access for the DeepSeek Harness web GUI,
- * as an out-of-tree `dsh` plugin bundle.
+ * `@koalafacts/deepseek-harness-lanyard` — use the DeepSeek Harness web GUI
+ * from your phone, as an out-of-tree `dsh` plugin bundle. Everything here
+ * exists to make that one thing safe; nothing here is a general-purpose
+ * gateway.
  *
  * The bundle is composed through `cordis.patch.yml`, which loads each row from
  * its own subpath export; this module is the package's public surface for

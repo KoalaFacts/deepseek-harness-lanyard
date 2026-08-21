@@ -64,7 +64,7 @@ lanyard: pair a device by opening https://192.168.1.5:3080/#auth=<token> once
 
 ## 配置
 
-默认配置是安全的，没列出来的一律拒绝。要覆盖，就在 profile 的 `cordis.patch.yml` 里把整个 `lanyard-webserver` 条目重写一遍。
+这些基本用不上。之所以做成配置项，是因为下面这些路径归客户端包所有，而 Harness 又要求凡是各处部署可能不一样的值都必须可配。默认配置是安全的，没列出来的一律拒绝。要覆盖，就在 profile 的 `cordis.patch.yml` 里把整个 `lanyard-webserver` 条目重写一遍。
 
 | 字段 | 默认值 |
 |---|---|

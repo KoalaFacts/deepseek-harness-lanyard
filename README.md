@@ -62,7 +62,7 @@ Pairing authenticates a *device*, not a person at the machine. So a paired phone
 
 ## Configuration
 
-Defaults are safe and deny by default; override in your profile's `cordis.patch.yml`, restating the whole `lanyard-webserver` row.
+You will almost certainly never touch these. They exist because the paths below belong to client packages rather than to this plugin, and the harness requires anything a deployment might set differently to be a config field. Defaults are safe and deny by default; override in your profile's `cordis.patch.yml`, restating the whole `lanyard-webserver` row.
 
 | Field | Default |
 |---|---|

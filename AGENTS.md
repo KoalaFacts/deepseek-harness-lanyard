@@ -4,7 +4,9 @@ Guidance for coding agents (including Claude Code) working in this repository. `
 
 ## What this is
 
-`@koalafacts/deepseek-harness-lanyard` is an **out-of-tree `dsh` plugin bundle** whose purpose is using the `dsh` web GUI from a phone on your own network. It makes binding `0.0.0.0` safe with a pairing token plus self-signed TLS. It publishes to npm and installs with `dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard`.
+`@koalafacts/deepseek-harness-lanyard` is an **out-of-tree `dsh` plugin bundle** with exactly one purpose: letting its author use the `dsh` web GUI from a phone, on a home network. It publishes to npm and installs with `dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard`.
+
+Everything in it — the pairing token, the self-signed TLS, the loopback pins — exists to make that one thing safe enough to leave running. **It is not a general-purpose gateway, reverse proxy, or auth layer, and should not grow into one.** A change that does not serve someone opening the GUI on their phone is out of scope, however reasonable it sounds; the security surface here is small because the use case is small, and that is the whole design.
 
 **It changes no harness source, and must not start.** It composes over the shipped tree through `cordis.patch.yml`, which is the documented extension mechanism ([bundle authoring](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/user/develop/basic/publish.md)). Everything here is judged by that constraint.
 
