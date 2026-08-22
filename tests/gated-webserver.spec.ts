@@ -9,7 +9,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer, { type WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { generate } from 'selfsigned'
-import { GatedWebServer, REFUSAL_BODY } from '../src/webserver.ts'
+import { assertRegistrarsWrapped, GatedWebServer, REFUSAL_BODY } from '../src/webserver.ts'
+import type { Config } from '../src/webserver.ts'
 import { lanIpv4Addresses } from '../src/tls.ts'
 
 const TOKEN = 'pairing-token_0123456789-ab'
@@ -276,5 +277,117 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
       socket.on('error', reject)
     })
     expect(negotiated).toMatch(/^TLSv1/)
+  })
+})
+
+// The fallback seat answers every request no named route matched — in the
+// shipped Web composition that is dsh-host-frontend-static serving the built
+// SPA. It is a third registration path, so overriding register/registerUpgrade
+// alone left the whole frontend reachable from the LAN with no token.
+describe('the fallback seat', () => {
+  /** The handler the gate actually handed to `WebServer.registerFallback`. */
+  async function gatedFallback(config: Partial<Config> = {}): Promise<WebRoute['handler']> {
+    const captured: WebRoute['handler'][] = []
+    const spy = vi.spyOn(WebServer.prototype, 'registerFallback')
+      .mockImplementation((handler: WebRoute['handler']) => { captured.push(handler); return () => {} })
+    ctx = new Context()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN, ...config }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    server.registerFallback((_q, res) => { res.writeHead(200); res.end('DIST') })
+    spy.mockRestore()
+    const handler = captured.at(-1)
+    if (handler === undefined) throw new Error('the gate never reached WebServer.registerFallback')
+    return handler
+  }
+
+  it('serves the built frontend to an anonymous LAN peer, so a first pairing load resolves', async () => {
+    const handler = await gatedFallback()
+    for (const path of ['/', '/assets/index-ClqxG24t.js', '/assets/vendor-CjyC-hUb.css']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 200, 'DIST'])
+    }
+  })
+
+  it('never lets a source map ride the public exemption, however it is spelled', async () => {
+    const handler = await gatedFallback()
+    // The literal, then the escape dsh-host-frontend-static decodes back to it.
+    for (const path of ['/assets/index.js.map', '/assets/index.js.ma%70', '/assets/index.js%2Emap']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+      const paired = response()
+      await handler(req(path, '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+      expect([path, paired.status]).toEqual([path, 200])
+    }
+  })
+
+  it('denies a pathname whose escapes do not decode rather than letting it through', async () => {
+    const handler = await gatedFallback()
+    const malformed = response()
+    await handler(req('/assets/%E0%A4%A.js', '192.168.1.5'), malformed)
+    expect([malformed.status, malformed.body]).toEqual([403, REFUSAL_BODY])
+  })
+
+  it('gates the seat entirely when a deployment configures it that way', async () => {
+    const handler = await gatedFallback({ fallbackAdmission: 'gated' })
+    const anonymous = response()
+    await handler(req('/assets/index.js', '192.168.1.5'), anonymous)
+    expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
+    const paired = response()
+    await handler(req('/assets/index.js', '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+    expect(paired.status).toBe(200)
+  })
+
+  it('pins the seat to this machine when a deployment configures it that way', async () => {
+    const handler = await gatedFallback({ fallbackAdmission: 'loopback-only' })
+    const paired = response()
+    await handler(req('/assets/index.js', '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+    expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
+    const local = response()
+    await handler(req('/assets/index.js', '127.0.0.1'), local)
+    expect(local.status).toBe(200)
+  })
+})
+
+// A percent-encoded suffix slipped the exclusion on the client-bundle prefix
+// too: dsh-client-modules decodes the pathname before resolving a file.
+describe('percent-encoded paths on a public route', () => {
+  it('excludes a source map under the bundle prefix however it is spelled', async () => {
+    for (const path of ['/plugins/ui-theme/client.js.map', '/plugins/ui-theme/client.js.ma%70']) {
+      const captured: WebRoute[] = []
+      const spy = vi.spyOn(WebServer.prototype, 'register')
+        .mockImplementation((route: WebRoute) => { captured.push(route); return () => {} })
+      ctx = new Context()
+      await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN }).await()
+      const server = ctx.get('webServer') as GatedWebServer
+      server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
+      spy.mockRestore()
+      const handler = captured.at(-1)?.handler
+      if (handler === undefined) throw new Error('the gate never reached WebServer.register')
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+      await ctx.fiber.dispose(); ctx = undefined
+    }
+  })
+})
+
+// The guard whose absence is the reason the fallback seat went ungated: some of
+// the seats wrapped looks exactly like all of them from inside this class.
+describe('assertRegistrarsWrapped', () => {
+  it('accepts the WebServer this plugin was written against', () => {
+    expect(() => { assertRegistrarsWrapped() }).not.toThrow()
+  })
+
+  it('fails the load when the harness grows a registration seat this gate does not wrap', () => {
+    class Grown {
+      register(): void {}
+      registerUpgrade(): void {}
+      registerFallback(): void {}
+      registerStream(): void {}
+    }
+    expect(() => { assertRegistrarsWrapped(Grown.prototype) })
+      .toThrow(/"registerStream".*does not put behind admission/s)
   })
 })

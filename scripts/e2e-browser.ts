@@ -23,6 +23,7 @@
 
 import type { BrowserType, Page } from 'playwright'
 import { TOKEN, recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
+import { REFUSAL_BODY } from '../src/webserver.ts'
 
 const lan = requireLan()
 const { check, report } = recorder()
@@ -53,7 +54,7 @@ const apiAnswer = (page: Page, path: string): Promise<PageAnswer> => page.evalua
 }, path)
 
 /** Whether the gate refused the page's own fetch. */
-const pageRefused = (answer: PageAnswer): boolean => answer.status === 403 && answer.body === 'lanyard: forbidden'
+const pageRefused = (answer: PageAnswer): boolean => answer.status === 403 && answer.body === REFUSAL_BODY
 
 /** Whether the page's fetch passed the gate, so a check reads as its own claim. */
 const pageAdmitted = (answer: PageAnswer): boolean => !pageRefused(answer)
