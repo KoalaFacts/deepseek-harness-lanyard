@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  # A branch with an open pull request would otherwise run everything twice —
+  # two chromium installs and two full dsh boots per push. Pull requests carry
+  # branch coverage; push covers the default branch after a merge.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # typecheck, then the suite, then the build gate that loads the artifact.
+      - run: npm run check
+
+  e2e:
+    # Installs the published dsh CLI and boots it with this plugin installed,
+    # then drives the gate from the runner's own LAN address over real TLS.
+    # Slower than `check` and needs the network, so it is its own job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npm run test:e2e
+
+  browser:
+    # The pairing flow as a person performs it: open the link once in a real
+    # browser, then use the bare address. Everything else proves the bootstrap
+    # as source; only a browser proves the cookie is attached to a real fetch.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:browser

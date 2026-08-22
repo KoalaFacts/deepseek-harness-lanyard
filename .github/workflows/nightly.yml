@@ -1,0 +1,125 @@
+name: nightly
+
+# Push CI runs the e2e against `latest` — what a person installing dsh today
+# gets. This exists for the other failure mode: this plugin composes against
+# PUBLISHED @deepseek-ai/dsh packages that move on their own schedule, and it
+# replaces two shipped rows, so an upstream release can break it while nothing
+# in this repo changes. That is how the shipped --no-open flag went missing.
+#
+# Nothing is pinned here. A plugin that only works against a frozen version is
+# not working. The two legs are upstream's own release channels:
+#   latest → what users have now
+#   next   → upstream's prerelease line, so a breaking change surfaces here
+#            before it reaches anyone
+
+on:
+  schedule:
+    # 03:17 UTC — off the hour, where Actions scheduling is least congested.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      cli_version:
+        description: 'dsh version or dist-tag to test (blank = the matrix legs)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.channel }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      # Both legs always run: which of them fails is the whole diagnostic.
+      fail-fast: false
+      matrix:
+        channel: [latest, next]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: npx playwright install --with-deps chromium
+
+      - name: Drive the gate over real TLS
+        env:
+          DSH_E2E_VERSION: ${{ inputs.cli_version || matrix.channel }}
+        run: npm run test:e2e
+
+      - name: Drive the pairing flow in a browser
+        env:
+          DSH_E2E_VERSION: ${{ inputs.cli_version || matrix.channel }}
+        run: npm run test:e2e:browser
+
+  contract:
+    # The unit suite checks the webStartup contract against whatever the
+    # lockfile resolved, which goes stale. Here it runs against upstream's
+    # current prerelease line — for the library packages that is `next`, since
+    # they leave `latest` on an abandoned 0.0.1 build.
+    name: row contract (next bundle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install the current web-app bundle over the lockfile pin
+        run: pnpm add -D @deepseek-ai/dsh-web-app@next
+
+      - run: npm run test
+
+  report:
+    # A scheduled run that fails silently is decorative. Only for the schedule:
+    # a manual run has someone watching it.
+    name: report
+    needs: [e2e, contract]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Nightly e2e failed against the newest published dsh'
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            const body = [
+              `The nightly run failed: ${run}`,
+              '',
+              'Read which leg failed before assuming a regression here:',
+              '- **`next` fails, `latest` passes** — an upstream prerelease changed something',
+              '  this plugin depends on, and it has not reached users yet. This plugin replaces',
+              '  the `web-startup` and `webserver` rows, so a renamed row id is skipped with',
+              '  only a warning, and a new `webStartup` field falls back to a schema default.',
+              '  Both fail quietly, which is what the row-contract test is for.',
+              '- **`latest` fails too** — it has reached users. Treat as urgent.',
+              '- **a job exited 2 with SKIPPED** — the registry could not serve a complete',
+              '  `dsh` graph at that moment. Nothing was tested; no action needed.',
+            ].join('\n')
+            // One tracking issue, commented on rather than reopened nightly.
+            const open = await github.rest.issues.listForRepo({
+              ...context.repo, state: 'open', per_page: 100,
+            })
+            const existing = open.data.find(issue => issue.title === title)
+            if (existing === undefined) {
+              await github.rest.issues.create({ ...context.repo, title, body })
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: existing.number, body,
+              })
+            }

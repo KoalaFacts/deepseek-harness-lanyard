@@ -1,0 +1,125 @@
+{
+  "name": "@koalafacts/deepseek-harness-lanyard",
+  "version": "0.1.0",
+  "description": "Use the DeepSeek Harness web GUI from your phone: pair a device once, then reach dsh over your own network",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "mobile",
+    "phone",
+    "remote-access",
+    "lan",
+    "pairing"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KoalaFacts/deepseek-harness-lanyard.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./admission": {
+      "types": "./lib/types/admission.d.ts",
+      "default": "./lib/admission.js"
+    },
+    "./webserver": {
+      "types": "./lib/types/webserver.d.ts",
+      "default": "./lib/webserver.js"
+    },
+    "./tls": {
+      "types": "./lib/types/tls.d.ts",
+      "default": "./lib/tls.js"
+    },
+    "./startup": {
+      "types": "./lib/types/startup.d.ts",
+      "default": "./lib/startup.js"
+    },
+    "./pairing": {
+      "types": "./lib/types/pairing.d.ts",
+      "default": "./lib/pairing.js"
+    },
+    "./keep-awake": {
+      "types": "./lib/types/keep-awake.d.ts",
+      "default": "./lib/keep-awake.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "prepare": "tsc -p tsconfig.build.json --noCheck",
+    "build": "tsc -p tsconfig.build.json && node scripts/verify-build.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "test:e2e": "node scripts/e2e-dsh.ts",
+    "test:e2e:browser": "node scripts/e2e-browser.ts"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5",
+    "@deepseek-ai/dsh-cmdline": ">=0.1.0-rc.7 <0.2.0",
+    "@deepseek-ai/dsh-credentials": ">=0.1.0-rc.7 <0.2.0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.7 <0.2.0",
+    "@deepseek-ai/dsh-subprocess": ">=0.1.0-rc.7 <0.2.0",
+    "@deepseek-ai/schemastery": ">=3.18.1 <4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-cmdline": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-credentials": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subprocess": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "selfsigned": "^3.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-credentials": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-web-app": "0.1.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^22.19.0",
+    "jsqr": "^1.4.0",
+    "playwright": "^1.62.1",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.8",
+    "yaml": "^2.9.0"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  }
+}

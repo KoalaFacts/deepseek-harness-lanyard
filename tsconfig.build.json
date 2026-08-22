@@ -1,0 +1,20 @@
+{
+  // The shipped artifact: JavaScript in lib/ and declarations in lib/types/,
+  // the layout the package `exports` map names. `rewriteRelativeImportExtensions`
+  // turns the source's `./admission.ts` specifiers into `./admission.js` on
+  // emit, so no bundler is involved in producing a loadable plugin.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    // Explicit, never inferred: TypeScript 6+ refuses to infer the common
+    // source directory, and an inferred rootDir would silently emit to
+    // lib/src/, breaking every path in the package `exports` map. A consumer
+    // installing from git builds with whatever TypeScript resolves there.
+    "rootDir": "src",
+    "outDir": "lib",
+    "declarationDir": "lib/types",
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"]
+}

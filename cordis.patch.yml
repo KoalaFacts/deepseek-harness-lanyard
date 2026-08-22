@@ -1,0 +1,71 @@
+# lanyard — secure LAN access for the dsh web GUI.
+#
+# This layer changes no harness source. It replaces two rows and adds three:
+# the command-line provider (which upstream uses to refuse `--host 0.0.0.0`)
+# and the HTTP carrier (which becomes a subclass that wraps every route
+# registration with pairing-token admission and terminates TLS in front of the
+# inherited server). Every other row — dsh-client-connection above all — keeps
+# running unmodified, because each registers its routes through ctx.webServer
+# and therefore passes through the gate.
+#
+# A patch replaces the targeted row's whole `config`, so each row below
+# restates every key it owns.
+
+# The stock command-line provider refuses --host 0.0.0.0 outright, because
+# without authentication that bind hands remote code execution to the network.
+# lanyard supplies the authentication, so its provider takes the seat and
+# replaces the refusal with the condition that makes the bind safe.
+- id: web-startup
+  disabled: true
+
+# The stock carrier steps aside; the gated one takes its host and port.
+- id: webserver
+  disabled: true
+
+- insert:
+    # Same seat as the disabled `web-startup` row: it injects cmdlineArgs and
+    # provides `webStartup`, so every flag-configured row downstream is
+    # unchanged.
+    - id: lanyard-startup
+      name: '@koalafacts/deepseek-harness-lanyard/startup'
+
+    # TLS material: generated once on the first all-interfaces boot and reused, so
+    # a paired device's accept-once certificate exception survives restarts.
+    - id: lanyard-tls
+      name: '@koalafacts/deepseek-harness-lanyard/tls'
+      inject: [webStartup]
+      config:
+        enabled: !!js (ctx.webStartup.host ?? '127.0.0.1') === '0.0.0.0'
+        dir: !!js dshHomePath('lanyard-tls')
+
+    # The gated carrier. It provides `webServer`, so every consumer that injects
+    # that service reaches this one instead of the disabled row above.
+    - id: lanyard-webserver
+      name: '@koalafacts/deepseek-harness-lanyard/webserver'
+      inject: [webStartup, lanyardTls, credentials]
+      config:
+        host: !!js ctx.webStartup.host ?? '127.0.0.1'
+        port: !!js ctx.webStartup.port ?? 3080
+        pairingTokenEnv: !!js ctx.webStartup.pairingTokenEnv
+        tlsCertPath: !!js ctx.lanyardTls.paths?.certPath
+        tlsKeyPath: !!js ctx.lanyardTls.paths?.keyPath
+
+    # Optional host sleep inhibitor: `--keep-awake` holds the platform's own
+    # facility (caffeinate / systemd-inhibit / SetThreadExecutionState) for the
+    # process lifetime so idle sleep cannot cut off running sessions or paired
+    # LAN devices.
+    - id: lanyard-keep-awake
+      name: '@koalafacts/deepseek-harness-lanyard/keep-awake'
+      inject: [webStartup, subprocess]
+      config:
+        enabled: !!js ctx.webStartup.keepAwake === true
+
+    # The browser half of the pairing exchange plus the pairing line. It injects
+    # webRuntime, so it activates after the bind-dependent LAN snapshot the
+    # shipped URL line uses — and announces the same one.
+    - id: lanyard-pairing
+      name: '@koalafacts/deepseek-harness-lanyard/pairing'
+      inject: [webServer, webRuntime, webStartup, credentials]
+      config:
+        pairingTokenEnv: !!js ctx.webStartup.pairingTokenEnv
+        printPairingUrl: true
