@@ -110,3 +110,30 @@ Both e2e suites exit **2 with a loud SKIPPED message** where they cannot run (no
 An install that cannot resolve is not a test result. `dsh` publishes as a wave of packages that depend on each other by range, so between the first and last publish its own graph is briefly unresolvable; the suites recognise that and exit 2 SKIPPED rather than reporting a failure nobody can act on. A missing version of the package actually requested stays a real error — see `tests/install-classification.spec.ts`.
 
 CI runs all four on pull requests, and the nightly re-runs the e2e on both channels.
+
+## Releasing
+
+`.github/workflows/release.yml` publishes to npm on a `v*` tag, authenticating with **npm trusted publishing (OIDC)**. No npm token is stored in this repository — the workflow exchanges a short-lived GitHub OIDC token for registry credentials, so there is nothing to leak or rotate.
+
+Cutting a release:
+
+```sh
+npm version patch          # or minor / major / prerelease
+git push origin main --follow-tags
+```
+
+The tag drives everything else. The workflow refuses a tag that disagrees with `package.json`, refuses a version already on the registry, then runs all four verification layers again before publishing — a tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a commit that passed last week can fail against today's upstream. A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
+
+`workflow_dispatch` runs the same gate with `dry_run` (default true) to exercise the pipeline without publishing.
+
+### One-time setup, which the workflow cannot do for itself
+
+OIDC cannot perform a package's **first** publish: npm requires the package to exist before a trusted publisher can be attached to it. So the first version is published by hand, once:
+
+1. Own the `@koalafacts` scope on npm — as an org or a user scope. Publishing into a scope you do not own fails with a 404 that reads like the package is missing.
+2. `npm login`, then `npm publish --access public` from a clean checkout. (A `0.0.0` placeholder works just as well if you would rather not spend the real version on it.)
+3. At `https://www.npmjs.com/package/@koalafacts/deepseek-harness-lanyard/access`, add a trusted publisher: owner `KoalaFacts`, repository `deepseek-harness-lanyard`, workflow `release.yml`. Leave the environment blank unless you also add one to the workflow — the two must agree exactly.
+
+After that every release goes through the tag. **The trusted publisher names this workflow by filename**, so renaming `release.yml` breaks publishing until the npm side is changed to match; that failure surfaces as an authentication error that says nothing about the rename.
+
+Two version floors are load-bearing and easy to misread if they drift: trusted publishing needs npm **≥ 11.5.1** and Node **≥ 22.14**. The npm bundled with Node 22 is older than that, so the workflow upgrades npm before publishing; without it the publish fails on authentication with an error that never mentions the version.
