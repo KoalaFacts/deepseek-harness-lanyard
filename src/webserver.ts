@@ -2,11 +2,14 @@
  * The gated carrier: a `WebServer` subclass adding pairing-token admission and
  * TLS without any change to the harness.
  *
- * Every consumer registers its routes through `ctx.webServer.register` and
- * `registerUpgrade`, so wrapping those two methods puts admission in front of
- * every route the composition serves — including `/api`, which
+ * Consumers contribute routes through three seats — `ctx.webServer.register`,
+ * `registerUpgrade`, and the single-owner `registerFallback` that answers
+ * everything no named route matched. Wrapping all three puts admission in
+ * front of every request the composition serves, including `/api`, which
  * `dsh-client-connection` registers verbatim and which therefore needs no
- * modification.
+ * modification. {@link assertRegistrarsWrapped} fails the load if a future
+ * harness grows a fourth, because an unwrapped seat serves the network with no
+ * gate at all and nothing else would notice.
  *
  * TLS is terminated here and the decrypted socket is handed to the inherited
  * HTTP server, which preserves `req.socket.remoteAddress` as the real client
@@ -96,6 +99,28 @@ export const DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES: readonly string[] = ['.map']
  */
 export const DEFAULT_LOOPBACK_ONLY_PATHS: readonly string[] = ['/plugins/events']
 
+/**
+ * Admission posture for one seat: served to anyone, gated on the pairing token,
+ * or pinned to a peer on this machine.
+ */
+export type Admission = 'public' | 'gated' | 'loopback-only'
+
+/**
+ * Posture of the fallback seat, which in the shipped Web composition is
+ * `dsh-host-frontend-static` serving the built SPA.
+ *
+ * Public by default, and deliberately so: the pairing token reaches the browser
+ * through the bootstrap injected into the index, and the index's own asset tags
+ * are discovered by the preload scanner before that inline script has run. A
+ * gated posture therefore refuses the first load of a freshly paired device —
+ * intermittently, and only the first time, which is the worst way for this to
+ * fail. The exempted surface is the built frontend, which carries no secret;
+ * {@link Config.publicPathExcludedSuffixes} still applies, so source maps never
+ * ride the exemption. A deployment serving something else from this seat can
+ * pin it with {@link Config.fallbackAdmission}.
+ */
+export const DEFAULT_FALLBACK_ADMISSION: Admission = 'public'
+
 /** How an `/api` endpoint's reachability is decided, as one deployment classified it. */
 export interface EndpointAuthority {
   /** Dot-form methods pinned to a loopback peer. */
@@ -137,6 +162,12 @@ export interface Config {
   publicPathExcludedSuffixes?: string[]
   /** Route paths no paired device may reach; defaults to the dev reload channel. */
   loopbackOnlyPaths?: string[]
+  /**
+   * Posture of the fallback seat — the handler answering every request no named
+   * route matched. See {@link DEFAULT_FALLBACK_ADMISSION} for why the built
+   * frontend is served publicly and when to pin it.
+   */
+  fallbackAdmission?: Admission
   /** Route prefix owning api requests; defaults to `dsh-client-connection`'s. */
   apiPathPrefix?: string
   /** Dot-form api methods pinned to a loopback peer. */
@@ -155,6 +186,8 @@ export const Config: z<Config> = z.object({
   publicPaths: z.array(String).default([...DEFAULT_PUBLIC_PATHS]),
   publicPathExcludedSuffixes: z.array(String).default([...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]),
   loopbackOnlyPaths: z.array(String).default([...DEFAULT_LOOPBACK_ONLY_PATHS]),
+  fallbackAdmission: z.union([z.const('public'), z.const('gated'), z.const('loopback-only')])
+    .default(DEFAULT_FALLBACK_ADMISSION),
   apiPathPrefix: z.string().default(DEFAULT_API_PATH_PREFIX),
   privilegedMethods: z.array(String).default([...DEFAULT_PRIVILEGED_METHODS]),
   pairedNamespaces: z.array(String).default([...DEFAULT_PAIRED_NAMESPACES]),
@@ -206,6 +239,57 @@ function assertServer(candidate: unknown): Server {
   return server
 }
 
+/**
+ * The registration seats this gate wraps. Every one of them can put a handler
+ * on the network, so admission has to cover all of them.
+ */
+const WRAPPED_REGISTRARS: readonly string[] = ['register', 'registerUpgrade', 'registerFallback']
+
+/**
+ * Fail the load if the inherited `WebServer` exposes a registration seat this
+ * class does not wrap.
+ *
+ * This is the guard whose absence let `registerFallback` serve the built
+ * frontend to the network ungated for a whole release: overriding some of the
+ * seats looks identical, from inside, to overriding all of them. A seat added
+ * upstream must therefore break the load rather than quietly widen what is
+ * reachable without a token.
+ *
+ * It recognises a seat by its `register` prefix, which is how all three of the
+ * current ones are named. That is a naming convention rather than a guarantee,
+ * so a differently named seat would still need catching by review — claiming
+ * more than this is the same overreach that hid the fallback in the first place.
+ * @param prototype - the carrier prototype to inspect; the inherited one by default.
+ * @throws when an unrecognised `register*` method exists upstream.
+ */
+export function assertRegistrarsWrapped(prototype: object = WebServer.prototype): void {
+  const unwrapped = Object.getOwnPropertyNames(prototype)
+    .filter(name => name.startsWith('register') && !WRAPPED_REGISTRARS.includes(name))
+  if (unwrapped.length > 0) {
+    throw new Error(
+      `lanyard: this @deepseek-ai/dsh-host-webserver version exposes ${unwrapped.map(name => JSON.stringify(name)).join(', ')}, `
+      + 'which this plugin does not put behind admission; it needs updating before it can gate this harness version',
+    )
+  }
+}
+
+/**
+ * The request pathname as the handlers behind the gate read it.
+ *
+ * `dsh-client-modules` and `dsh-host-frontend-static` both decode before
+ * resolving a file, so matching the raw form here would let `%2E` spell a
+ * suffix past {@link Config.publicPathExcludedSuffixes}.
+ * @param pathname - the raw pathname.
+ * @returns the decoded pathname, or undefined when its escapes are malformed.
+ */
+function decodedPathname(pathname: string): string | undefined {
+  try {
+    return decodeURIComponent(pathname)
+  } catch {
+    return undefined
+  }
+}
+
 export class GatedWebServer extends WebServer {
   static override Config: z<Config> = Config
 
@@ -213,6 +297,7 @@ export class GatedWebServer extends WebServer {
   private readonly publicPaths: string[]
   private readonly publicPathExcludedSuffixes: string[]
   private readonly loopbackOnlyPaths: string[]
+  private readonly fallbackAdmission: Admission
   private readonly apiPathPrefix: string
   private readonly authority: EndpointAuthority
   /** Route paths some row actually claimed, for the drift warning below. */
@@ -223,6 +308,7 @@ export class GatedWebServer extends WebServer {
   private tlsPort: number | undefined
 
   constructor(ctx: Context, config: Config) {
+    assertRegistrarsWrapped()
     // With TLS the inherited server must not own the public port: this class
     // binds it and forwards decrypted sockets, so the parent gets an ephemeral
     // loopback socket whose only role is to route what TLS hands it.
@@ -247,6 +333,7 @@ export class GatedWebServer extends WebServer {
     this.publicPaths = config.publicPaths ?? [...DEFAULT_PUBLIC_PATHS]
     this.publicPathExcludedSuffixes = config.publicPathExcludedSuffixes ?? [...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]
     this.loopbackOnlyPaths = config.loopbackOnlyPaths ?? [...DEFAULT_LOOPBACK_ONLY_PATHS]
+    this.fallbackAdmission = config.fallbackAdmission ?? DEFAULT_FALLBACK_ADMISSION
     this.apiPathPrefix = config.apiPathPrefix ?? DEFAULT_API_PATH_PREFIX
     this.authority = {
       privilegedMethods: new Set(config.privilegedMethods ?? DEFAULT_PRIVILEGED_METHODS),
@@ -342,19 +429,45 @@ export class GatedWebServer extends WebServer {
     }, 'lanyard: TLS listener')
   }
 
-  /** Whether a request may reach the handler registered for one route path. */
-  private permits(req: IncomingMessage, routePath: string): boolean {
+  /**
+   * Posture configured for one named route path. Anything not named is gated,
+   * so a route added upstream is admitted no more freely than `/api` is.
+   * @param routePath - the path the owning row registered.
+   */
+  private posture(routePath: string): Admission {
+    if (this.loopbackOnlyPaths.includes(routePath)) return 'loopback-only'
+    if (this.publicPaths.includes(routePath)) return 'public'
+    return 'gated'
+  }
+
+  /**
+   * Whether a request may reach the handler occupying one seat.
+   * @param req - the inbound request, read for its token and its socket peer.
+   * @param admission - the seat's configured posture.
+   */
+  private permits(req: IncomingMessage, admission: Admission): boolean {
     /* v8 ignore next -- node always sets url on server requests */
-    const pathname = new URL(req.url ?? '/', 'http://x').pathname
-    if (this.loopbackOnlyPaths.includes(routePath)) return isLoopbackAddress(req.socket.remoteAddress)
-    const excluded = this.publicPathExcludedSuffixes.some(suffix => pathname.endsWith(suffix))
-    if (this.publicPaths.includes(routePath) && !excluded) return true
+    const raw = new URL(req.url ?? '/', 'http://x').pathname
+    if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
+    const decoded = decodedPathname(raw)
+    // A pathname whose escapes do not decode cannot be checked against the
+    // exclusions, so it never rides the public exemption.
+    const excluded = decoded === undefined
+      || this.publicPathExcludedSuffixes.some(suffix => decoded.endsWith(suffix))
+    if (admission === 'public' && !excluded) return true
     if (!admit(req, this.token)) return false
-    const endpoint = endpointOf(pathname, this.apiPathPrefix)
-    if (endpoint === undefined) return true
+    // Both readings are classified: upstream resolves the endpoint from the raw
+    // pathname and rejects a `%` outright, but a version that starts decoding
+    // would otherwise turn `%2E` into a way to spell a pinned method unpinned.
+    const readings = decoded === undefined || decoded === raw ? [raw] : [raw, decoded]
+    const named = readings
+      .map(reading => endpointOf(reading, this.apiPathPrefix))
+      .filter(endpoint => endpoint !== undefined)
+    if (named.length === 0) return true
     // Pairing authenticates a device; the configuration plane additionally
     // requires being at the machine, so it never travels to a paired device.
-    return !isPrivilegedEndpoint(endpoint, this.authority) || isLoopbackAddress(req.socket.remoteAddress)
+    if (!named.some(endpoint => isPrivilegedEndpoint(endpoint, this.authority))) return true
+    return isLoopbackAddress(req.socket.remoteAddress)
   }
 
   /**
@@ -368,7 +481,7 @@ export class GatedWebServer extends WebServer {
     return super.register({
       ...route,
       handler: async (req, res) => {
-        if (!this.permits(req, route.path)) {
+        if (!this.permits(req, this.posture(route.path))) {
           res.writeHead(403)
           res.end(REFUSAL_BODY)
           return
@@ -390,13 +503,32 @@ export class GatedWebServer extends WebServer {
     return super.registerUpgrade({
       ...route,
       handler: (req, socket, head) => {
-        if (!this.permits(req, route.path)) {
+        if (!this.permits(req, this.posture(route.path))) {
           socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
           socket.destroy()
           return
         }
         return inner(req, socket, head)
       },
+    })
+  }
+
+  /**
+   * Claim the fallback seat behind admission. The seat answers every request no
+   * named route matched, so it is the widest surface this carrier serves and
+   * the one where an absent gate is least visible — nothing registers a path,
+   * so no drift warning covers it either.
+   * @param handler - owns the full response lifecycle of unmatched requests.
+   * @returns the disposer releasing the seat.
+   */
+  override registerFallback(handler: WebRoute['handler']): () => void {
+    return super.registerFallback(async (req, res) => {
+      if (!this.permits(req, this.fallbackAdmission)) {
+        res.writeHead(403)
+        res.end(REFUSAL_BODY)
+        return
+      }
+      await handler(req, res)
     })
   }
 }

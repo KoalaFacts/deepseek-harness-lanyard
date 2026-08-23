@@ -4,7 +4,7 @@ English | [简体中文](README.zh.md)
 
 Open the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web GUI on your phone.
 
-Run `dsh` on your machine as usual, open one link on the phone, and the GUI is there — on your own network, behind a pairing token. Nothing else on the network can reach it.
+Run `dsh` on your machine as usual, open one link on the phone, and the GUI is there — on your own network, behind a pairing token. Nothing else on the network reaches your session or your machine.
 
 That is all this does. It is not a gateway, not a reverse proxy, and not a way to reach your machine from outside your own network.
 
@@ -62,6 +62,7 @@ Pairing authenticates a *device*, not a person at the machine. So the phone gets
 - **Refused for everyone but a loopback peer:** settings, credentials, agent presets, native dialogs, model discovery, and any Gateway namespace this build has not deliberately classified.
 - **The token never goes on the wire.** `#auth=…` lives only in the URL fragment, which no browser sends, so it reaches neither the server logs nor any proxy.
 - **TLS is terminated in-process**, which preserves the real client address. A forwarding proxy in that seat would make every request look local and disable the gate entirely.
+- **The GUI's own files are not behind the token.** The token arrives inside the page, so the browser has to fetch the page before it can present one — the built HTML, JavaScript and CSS therefore answer any device on your network. They carry no secret, and source maps stay excluded. Everything the loaded page then *does* goes through the token.
 
 ## Limitations
 
@@ -72,7 +73,7 @@ Pairing authenticates a *device*, not a person at the machine. So the phone gets
 
 ## Configuration
 
-You should never need any. Defaults are safe and deny by default. The one field worth knowing about is `pairedNamespaces`, which decides what a paired phone may reach; everything unlisted is loopback-only, so it only ever widens deliberately. Fields and how to override them: [AGENTS.md](AGENTS.md).
+You should never need any. Defaults are safe and deny by default. Two fields are worth knowing about: `pairedNamespaces` decides what a paired phone may reach, and everything unlisted is loopback-only, so it only ever widens deliberately; `fallbackAdmission` decides how the GUI's own static files are served, and defaults to serving them so a freshly paired phone can load the page at all. Fields and how to override them: [AGENTS.md](AGENTS.md).
 
 ## Development
 

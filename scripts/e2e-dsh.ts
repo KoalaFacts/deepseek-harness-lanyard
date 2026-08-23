@@ -15,6 +15,15 @@ import {
 const lan = requireLan()
 const { check, report } = recorder()
 
+/**
+ * A built asset the served index actually references, so the check probes a
+ * real file under the fallback seat rather than a path this script invented.
+ * @param html - the index document as served.
+ */
+function assetPath(html: string): string | undefined {
+  return /["'](\/assets\/[^"']+)["']/.exec(html)?.[1]
+}
+
 await withDshDeployment(async ({ dsh, env, cwd, port, pairingLink, packageName, bundles }) => {
   check('the bundle joined the profile layer stack', bundles.includes(packageName), true)
 
@@ -53,6 +62,17 @@ await withDshDeployment(async ({ dsh, env, cwd, port, pairingLink, packageName, 
   check('the shell loads for an anonymous LAN peer', admitted(index), true)
   check('and carries the pairing bootstrap, so the link can adopt the token',
     index.body.includes('dsh.pairingToken') && index.body.includes('dsh_auth'), true)
+
+  // The fallback seat — dsh-host-frontend-static serving the built SPA — is a
+  // third registration path, and wrapping only register/registerUpgrade left it
+  // ungated. These two checks are what that omission needed: the first shows the
+  // gate is now in front of the seat at all, and the second shows it still lets
+  // a freshly paired device load the shell it was sent to.
+  check('the gate is in front of the fallback seat, not just the named routes',
+    refused(await probe(lan, port, '/assets/index.js.map')), true)
+  const asset = assetPath(index.body)
+  check('and the shell\'s own assets still load for an anonymous LAN peer, so pairing resolves',
+    asset !== undefined && admitted(await probe(lan, port, asset)), true)
 })
 
 report('lanyard e2e')

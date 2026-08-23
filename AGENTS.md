@@ -49,7 +49,7 @@ Scripts are TypeScript run directly by Node (type stripping, ≥22.18). No build
 | `lanyard-keep-awake` | — | platform sleep inhibitor |
 | `lanyard-pairing` | — | index tap for the browser half, plus the pairing line |
 
-The gate works because **every consumer registers routes through `ctx.webServer.register` / `registerUpgrade`**. Overriding those two methods puts admission in front of everything the composition serves, so `dsh-client-connection` — which owns `/api` — runs completely unmodified.
+The gate works because **every consumer contributes through one of `WebServer`'s three registration seats** — `register`, `registerUpgrade`, and the single-owner `registerFallback` that answers whatever no named route matched. Overriding all three puts admission in front of every request the composition serves, so `dsh-client-connection` — which owns `/api` — runs completely unmodified. `assertRegistrarsWrapped()` fails the load if a future harness grows a fourth.
 
 ## Load-bearing invariants
 
@@ -60,6 +60,8 @@ Break any of these and the plugin fails **open** — serving the LAN with no gat
 - **Unknown Gateway namespaces deny.** The Typert Gateway claims every `namespace/method` a live service exposes, so a per-method allowlist would default each new endpoint to reachable.
 - **`bootstrapAuthToken` must stay entirely self-contained.** It reaches the browser through `Function.prototype.toString`, so a reference to module scope would serialize to an identifier that does not exist in the page. `npm run build` evaluates the built artifact and fails if it stops working.
 - **The gate's refusal body is its own marker**, not the bare `forbidden` that `dsh-client-connection`'s Host fence also answers with — otherwise nothing can tell admission from the fence behind it.
+- **Every registration seat is wrapped, and a new one fails the load.** Wrapping `register` and `registerUpgrade` but not `registerFallback` shipped the built frontend to the LAN ungated for a release, and looked identical from inside this class — no path is registered for that seat, so even the unclaimed-path warning was blind to it. `assertRegistrarsWrapped()` turns an upstream `register*` addition into a loud load failure instead of a silent widening.
+- **Route matching decodes the pathname; endpoint classification reads both forms.** `dsh-client-modules` and `dsh-host-frontend-static` both `decodeURIComponent` before resolving a file, so a raw-form suffix match let `%70` spell `.map` past the exclusion. A pathname whose escapes do not decode is refused rather than admitted.
 - **`assertServer()` guards the inherited private `server` field.** TypeScript `private` is erased at runtime, so the subclass can reach it; an upstream rename must fail the load loudly rather than quietly serve plaintext.
 
 ## Replacing a shipped row means owning its whole contract

@@ -22,6 +22,7 @@ import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { request } from 'node:https'
+import { REFUSAL_BODY } from '../src/webserver.ts'
 import type { OutgoingHttpHeaders } from 'node:http'
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -207,9 +208,15 @@ export function probe(host: string, port: number, path: string, headers: Outgoin
  * answers 403 with the body `forbidden`, so status alone cannot tell admission
  * from the fence behind it; the gate's refusal carries its own marker.
  */
-export const refused = (answer: Answer): boolean => answer.status === 403 && answer.body === 'lanyard: forbidden'
+export const refused = (answer: Answer): boolean => answer.status === 403 && answer.body === REFUSAL_BODY
 
-/** Whether the request passed the gate and reached whatever owns the route. */
+/**
+ * Whether the request passed the gate and reached whatever owns the route.
+ * Defined against the gate's own marker rather than as the negation of a
+ * spelling: a hardcoded copy that drifted would turn every genuine refusal into
+ * a reported admission, so the suite would go green while the gate refused
+ * everything.
+ */
 export const admitted = (answer: Answer): boolean => !refused(answer)
 
 /** The spawned CLI: stdin is ignored, both output streams are piped. */
