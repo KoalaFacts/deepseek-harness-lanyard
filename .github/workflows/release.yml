@@ -68,6 +68,10 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Every value below reaches the shell through `env:` rather than `${{ }}`
+      # interpolation. A ref name is chosen by whoever pushes the tag, and an
+      # interpolated one is pasted into the script before bash ever parses it,
+      # so the quoting cannot help. Through the environment it is data.
       - name: Resolve the version and its release channel
         id: version
         env:
@@ -104,10 +108,11 @@ jobs:
       # on the e2e legs. npm would reject the publish anyway; failing here says
       # so in seconds, with a message that names the cause.
       - name: Refuse a version that is already published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           NAME="$(npm pkg get name | tr -d '"')"
-          VERSION="${{ steps.version.outputs.version }}"
           if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
             echo "::error::$NAME@$VERSION is already on the registry; bump the version"
             exit 1
@@ -130,13 +135,17 @@ jobs:
       # attestation.
       - name: Publish to npm
         if: github.event_name == 'push' || inputs.dry_run == false
-        run: npm publish --provenance --tag "${{ steps.version.outputs.dist_tag }}"
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+        run: npm publish --provenance --tag "$DIST_TAG"
 
       - name: Report what a dry run would have done
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run != false
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
         run: |
           set -euo pipefail
-          npm publish --provenance --tag "${{ steps.version.outputs.dist_tag }}" --dry-run
+          npm publish --provenance --tag "$DIST_TAG" --dry-run
           echo "dry run only — nothing was published"
 
       # The gh CLI ships on the runner, so this needs no third-party action.
@@ -146,11 +155,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
           DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           PRERELEASE=()
           if [ "$DIST_TAG" = next ]; then PRERELEASE=(--prerelease); fi
-          gh release create "${{ github.ref_name }}" \
+          gh release create "$REF_NAME" \
             --title "v$VERSION" \
             --generate-notes \
             --verify-tag \
