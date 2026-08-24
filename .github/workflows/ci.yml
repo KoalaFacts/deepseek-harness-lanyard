@@ -9,6 +9,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job here only reads the tree and runs the suites — nothing pushes,
+# comments, or uploads. Without this block the jobs inherit the repository
+# default, which on an older repository is write-all, and this is the workflow
+# that runs on `pull_request` for every branch including automated dependency
+# bumps. Narrow it to what the jobs actually use.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
