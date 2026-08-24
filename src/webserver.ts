@@ -372,8 +372,30 @@ export class GatedWebServer extends WebServer {
     }
   }
 
-  /** The port clients reach: the TLS listener when serving HTTPS, else the inherited one. */
+  /**
+   * The port a local http client reaches, which is what every consumer of this
+   * member in the shipped composition builds a URL from: `dsh-web-app` hardcodes
+   * `http://127.0.0.1:${port}` for the browser handoff, the `DSH_WEB_URL` shell
+   * variable, and the URL it tells the model it is serving.
+   *
+   * Under TLS that is the inherited server, which binds an ephemeral loopback
+   * port in plaintext while this class terminates TLS in front of it. Reporting
+   * the TLS port here instead pointed all three at an https listener over http,
+   * so the handoff opened a browser on a connection error. Nothing is newly
+   * reachable: the inherited listener is loopback-only, and a loopback peer is
+   * exempt from admission anyway.
+   */
   override get port(): number {
+    return super.port
+  }
+
+  /**
+   * The port a device elsewhere on the network connects to — the TLS listener
+   * when serving HTTPS, else the same loopback listener as {@link port}. This is
+   * what a pairing link must name; {@link port} would send the phone to a port
+   * bound only to the machine's own loopback interface.
+   */
+  get networkPort(): number {
     return this.tlsPort ?? super.port
   }
 
@@ -504,8 +526,12 @@ export class GatedWebServer extends WebServer {
       ...route,
       handler: (req, socket, head) => {
         if (!this.permits(req, this.posture(route.path))) {
-          socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
-          socket.destroy()
+          // `end` rather than `write` + `destroy`: writes are queued, and
+          // destroying discards whatever has not reached the kernel, so a
+          // refused handshake could arrive as a bare connection reset. The
+          // marker distinguishing this gate from the Host fence behind it is
+          // exactly what went missing.
+          socket.end(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
           return
         }
         return inner(req, socket, head)

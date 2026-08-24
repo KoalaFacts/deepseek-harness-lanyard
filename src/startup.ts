@@ -100,9 +100,12 @@ export function resolveStartupValues(program: Command): WebStartupValues {
   if (options.host === '0.0.0.0' && options.pairingTokenEnv === undefined) {
     program.error(`error: --host 0.0.0.0 exposes remote code execution to the network, so it requires --pairing-token-env; ${GENERATE_TOKEN_HINT}`)
   }
-  if (options.trustedHost !== undefined && options.trustedHost.length > 0 && options.pairingTokenEnv === undefined) {
-    program.error('error: --trusted-host requires a pairing token — without one no non-loopback request is admitted')
-  }
+  // --trusted-host deliberately carries no token requirement, though it is
+  // tempting to add one. It declares an authority for `dsh-client-connection`'s
+  // Host fence, which is what a loopback bind reached through a tunnel or a
+  // reverse proxy needs; that peer is loopback as far as this gate is concerned
+  // and is admitted with or without a token, so requiring one would refuse an
+  // invocation the shipped provider accepts while adding no protection.
   if (options.port !== undefined && !/^\d+$/.test(options.port)) {
     program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
   }

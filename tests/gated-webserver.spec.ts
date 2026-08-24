@@ -1,6 +1,7 @@
 /** The gated carrier over a real listener: admission, the privileged pin, and TLS. */
 import { connect as tlsConnect } from 'node:tls'
 import { request as httpsRequest } from 'node:https'
+import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -82,7 +83,7 @@ describe('GatedWebServer', () => {
     server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
 
     expect(server.scheme).toBe('https')
-    const port = server.port
+    const port = server.networkPort
 
     // A loopback peer is exempt, so this leg only shows the listener is real
     // and routes reach their handlers; the network legs below carry the gate.
@@ -226,12 +227,19 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     server.registerUpgrade({ path: '/api/events', handler: () => { negotiated = true } })
     spy.mockRestore()
 
+    // `end` carries the bytes and closes; `write` + `destroy` could drop them.
+    // Recording both shows the refusal does not go out through the lossy pair.
+    const ended: string[] = []
     const written: string[] = []
     let destroyed = false
-    const socket = { write: (chunk: string) => written.push(chunk), destroy: () => { destroyed = true } }
+    const socket = {
+      end: (chunk: string) => ended.push(chunk),
+      write: (chunk: string) => written.push(chunk),
+      destroy: () => { destroyed = true },
+    }
     captured[0]?.handler(req('/api/events', '192.168.1.5'), socket, Buffer.alloc(0))
-    expect([written[0]?.startsWith('HTTP/1.1 403 Forbidden'), written[0]?.endsWith(REFUSAL_BODY), destroyed, negotiated])
-      .toEqual([true, true, true, false])
+    expect([ended[0]?.startsWith('HTTP/1.1 403 Forbidden'), ended[0]?.endsWith(REFUSAL_BODY), written.length, destroyed, negotiated])
+      .toEqual([true, true, 0, false, false])
   })
 })
 
@@ -254,10 +262,31 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
       handler: (request, res) => { seenPeer = request.socket.remoteAddress; res.writeHead(200); res.end('REACHED') },
     })
 
-    expect(await get(lan, server.port, '/api/session.list')).toBe(403)
+    expect(await get(lan, server.networkPort, '/api/session.list')).toBe(403)
     expect(seenPeer).toBeUndefined()
-    expect(await get(lan, server.port, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` })).toBe(200)
+    expect(await get(lan, server.networkPort, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` })).toBe(200)
     expect(seenPeer).toBe(lan)
+  })
+
+  it('reports a loopback port that answers plain http, and a network port that answers TLS', async () => {
+    const { certPath, keyPath } = certificateFiles()
+    ctx = new Context()
+    await ctx.plugin(GatedWebServer, {
+      host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    // Distinct listeners: `port` is the inherited plaintext server, which every
+    // consumer of that member builds `http://127.0.0.1:${port}` from, and
+    // `networkPort` is the TLS front a paired device connects to. Reporting the
+    // TLS port as `port` pointed the browser handoff at https over http.
+    expect(server.port).not.toBe(server.networkPort)
+    server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
+    const plain = await new Promise<number>((resolve, reject) => {
+      const rq = httpRequest({ host: '127.0.0.1', port: server.port, path: '/plugins/x/client.js', method: 'GET' },
+        (res) => { res.resume(); res.on('end', () => { resolve(res.statusCode ?? 0) }) })
+      rq.on('error', reject); rq.end()
+    })
+    expect(plain).toBe(200)
   })
 
   it('answers the same port over TLS only', async () => {
@@ -269,7 +298,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     }).await()
     const server = ctx.get('webServer') as GatedWebServer
     const negotiated = await new Promise<string | false>((resolve, reject) => {
-      const socket = tlsConnect({ host: lan, port: server.port, rejectUnauthorized: false }, () => {
+      const socket = tlsConnect({ host: lan, port: server.networkPort, rejectUnauthorized: false }, () => {
         const protocol = socket.getProtocol()
         socket.destroy()
         resolve(protocol ?? false)

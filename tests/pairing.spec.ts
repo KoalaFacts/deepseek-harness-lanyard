@@ -3,10 +3,7 @@ import jsQR from 'jsqr'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import {
-  fitsTerminal, pairingAnnouncement, renderPairingQr, renderedWidth, shouldDrawQr, terminalColumns,
-  type Config as PairingConfig,
-} from '../src/pairing.ts'
+import { fitsTerminal, pairingAnnouncement, renderPairingQr, renderedWidth, shouldDrawQr, terminalColumns, type Config as PairingConfig, wantsColour } from '../src/pairing.ts'
 import * as Pairing from '../src/pairing.ts'
 import { AUTH_COOKIE_NAME } from '../src/admission.ts'
 
@@ -206,5 +203,23 @@ describe('the pairing row', () => {
     const server = ctx?.get('webServer') as WebServer
     expect(server.applyIndexTaps('<html><head></head></html>')).toContain('<script>')
     expect(printed).toEqual([])
+  })
+})
+
+// https://no-color.org counts the variable as set only "when present and not an
+// empty string". Declining colour is not neutral: the encoder draws light
+// modules as block characters, so an uncoloured code inverts on a light
+// terminal and a scanner that does not try both polarities reads nothing.
+describe('wantsColour', () => {
+  it('emits colour when NO_COLOR is unset', () => {
+    expect(wantsColour(undefined)).toBe(true)
+  })
+
+  it('emits colour when NO_COLOR is present but empty, which `NO_COLOR=` sets', () => {
+    expect(wantsColour('')).toBe(true)
+  })
+
+  it('declines colour for any non-empty value', () => {
+    expect([wantsColour('1'), wantsColour('true'), wantsColour('0')]).toEqual([false, false, false])
   })
 })
