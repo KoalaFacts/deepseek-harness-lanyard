@@ -1,0 +1,217 @@
+name: publish-npm
+run-name: publish v${{ inputs.version }} to npm${{ inputs.dry_run && ' (dry run)' || '' }}
+
+# Publishes one already-tagged version to npm, authenticating with npm trusted
+# publishing (OIDC). No npm token is stored in this repository: the workflow
+# exchanges a short-lived GitHub OIDC token for registry credentials, so there
+# is nothing to leak or rotate.
+#
+# This is the only workflow here that publishes, and that is a constraint rather
+# than a preference: npm allows a package exactly one trusted publisher
+# configuration, so exactly one file can hold the credential. `release.yml`
+# gates the tree and cuts the tag; this publishes what that tag points at.
+#
+# It publishes the TAG, never a branch. Naming a version and getting whatever
+# `main` happens to hold is how a release comes to differ from the thing that
+# was reviewed and tagged, so the tree comes from `refs/tags/v<version>` and the
+# version in it is checked against what you asked for.
+#
+# Setting this up is not only this file — npmjs.com has to be told to trust it.
+# See "Releasing" in AGENTS.md. The trusted publisher names a workflow BY
+# FILENAME, so it must name `publish-npm.yml`; renaming this file breaks
+# publishing until the npm side is changed to match, and that failure surfaces
+# as an authentication error saying nothing about the rename.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. 1.2.3 — must already be tagged'
+        required: true
+        type: string
+      dry_run:
+        description: 'Run the full gate but stop short of publishing'
+        required: false
+        default: true
+        type: boolean
+
+# Two publishes racing would interleave.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # The legs run serially here where ci.yml runs them as parallel jobs, so the
+    # budget has to exceed the sum of what CI allows rather than sit under it.
+    timeout-minutes: 45
+    outputs:
+      dist_tag: ${{ steps.resolve.outputs.dist_tag }}
+    steps:
+      # Before the checkout, because the version reaches `ref:` below and a
+      # value should be shaped like a version before it is used as one.
+      - name: Check the request
+        env:
+          REQUESTED: ${{ inputs.version }}
+          REF: ${{ github.ref }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$REQUESTED" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::version ${REQUESTED} is not a semver release, e.g. 1.2.3 or 1.2.3-rc.1"
+            exit 1
+          fi
+
+          # A real publish may only be started from the default branch. The tree
+          # published comes from the tag either way, but the workflow FILE comes
+          # from whatever ref was dispatched, so without this a branch could
+          # carry an edited version of this file and publish through the
+          # credential. npm's trusted publisher matches owner/repo/workflow and
+          # never the ref, so this is the only place it can be enforced.
+          if [ "$DRY_RUN" != true ] && [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::a real publish must be started on main; this run is on ${REF}. Re-run it on main, or leave dry_run ticked."
+            exit 1
+          fi
+          echo "publishing v${REQUESTED} from its tag"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tag, not the branch. This is the whole point of the workflow.
+          ref: refs/tags/v${{ inputs.version }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the tag really holds the version asked for
+        id: resolve
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # The checkout succeeded, so the tag exists; this catches the other
+          # half — a tag whose package.json says something else, which would
+          # publish a version nobody asked for under a tag that disagrees.
+          VERSION="$(npm pkg get version | tr -d '"')"
+          if [ "$REQUESTED" != "$VERSION" ]; then
+            echo "::error::tag v${REQUESTED} holds package.json version ${VERSION}; the tag and the package disagree, which needs a person."
+            exit 1
+          fi
+
+          case "$VERSION" in
+            *-*) DIST_TAG=next ;;
+            *)   DIST_TAG=latest ;;
+          esac
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          echo "publishing $VERSION to the $DIST_TAG channel"
+
+      - name: Refuse a version already on the registry
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="$(npm pkg get name | tr -d '"')"
+
+          # `npm view` exits non-zero for a version that does not exist AND for
+          # a network failure, a 5xx, or an auth problem. Swallowing the reason
+          # would make an outage read as "free to publish", so only a genuine
+          # 404 is accepted as an answer.
+          set +e
+          VIEW_OUT="$(npm view "$NAME@$VERSION" version 2>&1)"
+          VIEW_RC=$?
+          set -e
+          if [ "$VIEW_RC" -eq 0 ]; then
+            echo "::error::$NAME@$VERSION is already on the registry; npm versions are immutable, so publish a new version instead"
+            exit 1
+          fi
+          if ! printf '%s' "$VIEW_OUT" | grep -q 'E404'; then
+            echo "::error::could not determine whether $NAME@$VERSION is published, so refusing to guess. npm said:"
+            printf '%s\n' "$VIEW_OUT"
+            exit 1
+          fi
+          echo "$NAME@$VERSION is not yet published"
+
+      # Both e2e suites exit 2 with a loud SKIPPED message where they cannot run.
+      # That fails the step, deliberately: nothing pins `dsh`, so a tag that
+      # passed when it was cut can fail against today's upstream, and a release
+      # nobody verified is worse than a release that did not happen.
+      - run: npm run check
+      - run: npm run test:e2e
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:browser
+
+      # `publish` installs nothing, so the build it uploads is the one this gate
+      # approved rather than a second build of the same source.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lib
+          path: lib
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The OIDC token trusted publishing exchanges for registry credentials.
+      id-token: write
+    steps:
+      # Separate job on purpose, and the split is a security boundary rather
+      # than a tidiness one. Verifying means executing a great deal of code this
+      # repository does not control — `dsh@latest` is deliberately unpinned, plus
+      # a Chromium download and the built artifact — while publishing holds a
+      # credential that can push a package under this name. Anything running
+      # beside that credential can read ACTIONS_ID_TOKEN_REQUEST_URL and mint it,
+      # so this job installs nothing and runs no lifecycle scripts.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Trusted publishing needs Node >= 22.14; the 22 line satisfies it.
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # The npm bundled with Node 22 predates trusted publishing, which landed
+      # in 11.5.1; without this the publish fails on authentication with an
+      # error that does not mention the version at all. Pinned to the 11 line
+      # rather than `@latest`, which would be the one unreviewed thing running
+      # beside the credential.
+      - name: Install an npm that speaks trusted publishing
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lib
+          path: lib
+
+      # `--ignore-scripts` keeps `prepare` from running: `lib/` is already built,
+      # above, which is the only thing it would have produced. A future prepack
+      # step would need building into `verify` rather than added here.
+      - name: Publish to npm
+        if: inputs.dry_run == false
+        env:
+          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
+        run: npm publish --provenance --tag "$DIST_TAG" --ignore-scripts
+
+      - name: Report what a dry run would have done
+        if: inputs.dry_run != false
+        env:
+          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          npm publish --provenance --tag "$DIST_TAG" --ignore-scripts --dry-run
+          echo "dry run only — nothing was published"

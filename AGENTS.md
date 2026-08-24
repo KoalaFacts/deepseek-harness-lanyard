@@ -127,42 +127,52 @@ The verification layers above catch code that does not do what it says. These ca
 
 ## Releasing
 
-`.github/workflows/release.yml` publishes to npm with **npm trusted publishing (OIDC)**. No npm token is stored in this repository — the workflow exchanges a short-lived GitHub OIDC token for registry credentials, so there is nothing to leak or rotate.
+Two workflows, run in order from the Actions tab. Both are deliberate: pushing a tag starts nothing, and neither runs on its own.
 
-Releasing is deliberate rather than automatic: **pushing a tag does not publish anything.** The workflow only runs when someone starts it.
+1. **Bump the version** on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
+2. **release** — *Run workflow*, on `main`, type the version, untick **dry_run**. Gates the tree, then creates the tag `v<version>` and the GitHub Release.
+3. **publish-npm** — *Run workflow*, on `main`, type the same version, untick **dry_run**. Checks out that tag, gates it again, and publishes to npm.
 
-1. Bump the version on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
-2. Actions → **release** → *Run workflow*, on `main`, with **dry_run unticked**.
+The version is typed rather than inferred, and checked against `package.json` both times. It is a confirmation, not a source: npm publishes what `package.json` says, so the check is there to catch the release started without bumping the version first.
 
-The version comes from `package.json` on the ref you select, and a real publish is refused from anywhere but `main` — `workflow_dispatch` offers every branch, and npm's trusted publisher matches owner/repo/workflow rather than the branch, so this is the only place that can be enforced. Dry runs are exempt, since rehearsing a branch is the point of them. A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
+**Why two workflows rather than one.** npm allows a package exactly one trusted publisher configuration, so exactly one file here can hold the OIDC credential. Keeping it in the one that does nothing else is what stops the gate's deliberately-unpinned dependencies from running beside a credential that can publish under this name. Each workflow is also split into `verify` and `publish`/`tag` jobs for the same reason, one level down.
 
-The tag and the GitHub Release are created by the workflow **after** a successful publish, never before — a failed publish leaves no tag claiming a version that is not on the registry. Two guards run before the slow legs: a version already on the registry is refused, and so is a version whose tag exists with nothing published behind it, since that combination needs a person to look at it.
+**publish-npm publishes the tag, never a branch.** Naming a version and getting whatever `main` holds is how a release comes to differ from what was reviewed. Both workflows additionally refuse a real run from anywhere but `main`, because `workflow_dispatch` offers every branch and the workflow *file* comes from whichever ref is selected.
 
-Leaving `dry_run` ticked (the default) runs the entire gate and stops at `npm publish --dry-run`, publishing nothing and creating no tag. That is the rehearsal.
+Guards, all of which run before the slow legs and all of which fail closed — a network error or a 5xx is never read as "clear to proceed":
 
-The run is split into `verify` and `publish`, and the split is a security boundary rather than a tidiness one. Verifying means executing a great deal of code this repository does not control — `dsh@latest` is deliberately unpinned, plus a Chromium download and the built artifact — while publishing holds an OIDC credential that can push a package under this name. Anything running beside that credential can mint it, so `publish` installs nothing, runs no lifecycle scripts, and takes the built `lib/` from `verify` as an artifact.
+| Refused | Because |
+|---|---|
+| a version already on the registry | npm versions are immutable; publish a new one |
+| a tag that already exists | an earlier release got part-way, which needs a person |
+| a **GitHub Release** that already exists | releases are immutable once published where that is enabled, so it cannot be replaced |
+| a version disagreeing with `package.json` | npm would publish something other than what was asked for |
 
-All four verification layers run again on every release. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a commit that passed last week can fail against today's upstream. A SKIPPED e2e therefore blocks the release rather than passing.
+A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
 
-### One-time setup, which the workflow cannot do for itself
+Leaving `dry_run` ticked (the default) runs the entire gate and stops short: no tag, no Release, `npm publish --dry-run`. That is the rehearsal.
+
+All four verification layers run in both workflows. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a tag cut last week can fail against today's upstream. A SKIPPED e2e therefore blocks the release rather than passing.
+
+### One-time setup, which the workflows cannot do for themselves
 
 OIDC cannot perform a package's **first** publish: npm requires the package to exist before a trusted publisher can be attached to it, and unlike PyPI it has no way to reserve a name in advance. (Confirmed against npm's docs on 2026-08-24 — `npm trust` says the same: "The package you're configuring must already exist on the npm registry.") So the first version is published by hand, once:
 
 1. Own the `@koalafacts` scope on npm — as an org or a user scope. Publishing into a scope you do not own fails with a 404 that reads like the package is missing.
 2. `npm login`, then `npm publish --access public` from a clean checkout. (A `0.0.0` placeholder works just as well if you would rather not spend the real version on it.)
-3. Attach the trusted publisher. The CLI does it without touching the website:
+3. Attach the trusted publisher, naming **`publish-npm.yml`** — the workflow that actually publishes, not `release.yml`:
 
    ```sh
    npm trust github @koalafacts/deepseek-harness-lanyard \
      --repo KoalaFacts/deepseek-harness-lanyard \
-     --file release.yml \
+     --file publish-npm.yml \
      --allow-publish
    ```
 
-   `--allow-publish` is not optional: a configuration must now grant at least one action explicitly (the other is `--allow-stage-publish`), and one granting nothing publishes nothing. In the website UI the same setting lives under **Packages → the package → Settings → Trusted publishing**, which is where it moved from the old `/access` tab. Pass no `--env`: this workflow declares no environment, and the two sides must agree exactly.
+   `--allow-publish` is not optional: a configuration must now grant at least one action explicitly (the other is `--allow-stage-publish`), and one granting nothing publishes nothing. In the website UI the same setting lives under **Packages → the package → Settings → Trusted publishing**, which is where it moved from the old `/access` tab. Pass no `--env`: these workflows declare no environment, and the two sides must agree exactly.
 
    npm does not validate any of this when it is saved. A wrong repository, filename or environment is accepted quietly and only surfaces as a failure at the next publish.
 
-After that every release goes through the Actions tab. **The trusted publisher names this workflow by filename**, so renaming `release.yml` breaks publishing until the npm side is changed to match; that failure surfaces as an authentication error that says nothing about the rename.
+   **A package may have only one configuration at a time.** Creating a second errors rather than adding; `npm trust list` shows the current one and `npm trust revoke --id <id>` removes it. That is why the credential lives in exactly one workflow.
 
-Two version floors are load-bearing and easy to misread if they drift: trusted publishing needs npm **≥ 11.5.1** and Node **≥ 22.14**. The npm bundled with Node 22 is older than that, so the workflow upgrades npm before publishing; without it the publish fails on authentication with an error that never mentions the version.
+After that every release goes through the Actions tab. Two version floors are load-bearing and easy to misread if they drift: trusted publishing needs npm **≥ 11.5.1** and Node **≥ 22.14**. The npm bundled with Node 22 is older than that, so `publish-npm` upgrades npm before publishing; without it the publish fails on authentication with an error that never mentions the version.
