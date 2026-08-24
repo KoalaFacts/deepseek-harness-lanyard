@@ -72,6 +72,15 @@ await withDshDeployment(async ({ port }) => {
   })
   try {
     // ---- a device that has never paired ----
+    // `ignoreHTTPSErrors` stays here, unlike in the node probes, for two
+    // reasons. Playwright exposes no per-context way to trust a specific CA —
+    // the alternatives are the same flag under another name or installing the
+    // certificate into the machine's trust store. And it is what the flow being
+    // tested actually looks like: the README tells a person the certificate
+    // warning is normal and to accept it once, so a browser that accepts an
+    // untrusted certificate is the behaviour under test, not a shortcut around
+    // it. The certificate itself is validated in the node e2e, which trusts the
+    // deployment's own PEM and nothing else.
     const cold = await browser.newContext({ ignoreHTTPSErrors: true })
     const coldPage = await cold.newPage()
     await coldPage.goto(origin, { waitUntil: 'domcontentloaded' })
