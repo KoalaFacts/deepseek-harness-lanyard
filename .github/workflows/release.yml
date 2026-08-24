@@ -38,11 +38,9 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # ci.yml allows 15 minutes for e2e and 20 for browser as separate jobs.
-    # These run serially here, plus check and a cold Chromium download, so the
-    # budget has to exceed the sum rather than sit under it: a release killed
-    # part-way is worse than a slow one.
-    timeout-minutes: 45
+    # `check` alone, so nowhere near ci.yml's e2e budget — but generous enough
+    # that a slow pnpm install is not mistaken for a broken tree.
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
       dist_tag: ${{ steps.version.outputs.dist_tag }}
@@ -180,21 +178,35 @@ jobs:
 
           echo "$NAME@$VERSION is not yet published, and neither tag nor Release v$VERSION exists"
 
-      # Both e2e suites exit 2 with a loud SKIPPED message where they cannot run
-      # — no LAN interface, no Playwright — which fails the step here exactly as
-      # it does in ci.yml. That is deliberate: a release nobody verified is worse
-      # than a release that did not happen, so a run failing with SKIPPED is a
-      # runner problem rather than a code problem.
+      # `check` only, not the full four layers, and the asymmetry with
+      # publish-npm is the point. What this workflow produces — a tag and a
+      # Release — ships nothing on its own: publish-npm re-runs the whole gate
+      # against this same tree before anything reaches the registry. Running the
+      # e2e legs here too would be forty-five minutes proving something that is
+      # proved again minutes later in the documented flow.
+      #
+      # It is not skipped entirely because the Release this creates is
+      # effectively immutable, and announcing a version built from a tree that
+      # does not typecheck or pass its unit suite is not a thing to undo. This
+      # catches that in twenty seconds; publish-npm catches upstream drift,
+      # which is the failure only time can introduce.
       - run: npm run check
-      - run: npm run test:e2e
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:browser
 
 
   tag:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Everything irreversible happens under `production`, which is where the
+    # rules that actually bind a ref live. A workflow cannot police which ref it
+    # runs from — the guard would be in the file the ref supplies — so the
+    # branch check below is defence in depth and this is the enforcement.
+    #
+    # Referencing an environment that does not exist CREATES it, with no
+    # protection rules and no warning. Until `production` carries a deployment
+    # branch rule and whatever reviewers you want, this line buys nothing. See
+    # "Releasing" in AGENTS.md.
+    environment: production
     permissions:
       # Creating the tag and the GitHub Release.
       contents: write

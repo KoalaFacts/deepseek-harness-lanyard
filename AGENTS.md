@@ -152,7 +152,9 @@ A version containing a hyphen publishes to `next`, everything else to `latest`, 
 
 Leaving `dry_run` ticked (the default) runs the entire gate and stops short: no tag, no Release, `npm publish --dry-run`. That is the rehearsal.
 
-All four verification layers run in both workflows. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a tag cut last week can fail against today's upstream. A SKIPPED e2e therefore blocks the release rather than passing.
+The two gates are deliberately asymmetric. **release** runs `check` only: what it produces ships nothing on its own, and publish-npm re-gates the same tree before anything reaches the registry, so running the e2e legs in both would be forty-five minutes proving the same thing twice in the documented flow. It is not skipped entirely because the Release it creates is effectively immutable, and announcing a version built from a tree that does not typecheck is not a thing to undo.
+
+**publish-npm** runs all four layers, because it is the one that ships. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a tag cut last week can fail against today's upstream — the failure only time can introduce, and the reason this gate is not the redundant one. A SKIPPED e2e blocks the publish rather than passing.
 
 ### One-time setup, which the workflows cannot do for themselves
 
@@ -166,13 +168,20 @@ OIDC cannot perform a package's **first** publish: npm requires the package to e
    npm trust github @koalafacts/deepseek-harness-lanyard \
      --repo KoalaFacts/deepseek-harness-lanyard \
      --file publish-npm.yml \
+     --env production \
      --allow-publish
    ```
 
-   `--allow-publish` is not optional: a configuration must now grant at least one action explicitly (the other is `--allow-stage-publish`), and one granting nothing publishes nothing. In the website UI the same setting lives under **Packages → the package → Settings → Trusted publishing**, which is where it moved from the old `/access` tab. Pass no `--env`: these workflows declare no environment, and the two sides must agree exactly.
+   `--allow-publish` is not optional: a configuration must now grant at least one action explicitly (the other is `--allow-stage-publish`), and one granting nothing publishes nothing. `--env production` is not optional either — the publishing job declares that environment, and npm matches on it, so a configuration without it fails at authentication with an error naming nothing useful. In the website UI the same settings live under **Packages → the package → Settings → Trusted publishing**, which is where they moved from the old `/access` tab.
 
    npm does not validate any of this when it is saved. A wrong repository, filename or environment is accepted quietly and only surfaces as a failure at the next publish.
 
    **A package may have only one configuration at a time.** Creating a second errors rather than adding; `npm trust list` shows the current one and `npm trust revoke --id <id>` removes it. That is why the credential lives in exactly one workflow.
+
+4. Create the **`production`** environment (Settings → Environments) and give it a **deployment branch rule** limiting it to `main`. Add required reviewers if you want a second pair of eyes on every publish; the branch rule is the part that matters here.
+
+   This is the only mechanism that actually binds which ref may reach the credential. Both workflows also check `github.ref` themselves, but that guard sits in the file the ref supplies — a branch carrying an edited copy of the workflow simply deletes it. An environment is enforced by GitHub, outside the file.
+
+   **Referencing an environment that does not exist creates it, silently, with no protection rules.** So a `production` that nobody configured looks exactly like a `production` that is doing its job, in the Actions UI and in this file alike. Check it has the branch rule.
 
 After that every release goes through the Actions tab. Two version floors are load-bearing and easy to misread if they drift: trusted publishing needs npm **≥ 11.5.1** and Node **≥ 22.14**. The npm bundled with Node 22 is older than that, so `publish-npm` upgrades npm before publishing; without it the publish fails on authentication with an error that never mentions the version.

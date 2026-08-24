@@ -186,6 +186,16 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The credential lives behind `production`, which is the only mechanism that
+    # genuinely binds which ref may reach it: a workflow cannot police its own
+    # ref, because the guard would be in the file that ref supplies.
+    #
+    # npm's trusted publisher must name this environment too — `--env production`
+    # — and the two sides must agree exactly or the publish fails on
+    # authentication. Referencing an environment that does not exist creates it
+    # with no protection rules, so this line buys nothing until `production`
+    # carries a deployment branch rule. See "Releasing" in AGENTS.md.
+    environment: production
     permissions:
       # A job-level block REPLACES the workflow-level one rather than extending
       # it, so every scope not named here is `none` — including the `contents:
