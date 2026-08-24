@@ -20,7 +20,7 @@ let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
 
 /** A throwaway self-signed pair on disk, as the tls row would have produced. */
-function certificateFiles(): { certPath: string; keyPath: string } {
+function certificateFiles(): { certPath: string; keyPath: string; ca: string } {
   const pems = generate([{ name: 'commonName', value: 'dsh' }], {
     keySize: 2048,
     algorithm: 'sha256',
@@ -38,13 +38,13 @@ function certificateFiles(): { certPath: string; keyPath: string } {
   const keyPath = join(dir, 'key.pem')
   writeFileSync(certPath, pems.cert)
   writeFileSync(keyPath, pems.private)
-  return { certPath, keyPath }
+  return { certPath, keyPath, ca: pems.cert }
 }
 
 /** One HTTPS GET against the gated carrier, accepting its self-signed certificate. */
-function get(host: string, port: number, path: string, headers: Record<string, string> = {}): Promise<number> {
+function get(host: string, port: number, path: string, headers: Record<string, string> = {}, ca?: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const rq = httpsRequest({ host, port, path, method: 'GET', headers, rejectUnauthorized: false },
+    const rq = httpsRequest({ host, port, path, method: 'GET', headers, ...ca !== undefined && { ca } },
       (res) => { res.resume(); res.on('end', () => { resolve(res.statusCode ?? 0) }) })
     rq.on('error', reject); rq.end()
   })
@@ -71,7 +71,7 @@ function req(url: string, remoteAddress: string, headers: Record<string, string>
 
 describe('GatedWebServer', () => {
   it('serves TLS and gates an unmodified consumer\'s routes on the pairing token', async () => {
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath, ca } = certificateFiles()
     ctx = new Context()
     await ctx.plugin(GatedWebServer, {
       host: '127.0.0.1', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
@@ -87,8 +87,8 @@ describe('GatedWebServer', () => {
 
     // A loopback peer is exempt, so this leg only shows the listener is real
     // and routes reach their handlers; the network legs below carry the gate.
-    expect(await get('127.0.0.1', port, '/plugins/x/client.js')).toBe(200)
-    expect(await get('127.0.0.1', port, '/api/session.list')).toBe(200)
+    expect(await get('127.0.0.1', port, '/plugins/x/client.js', {}, ca)).toBe(200)
+    expect(await get('127.0.0.1', port, '/api/session.list', {}, ca)).toBe(200)
   })
 
   it('refuses an all-interfaces bind that carries no pairing token', async () => {
@@ -249,7 +249,7 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
 describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer', () => {
   it('carries the real peer address through TLS termination', async () => {
     const lan = LAN as string
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath, ca } = certificateFiles()
     ctx = new Context()
     await ctx.plugin(GatedWebServer, {
       host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
@@ -262,9 +262,9 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
       handler: (request, res) => { seenPeer = request.socket.remoteAddress; res.writeHead(200); res.end('REACHED') },
     })
 
-    expect(await get(lan, server.networkPort, '/api/session.list')).toBe(403)
+    expect(await get(lan, server.networkPort, '/api/session.list', {}, ca)).toBe(403)
     expect(seenPeer).toBeUndefined()
-    expect(await get(lan, server.networkPort, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` })).toBe(200)
+    expect(await get(lan, server.networkPort, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` }, ca)).toBe(200)
     expect(seenPeer).toBe(lan)
   })
 
@@ -291,14 +291,14 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
 
   it('answers the same port over TLS only', async () => {
     const lan = LAN as string
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath, ca } = certificateFiles()
     ctx = new Context()
     await ctx.plugin(GatedWebServer, {
       host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
     }).await()
     const server = ctx.get('webServer') as GatedWebServer
     const negotiated = await new Promise<string | false>((resolve, reject) => {
-      const socket = tlsConnect({ host: lan, port: server.networkPort, rejectUnauthorized: false }, () => {
+      const socket = tlsConnect({ host: lan, port: server.networkPort, ca }, () => {
         const protocol = socket.getProtocol()
         socket.destroy()
         resolve(protocol ?? false)
