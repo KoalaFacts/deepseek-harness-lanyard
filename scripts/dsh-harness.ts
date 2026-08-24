@@ -17,7 +17,7 @@ import type { ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -140,6 +140,8 @@ export interface Deployment {
   port: number
   /** The pairing link the readiness line printed. */
   pairingLink: string
+  /** PEM of the certificate this deployment generated, for validating probes. */
+  ca: string
   /** This plugin's package name. */
   packageName: string
   /** The profile's composed bundle layer list. */
@@ -185,13 +187,24 @@ export function freePort(): Promise<number> {
 }
 
 /**
- * One HTTPS request against the deployment, accepting its self-signed cert.
+ * One HTTPS request against the deployment, validated against the certificate
+ * that deployment generated.
+ *
+ * Trusting that certificate rather than switching validation off is what makes
+ * every check below a statement about *this* deployment: `rejectUnauthorized:
+ * false` accepts anything, so the suite would pass while the address it probed
+ * was answered by something else entirely, and the certificate the tls row
+ * writes — the one a paired phone is asked to accept — would never be
+ * exercised at all.
+ * @param ca - PEM of the deployment's certificate, from {@link Deployment}.
  * @returns the status and body, so the caller can tell a gate refusal from the
  * app answering after admission.
  */
-export function probe(host: string, port: number, path: string, headers: OutgoingHttpHeaders = {}): Promise<Answer> {
+export function probe(
+  host: string, port: number, path: string, headers: OutgoingHttpHeaders = {}, ca?: string,
+): Promise<Answer> {
   return new Promise((resolve, reject) => {
-    const rq = request({ host, port, path, method: 'GET', headers, rejectUnauthorized: false, timeout: 15_000 }, (res) => {
+    const rq = request({ host, port, path, method: 'GET', headers, timeout: 15_000, ...ca !== undefined && { ca } }, (res) => {
       let body = ''
       res.setEncoding('utf8')
       res.on('data', (chunk: string) => { body += chunk })
@@ -279,8 +292,23 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     ], { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
 
     const pairingLink = await awaitPairingLink(server)
+
+    // The tls row writes its material to `dshHomePath('lanyard-tls')`, which is
+    // this DSH_HOME. Reading it rather than waving certificate validation
+    // through is what ties every probe below to this deployment — and it is
+    // asserted rather than assumed, because a wrong path that silently fell
+    // back to trusting anything would leave the suite green and meaningless.
+    const certPath = join(home, 'lanyard-tls', 'cert.pem')
+    if (!existsSync(certPath)) {
+      throw new Error(
+        `lanyard e2e: expected the deployment's certificate at ${certPath} and found none; `
+        + 'the tls row may write elsewhere in this version, and probes must not fall back to trusting any certificate',
+      )
+    }
+    const ca = readFileSync(certPath, 'utf8')
+
     return await body({
-      dsh, env, cwd: workspace, port, pairingLink, packageName: name,
+      dsh, env, cwd: workspace, port, pairingLink, packageName: name, ca,
       bundles: profile.dsh?.profile?.bundles ?? [],
     })
   } finally {

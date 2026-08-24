@@ -8,8 +8,9 @@
  *         DSH_E2E_KEEP=1 node scripts/e2e-dsh.ts   (keep the workspace)
  */
 
+import type { OutgoingHttpHeaders } from 'node:http'
 import {
-  TOKEN, admitted, probe, recorder, refused, requireLan, run, withDshDeployment,
+  TOKEN, admitted, probe as probeUnbound, recorder, refused, requireLan, run, withDshDeployment,
 } from './dsh-harness.ts'
 
 const lan = requireLan()
@@ -24,7 +25,13 @@ function assetPath(html: string): string | undefined {
   return /["'](\/assets\/[^"']+)["']/.exec(html)?.[1]
 }
 
-await withDshDeployment(async ({ dsh, env, cwd, port, pairingLink, packageName, bundles }) => {
+await withDshDeployment(async ({ dsh, env, cwd, port, pairingLink, packageName, bundles, ca }) => {
+  // Bound to this deployment's certificate once, rather than threaded through
+  // every call: passing it per site is the shape where one gets missed, and a
+  // missed one would silently be the only probe trusting any certificate.
+  const probe = (host: string, port: number, path: string, headers: OutgoingHttpHeaders = {}): ReturnType<typeof probeUnbound> =>
+    probeUnbound(host, port, path, headers, ca)
+
   check('the bundle joined the profile layer stack', bundles.includes(packageName), true)
 
   // The startup row replacement is visible before anything binds: the shipped
