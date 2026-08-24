@@ -130,11 +130,22 @@ All four verification layers run again on every release. A tag is an intent to r
 
 ### One-time setup, which the workflow cannot do for itself
 
-OIDC cannot perform a package's **first** publish: npm requires the package to exist before a trusted publisher can be attached to it. So the first version is published by hand, once:
+OIDC cannot perform a package's **first** publish: npm requires the package to exist before a trusted publisher can be attached to it, and unlike PyPI it has no way to reserve a name in advance. (Confirmed against npm's docs on 2026-08-24 — `npm trust` says the same: "The package you're configuring must already exist on the npm registry.") So the first version is published by hand, once:
 
 1. Own the `@koalafacts` scope on npm — as an org or a user scope. Publishing into a scope you do not own fails with a 404 that reads like the package is missing.
 2. `npm login`, then `npm publish --access public` from a clean checkout. (A `0.0.0` placeholder works just as well if you would rather not spend the real version on it.)
-3. At `https://www.npmjs.com/package/@koalafacts/deepseek-harness-lanyard/access`, add a trusted publisher: owner `KoalaFacts`, repository `deepseek-harness-lanyard`, workflow `release.yml`. Leave the environment blank — this workflow declares none, and the two must agree exactly.
+3. Attach the trusted publisher. The CLI does it without touching the website:
+
+   ```sh
+   npm trust github @koalafacts/deepseek-harness-lanyard \
+     --repo KoalaFacts/deepseek-harness-lanyard \
+     --file release.yml \
+     --allow-publish
+   ```
+
+   `--allow-publish` is not optional: a configuration must now grant at least one action explicitly (the other is `--allow-stage-publish`), and one granting nothing publishes nothing. In the website UI the same setting lives under **Packages → the package → Settings → Trusted publishing**, which is where it moved from the old `/access` tab. Pass no `--env`: this workflow declares no environment, and the two sides must agree exactly.
+
+   npm does not validate any of this when it is saved. A wrong repository, filename or environment is accepted quietly and only surfaces as a failure at the next publish.
 
 After that every release goes through the Actions tab. **The trusted publisher names this workflow by filename**, so renaming `release.yml` breaks publishing until the npm side is changed to match; that failure surfaces as an authentication error that says nothing about the rename.
 
