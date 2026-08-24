@@ -409,6 +409,20 @@ describe('assertRegistrarsWrapped', () => {
     expect(() => { assertRegistrarsWrapped() }).not.toThrow()
   })
 
+  it('fails the load when an unwrapped seat sits on a base class rather than the prototype itself', () => {
+    // Inspecting own properties only would call this clean: upstream moving a
+    // seat down into a shared base is a reshuffle, not a removal, and the seat
+    // is every bit as reachable from `ctx.webServer`.
+    class Base { registerStream(): void {} }
+    class Grown extends Base {
+      register(): void {}
+      registerUpgrade(): void {}
+      registerFallback(): void {}
+    }
+    expect(() => { assertRegistrarsWrapped(Grown.prototype) })
+      .toThrow(/"registerStream".*does not put behind admission/s)
+  })
+
   it('fails the load when the harness grows a registration seat this gate does not wrap', () => {
     class Grown {
       register(): void {}

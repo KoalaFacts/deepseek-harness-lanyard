@@ -17,7 +17,9 @@ export {
   PAIRING_TOKEN_PATTERN, PAIRING_TOKEN_REQUIREMENT,
 } from './admission.ts'
 export { GENERATE_TOKEN_HINT, resolvePairingToken } from './credentials.ts'
-export { bootstrapAuthToken, injectPairingBootstrap, pairingBootstrapScript } from './browser-auth.ts'
+export {
+  BOOTSTRAP_SCRIPT_CLOSE, BOOTSTRAP_SCRIPT_OPEN, bootstrapAuthToken, injectPairingBootstrap, pairingBootstrapScript,
+} from './browser-auth.ts'
 export { GatedWebServer, isPrivilegedEndpoint } from './webserver.ts'
 export type { Config as GatedWebServerConfig } from './webserver.ts'
 export { lanIpv4Addresses, LANYARD_TLS_SERVICE } from './tls.ts'

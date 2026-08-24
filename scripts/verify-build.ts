@@ -29,8 +29,13 @@ for (const subpath of Object.keys(manifest.exports)) {
   assert.ok(Object.keys(loaded).length > 0, `${specifier} loaded but exported nothing`)
 }
 
-const { pairingBootstrapScript } = await import(manifest.name) as {
+// The wrapper constants come from the built artifact too, so this check
+// unwraps using what the shipped module actually says rather than a copy that
+// could drift from it — and the build fails if it stops exporting them.
+const { pairingBootstrapScript, BOOTSTRAP_SCRIPT_OPEN, BOOTSTRAP_SCRIPT_CLOSE } = await import(manifest.name) as {
   pairingBootstrapScript: () => string
+  BOOTSTRAP_SCRIPT_OPEN: string
+  BOOTSTRAP_SCRIPT_CLOSE: string
 }
 
 /** What the fake page recorded while the built bootstrap ran against it. */
@@ -41,7 +46,17 @@ interface FakePage {
 
 const token = 'pairing-token_0123456789-ab'
 const page: FakePage = { stored: {}, cookie: '' }
-runInNewContext(pairingBootstrapScript().replace(/^<script>/, '').replace(/<\/script>$/, ''), {
+// Sliced against the exact wrapper the module exports, not matched with a
+// pattern: a pattern here would be describing a string this build already has
+// in hand, and would have to keep agreeing with it about case and whitespace
+// forever. A wrapper that stops matching fails the build rather than silently
+// evaluating a script tag as source.
+const wrapped = pairingBootstrapScript()
+if (!wrapped.startsWith(BOOTSTRAP_SCRIPT_OPEN) || !wrapped.endsWith(BOOTSTRAP_SCRIPT_CLOSE)) {
+  throw new Error(`lanyard: the pairing bootstrap is no longer wrapped in ${BOOTSTRAP_SCRIPT_OPEN}…${BOOTSTRAP_SCRIPT_CLOSE}, so this check cannot unwrap it`)
+}
+const body = wrapped.slice(BOOTSTRAP_SCRIPT_OPEN.length, wrapped.length - BOOTSTRAP_SCRIPT_CLOSE.length)
+runInNewContext(body, {
   URLSearchParams,
   location: { hash: `#auth=${token}`, pathname: '/', search: '', protocol: 'https:' },
   localStorage: {

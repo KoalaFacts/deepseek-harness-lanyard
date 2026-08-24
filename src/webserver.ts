@@ -255,6 +255,10 @@ const WRAPPED_REGISTRARS: readonly string[] = ['register', 'registerUpgrade', 'r
  * upstream must therefore break the load rather than quietly widen what is
  * reachable without a token.
  *
+ * The search covers the whole prototype chain, because a seat moved down into a
+ * shared base class is still a seat; inspecting one level would have called
+ * that upstream reshuffle clean.
+ *
  * It recognises a seat by its `register` prefix, which is how all three of the
  * current ones are named. That is a naming convention rather than a guarantee,
  * so a differently named seat would still need catching by review — claiming
@@ -263,8 +267,17 @@ const WRAPPED_REGISTRARS: readonly string[] = ['register', 'registerUpgrade', 'r
  * @throws when an unrecognised `register*` method exists upstream.
  */
 export function assertRegistrarsWrapped(prototype: object = WebServer.prototype): void {
-  const unwrapped = Object.getOwnPropertyNames(prototype)
+  // The whole chain, not just own properties: a seat moved to a base class is
+  // still a seat, and inspecting one level would have called that upstream
+  // reshuffle clean. `Object.prototype` is where the search stops, since
+  // nothing there registers routes.
+  const names = new Set<string>()
+  for (let level: object | null = prototype; level !== null && level !== Object.prototype; level = Object.getPrototypeOf(level) as object | null) {
+    for (const name of Object.getOwnPropertyNames(level)) names.add(name)
+  }
+  const unwrapped = [...names]
     .filter(name => name.startsWith('register') && !WRAPPED_REGISTRARS.includes(name))
+    .sort()
   if (unwrapped.length > 0) {
     throw new Error(
       `lanyard: this @deepseek-ai/dsh-host-webserver version exposes ${unwrapped.map(name => JSON.stringify(name)).join(', ')}, `

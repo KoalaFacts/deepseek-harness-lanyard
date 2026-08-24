@@ -71,8 +71,11 @@ await withDshDeployment(async ({ dsh, env, cwd, port, pairingLink, packageName, 
   check('the gate is in front of the fallback seat, not just the named routes',
     refused(await probe(lan, port, '/assets/index.js.map')), true)
   const asset = assetPath(index.body)
+  // `admitted` only means the gate did not refuse, so a 404 satisfies it — this
+  // has to assert the asset actually arrived, which is the thing pairing needs.
+  const served = asset === undefined ? undefined : await probe(lan, port, asset)
   check('and the shell\'s own assets still load for an anonymous LAN peer, so pairing resolves',
-    asset !== undefined && admitted(await probe(lan, port, asset)), true)
+    served !== undefined && served.status === 200 && served.body.length > 0, true)
 })
 
 report('lanyard e2e')
