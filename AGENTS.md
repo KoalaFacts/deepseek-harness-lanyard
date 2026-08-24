@@ -120,11 +120,13 @@ Releasing is deliberate rather than automatic: **pushing a tag does not publish 
 1. Bump the version on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
 2. Actions → **release** → *Run workflow*, on `main`, with **dry_run unticked**.
 
-The version comes from `package.json` on the ref you select. A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
+The version comes from `package.json` on the ref you select, and a real publish is refused from anywhere but `main` — `workflow_dispatch` offers every branch, and npm's trusted publisher matches owner/repo/workflow rather than the branch, so this is the only place that can be enforced. Dry runs are exempt, since rehearsing a branch is the point of them. A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
 
 The tag and the GitHub Release are created by the workflow **after** a successful publish, never before — a failed publish leaves no tag claiming a version that is not on the registry. Two guards run before the slow legs: a version already on the registry is refused, and so is a version whose tag exists with nothing published behind it, since that combination needs a person to look at it.
 
 Leaving `dry_run` ticked (the default) runs the entire gate and stops at `npm publish --dry-run`, publishing nothing and creating no tag. That is the rehearsal.
+
+The run is split into `verify` and `publish`, and the split is a security boundary rather than a tidiness one. Verifying means executing a great deal of code this repository does not control — `dsh@latest` is deliberately unpinned, plus a Chromium download and the built artifact — while publishing holds an OIDC credential that can push a package under this name. Anything running beside that credential can mint it, so `publish` installs nothing, runs no lifecycle scripts, and takes the built `lib/` from `verify` as an artifact.
 
 All four verification layers run again on every release. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a commit that passed last week can fail against today's upstream. A SKIPPED e2e therefore blocks the release rather than passing.
 

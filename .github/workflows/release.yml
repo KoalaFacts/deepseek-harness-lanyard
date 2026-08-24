@@ -8,15 +8,20 @@ name: release
 # Releasing is deliberate rather than automatic. This runs only when someone
 # starts it from the Actions tab and unticks `dry_run`; pushing a tag does not
 # publish anything. The version comes from package.json on whichever ref you
-# select, and the tag and GitHub Release are created here AFTER a successful
-# publish — so a failed publish leaves no tag claiming a version that is not on
-# the registry.
+# select, and the tag and GitHub Release are created AFTER a successful publish
+# — so a failed publish leaves no tag claiming a version that is not on the
+# registry.
 #
-# The full gate runs again here rather than trusting the run that happened on
-# main. That matters more for this package than for most: nothing pins `dsh`,
-# so the same commit that passed a week ago can fail against today's upstream
-# release, and shipping a plugin that no longer composes with the harness is
-# the failure this workflow exists to prevent.
+# The work is split across two jobs on purpose, and the split is a security
+# boundary rather than a tidiness one. `verify` runs the whole gate, which
+# means installing and executing a great deal of code this repository does not
+# control: `pnpm add @deepseek-ai/dsh@latest` (deliberately unpinned — see
+# AGENTS.md), a Chromium download, and the built artifact itself. `publish`
+# holds the OIDC credential that can push a package to npm under this name.
+# Anything running beside that credential can read ACTIONS_ID_TOKEN_REQUEST_URL
+# and mint it, so the two never share a job: `publish` installs no dependencies
+# and runs no lifecycle scripts, taking the built `lib/` from `verify` as an
+# artifact instead.
 #
 # Setting this up is not only this file — npmjs.com has to be told to trust it.
 # See "Releasing" in AGENTS.md; the trusted publisher is configured per package
@@ -41,14 +46,16 @@ permissions:
   contents: read
 
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      # The OIDC token trusted publishing exchanges for registry credentials.
-      id-token: write
-      # Creating the tag and the GitHub Release at the end.
-      contents: write
+    # ci.yml allows 15 minutes for e2e and 20 for browser as separate jobs.
+    # These run serially here, plus check and a cold Chromium download, so the
+    # budget has to exceed the sum rather than sit under it: a release killed
+    # part-way is worse than a slow one.
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dist_tag: ${{ steps.version.outputs.dist_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,19 +69,28 @@ jobs:
           version: 10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          # Trusted publishing needs Node >= 22.14; the 22 line satisfies it.
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
-      # The npm bundled with Node 22 predates trusted publishing, which landed
-      # in 11.5.1. Without this the publish fails on authentication with an
-      # error that does not mention the version at all.
-      - name: Upgrade npm to a version that speaks trusted publishing
+      # A real publish may only come from the default branch. `workflow_dispatch`
+      # offers every branch in its dropdown, and neither guard below looks at the
+      # ref, so without this anyone with write access could publish an unreviewed
+      # branch to `latest` — with provenance attesting it came from this
+      # repository, which makes it look more trustworthy rather than less. npm's
+      # trusted publisher matches owner/repo/workflow, never the branch, so this
+      # is the only place it can be enforced. Dry runs are exempt: they publish
+      # nothing, and rehearsing a branch is the point of them.
+      - name: Refuse a real publish from anywhere but the default branch
+        if: inputs.dry_run == false
+        env:
+          REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          npm install -g npm@latest
-          npm --version
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::a real release must run on main; this run is on ${REF}. Re-run it on main, or leave dry_run ticked."
+            exit 1
+          fi
+          echo "releasing from $REF"
 
       - run: pnpm install --frozen-lockfile
 
@@ -98,8 +114,8 @@ jobs:
           echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
           echo "publishing $VERSION to the $DIST_TAG channel"
 
-      # Both checks run before the twenty minutes of e2e rather than after, so
-      # an already-released version fails in seconds with a message naming the
+      # Both checks run before the long legs rather than after, so a version
+      # that cannot be released fails in seconds with a message naming the
       # cause instead of at the last step.
       - name: Refuse a version that is already released
         env:
@@ -107,59 +123,117 @@ jobs:
         run: |
           set -euo pipefail
           NAME="$(npm pkg get name | tr -d '"')"
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+
+          # `npm view` exits non-zero for a version that does not exist AND for
+          # a network failure, a 5xx, or an auth problem. Swallowing the reason
+          # would make an outage read as "free to publish", so the error is
+          # captured and only a genuine 404 is accepted as an answer.
+          set +e
+          VIEW_OUT="$(npm view "$NAME@$VERSION" version 2>&1)"
+          VIEW_RC=$?
+          set -e
+          if [ "$VIEW_RC" -eq 0 ]; then
             echo "::error::$NAME@$VERSION is already on the registry; bump the version in package.json"
             exit 1
           fi
-          # A tag for this version means it was released from some other commit.
-          # Publishing again under the same version is what the check above
-          # catches; this catches the reverse — a tag with nothing behind it.
+          if ! printf '%s' "$VIEW_OUT" | grep -q 'E404'; then
+            echo "::error::could not determine whether $NAME@$VERSION is published, so refusing to guess. npm said:"
+            printf '%s\n' "$VIEW_OUT"
+            exit 1
+          fi
+
+          # A tag for this version with nothing published behind it means an
+          # earlier release got part-way. That needs a person, not a retry.
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "::error::tag v$VERSION already exists but $NAME@$VERSION is not on the registry; resolve that by hand before releasing"
+            echo "::error::tag v$VERSION already exists but $NAME@$VERSION is not on the registry; an earlier release stopped part-way. Delete the tag to retry, or investigate before releasing."
             exit 1
           fi
           echo "$NAME@$VERSION is not yet published and v$VERSION is free"
 
-      # Both e2e suites exit 2 with a SKIPPED message where they cannot run —
-      # no LAN interface, no Playwright. In CI that is a pass; here it stops the
-      # release, which is deliberate: a release nobody verified is worse than a
-      # release that did not happen. A run that fails with SKIPPED is a runner
-      # problem, not a code problem.
+      # Both e2e suites exit 2 with a loud SKIPPED message where they cannot run
+      # — no LAN interface, no Playwright — which fails the step here exactly as
+      # it does in ci.yml. That is deliberate: a release nobody verified is worse
+      # than a release that did not happen, so a run failing with SKIPPED is a
+      # runner problem rather than a code problem.
       - run: npm run check
       - run: npm run test:e2e
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e:browser
 
-      # No NODE_AUTH_TOKEN: trusted publishing supplies the credential from the
-      # OIDC token. --provenance is passed explicitly rather than relying on it
-      # being implied, so a change in that default cannot silently drop the
-      # attestation.
+      # `publish` installs nothing, so the build it uploads is the one the gate
+      # above just approved rather than a second build of the same source.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lib
+          path: lib
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The OIDC token trusted publishing exchanges for registry credentials.
+      id-token: write
+      # Creating the tag and the GitHub Release at the end.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Trusted publishing needs Node >= 22.14; the 22 line satisfies it.
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # The npm bundled with Node 22 predates trusted publishing, which landed
+      # in 11.5.1; without this the publish fails on authentication with an
+      # error that does not mention the version at all. Pinned to the 11 line
+      # rather than `@latest`, because `@latest` is the one unreviewed thing
+      # left running beside the publish credential, and a future major could
+      # change the primitives the guards are built on.
+      - name: Install an npm that speaks trusted publishing
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lib
+          path: lib
+
+      # No dependencies are installed in this job and `--ignore-scripts` keeps
+      # `prepare` from running, so nothing this repository does not control
+      # executes beside the credential. `lib/` is already built, above, which is
+      # the only thing `prepare` would have produced. A future prepack step
+      # would need building into `verify` rather than added here.
       - name: Publish to npm
+        id: publish
         if: inputs.dry_run == false
         env:
-          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
-        run: npm publish --provenance --tag "$DIST_TAG"
+          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
+        run: npm publish --provenance --tag "$DIST_TAG" --ignore-scripts
 
       - name: Report what a dry run would have done
         if: inputs.dry_run != false
         env:
-          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
         run: |
           set -euo pipefail
-          npm publish --provenance --tag "$DIST_TAG" --dry-run
+          npm publish --provenance --tag "$DIST_TAG" --ignore-scripts --dry-run
           echo "dry run only — nothing was published, and no tag or release was created"
 
       # Only after the registry has the version. The reverse order would leave a
-      # tag claiming a release that failed, and the guard above would then block
-      # the retry. gh creates the tag from --target, so this is both steps at
-      # once, and the gh CLI ships on the runner so it needs no third-party
-      # action.
+      # tag claiming a release that failed. gh creates the tag from --target, so
+      # this is both at once, and the gh CLI ships on the runner so it needs no
+      # third-party action.
       - name: Tag the commit and create the GitHub Release
-        if: inputs.dry_run == false
+        if: steps.publish.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
-          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
           TARGET: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -170,3 +244,17 @@ jobs:
             --title "v$VERSION" \
             --generate-notes \
             "${PRERELEASE[@]}"
+
+      # Publish and tag are two calls to two services and cannot be made atomic,
+      # so the state between them gets a message rather than being left for
+      # someone to reconstruct. Re-running the workflow is the wrong move here:
+      # the version is on the registry, so the guard in `verify` would refuse it
+      # and say to bump the version, which would abandon what was just published.
+      - name: Explain a publish that could not be tagged
+        if: failure() && steps.publish.outcome == 'success'
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ github.sha }}
+        run: |
+          echo "::error::$VERSION IS published to npm, but tagging failed. Do not re-run this workflow and do not bump the version — create the tag by hand instead: gh release create v$VERSION --target $TARGET --title v$VERSION --generate-notes"
+          exit 1
