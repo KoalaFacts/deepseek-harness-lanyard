@@ -255,6 +255,10 @@ const WRAPPED_REGISTRARS: readonly string[] = ['register', 'registerUpgrade', 'r
  * upstream must therefore break the load rather than quietly widen what is
  * reachable without a token.
  *
+ * The search covers the whole prototype chain, because a seat moved down into a
+ * shared base class is still a seat; inspecting one level would have called
+ * that upstream reshuffle clean.
+ *
  * It recognises a seat by its `register` prefix, which is how all three of the
  * current ones are named. That is a naming convention rather than a guarantee,
  * so a differently named seat would still need catching by review — claiming
@@ -263,8 +267,17 @@ const WRAPPED_REGISTRARS: readonly string[] = ['register', 'registerUpgrade', 'r
  * @throws when an unrecognised `register*` method exists upstream.
  */
 export function assertRegistrarsWrapped(prototype: object = WebServer.prototype): void {
-  const unwrapped = Object.getOwnPropertyNames(prototype)
+  // The whole chain, not just own properties: a seat moved to a base class is
+  // still a seat, and inspecting one level would have called that upstream
+  // reshuffle clean. `Object.prototype` is where the search stops, since
+  // nothing there registers routes.
+  const names = new Set<string>()
+  for (let level: object | null = prototype; level !== null && level !== Object.prototype; level = Object.getPrototypeOf(level) as object | null) {
+    for (const name of Object.getOwnPropertyNames(level)) names.add(name)
+  }
+  const unwrapped = [...names]
     .filter(name => name.startsWith('register') && !WRAPPED_REGISTRARS.includes(name))
+    .sort()
   if (unwrapped.length > 0) {
     throw new Error(
       `lanyard: this @deepseek-ai/dsh-host-webserver version exposes ${unwrapped.map(name => JSON.stringify(name)).join(', ')}, `
@@ -372,8 +385,30 @@ export class GatedWebServer extends WebServer {
     }
   }
 
-  /** The port clients reach: the TLS listener when serving HTTPS, else the inherited one. */
+  /**
+   * The port a local http client reaches, which is what every consumer of this
+   * member in the shipped composition builds a URL from: `dsh-web-app` hardcodes
+   * `http://127.0.0.1:${port}` for the browser handoff, the `DSH_WEB_URL` shell
+   * variable, and the URL it tells the model it is serving.
+   *
+   * Under TLS that is the inherited server, which binds an ephemeral loopback
+   * port in plaintext while this class terminates TLS in front of it. Reporting
+   * the TLS port here instead pointed all three at an https listener over http,
+   * so the handoff opened a browser on a connection error. Nothing is newly
+   * reachable: the inherited listener is loopback-only, and a loopback peer is
+   * exempt from admission anyway.
+   */
   override get port(): number {
+    return super.port
+  }
+
+  /**
+   * The port a device elsewhere on the network connects to — the TLS listener
+   * when serving HTTPS, else the same loopback listener as {@link port}. This is
+   * what a pairing link must name; {@link port} would send the phone to a port
+   * bound only to the machine's own loopback interface.
+   */
+  get networkPort(): number {
     return this.tlsPort ?? super.port
   }
 
@@ -504,8 +539,12 @@ export class GatedWebServer extends WebServer {
       ...route,
       handler: (req, socket, head) => {
         if (!this.permits(req, this.posture(route.path))) {
-          socket.write(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
-          socket.destroy()
+          // `end` rather than `write` + `destroy`: writes are queued, and
+          // destroying discards whatever has not reached the kernel, so a
+          // refused handshake could arrive as a bare connection reset. The
+          // marker distinguishing this gate from the Host fence behind it is
+          // exactly what went missing.
+          socket.end(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
           return
         }
         return inner(req, socket, head)

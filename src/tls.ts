@@ -8,7 +8,8 @@
  * @module
  */
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -67,15 +68,48 @@ export function lanIpv4Addresses(): string[] {
 }
 
 /**
- * Write one certificate and key pair unless both already exist. The key is
- * written before the certificate and both land through a rename, so a crash
- * mid-generation leaves the next boot regenerating both rather than pairing a
- * fresh key with a stale certificate.
+ * Whether an existing certificate still names every address this machine would
+ * be reached on.
+ *
+ * The subject alternative names are a snapshot of the interfaces present when
+ * the certificate was generated, and the certificate outlives them: move the
+ * machine to another network and the pairing link advertises an address the
+ * certificate does not cover, so the phone gets a name-mismatch error rather
+ * than the plain untrusted-issuer prompt the README describes. A certificate
+ * that cannot be read at all counts as not covering anything, so the next step
+ * replaces it rather than serving something unparseable.
+ * @param certPath - the PEM certificate to inspect.
+ * @param addresses - the LAN literals the certificate has to name.
+ */
+export function certificateCovers(certPath: string, addresses: string[]): boolean {
+  let named: string
+  try {
+    named = new X509Certificate(readFileSync(certPath)).subjectAltName ?? ''
+  } catch {
+    return false
+  }
+  // `subjectAltName` is a rendered list — `DNS:localhost, IP Address:10.0.0.7`
+  // — so each literal is matched as a whole entry rather than as a substring,
+  // which would let 10.0.0.7 satisfy a request for 10.0.0.71.
+  const entries = new Set(named.split(',').map(entry => entry.trim()))
+  return addresses.every(address => entries.has(`IP Address:${address}`))
+}
+
+/**
+ * Write one certificate and key pair unless a usable one already exists. The
+ * key is written before the certificate and both land through a rename, so a
+ * crash mid-generation leaves the next boot regenerating both rather than
+ * pairing a fresh key with a stale certificate.
+ *
+ * "Usable" means present *and* still naming this machine's current addresses:
+ * reuse is what keeps a paired device's accept-once exception valid, but only
+ * while the certificate still matches what the pairing link points at.
  * @param certPath - destination of the PEM certificate.
  * @param keyPath - destination of the PEM private key.
+ * @param addresses - LAN literals to name; this machine's current ones by default.
  */
-function generateMaterial(certPath: string, keyPath: string): void {
-  if (existsSync(certPath) && existsSync(keyPath)) return
+export function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): void {
+  if (existsSync(certPath) && existsSync(keyPath) && certificateCovers(certPath, addresses)) return
   const pems = generate([{ name: 'commonName', value: 'dsh' }], {
     days: CERT_VALIDITY_DAYS,
     keySize: CERT_KEY_SIZE,
@@ -85,7 +119,7 @@ function generateMaterial(certPath: string, keyPath: string): void {
       altNames: [
         { type: 2, value: 'localhost' },
         { type: 7, ip: '127.0.0.1' },
-        ...lanIpv4Addresses().map(ip => ({ type: 7 as const, ip })),
+        ...addresses.map(ip => ({ type: 7 as const, ip })),
       ],
     }],
   })
@@ -96,6 +130,9 @@ function generateMaterial(certPath: string, keyPath: string): void {
 /** Write through a sibling temp file and rename, so a reader sees old-or-new, never partial. */
 function writeAtomic(path: string, content: string, mode: number): void {
   const temp = `${path}.${String(process.pid)}.tmp`
+  // 'wx' on the temp file only: a leftover temp means another process is
+  // mid-write, which is worth failing on. The rename over `path` is what makes
+  // replacing an existing certificate work at all.
   writeFileSync(temp, content, { mode, flag: 'wx' })
   renameSync(temp, path)
 }

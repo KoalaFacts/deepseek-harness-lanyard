@@ -62,6 +62,8 @@ Break any of these and the plugin fails **open** — serving the LAN with no gat
 - **The gate's refusal body is its own marker**, not the bare `forbidden` that `dsh-client-connection`'s Host fence also answers with — otherwise nothing can tell admission from the fence behind it.
 - **Every registration seat is wrapped, and a new one fails the load.** Wrapping `register` and `registerUpgrade` but not `registerFallback` shipped the built frontend to the LAN ungated for a release, and looked identical from inside this class — no path is registered for that seat, so even the unclaimed-path warning was blind to it. `assertRegistrarsWrapped()` turns an upstream `register*` addition into a loud load failure instead of a silent widening.
 - **Route matching decodes the pathname; endpoint classification reads both forms.** `dsh-client-modules` and `dsh-host-frontend-static` both `decodeURIComponent` before resolving a file, so a raw-form suffix match let `%70` spell `.map` past the exclusion. A pathname whose escapes do not decode is refused rather than admitted.
+- **`port` is the loopback listener; `networkPort` is the one a device reaches.** Every consumer of `port` in the shipped composition builds `http://127.0.0.1:${port}` from it — the browser handoff, the `DSH_WEB_URL` shell variable, and the URL the model is told it is serving. Under TLS that has to be the inherited plaintext server, not the TLS front, or all three name an https listener over http. A pairing link needs the opposite and says so explicitly.
+- **A reused certificate must still name the addresses the pairing link advertises.** The subject alternative names are a snapshot of the interfaces present when it was generated, and the certificate outlives them; reuse is what keeps a paired device's accept-once exception valid, but a certificate that no longer covers the current LAN address gives the phone a name mismatch rather than the untrusted-issuer prompt the README promises. `certificateCovers()` decides, matching whole rendered entries — a substring test lets `10.0.0.71` answer for `10.0.0.7`.
 - **`assertServer()` guards the inherited private `server` field.** TypeScript `private` is erased at runtime, so the subclass can reach it; an upstream rename must fail the load loudly rather than quietly serve plaintext.
 
 ## Replacing a shipped row means owning its whole contract
@@ -111,6 +113,18 @@ An install that cannot resolve is not a test result. `dsh` publishes as a wave o
 
 CI runs all four on pull requests, and the nightly re-runs the e2e on both channels.
 
+## Reviewing your own work
+
+The verification layers above catch code that does not do what it says. These catch the other thing — work that is correct everywhere the author looked. Each rule is here because it was broken here first, and each failure was invisible from inside the change that caused it.
+
+**Review every pull request before opening it, the ones that only touch CI included.** The plugin source got both `/code-review` and `/security-review`; the release workflow got neither, on the reasoning that it was plumbing rather than product. It was the plumbing holding a credential that can publish this package under its own name, and the first review ever pointed at it found the job running `dsh@latest` — deliberately unpinned — beside `id-token: write`. "It is only config" is exactly wrong where the config holds credentials.
+
+**A self-review checks the implementation against the author's threat model and cannot check the model.** `release.yml` was written believing trusted publishing means there is no secret to leak, and re-reading it confirmed the implementation matched that belief. What re-reading could not surface is that an OIDC credential is not stored but *is* mintable by anything sharing the job — the first question asked by a reader who does not already hold the belief. Where a change rests on a security argument, have the argument read by something that did not write it.
+
+**Apply a rule by enumerating instances, never from memory.** Three times here a rule landed everywhere but one place, and every instance that *was* written looked correct on its own, so nothing inside the change reported that it had stopped early: `register` and `registerUpgrade` wrapped but not `registerFallback`, which served the built frontend to the LAN ungated for a release; `permissions:` on two workflows of three; the safe `env:` form on one workflow step of five. The one time it went right — the action SHA pins — is the one time the list came from `grep` rather than recall.
+
+**A comment stating a policy is a claim the code has to honour.** `dependabot.yml` described `@deepseek-ai/*` as deliberately out of scope and then configured nothing of the kind, leaving the updater aimed at exactly the pins the paragraph above it explained must not move. Prose and code contradicting each other in the same file is not a subtle defect; it survives because the author re-reads the sentence they meant rather than the one they wrote.
+
 ## Releasing
 
 `.github/workflows/release.yml` publishes to npm with **npm trusted publishing (OIDC)**. No npm token is stored in this repository — the workflow exchanges a short-lived GitHub OIDC token for registry credentials, so there is nothing to leak or rotate.
@@ -120,11 +134,13 @@ Releasing is deliberate rather than automatic: **pushing a tag does not publish 
 1. Bump the version on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
 2. Actions → **release** → *Run workflow*, on `main`, with **dry_run unticked**.
 
-The version comes from `package.json` on the ref you select. A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
+The version comes from `package.json` on the ref you select, and a real publish is refused from anywhere but `main` — `workflow_dispatch` offers every branch, and npm's trusted publisher matches owner/repo/workflow rather than the branch, so this is the only place that can be enforced. Dry runs are exempt, since rehearsing a branch is the point of them. A version containing a hyphen publishes to `next`, everything else to `latest`, mirroring upstream's own channels.
 
 The tag and the GitHub Release are created by the workflow **after** a successful publish, never before — a failed publish leaves no tag claiming a version that is not on the registry. Two guards run before the slow legs: a version already on the registry is refused, and so is a version whose tag exists with nothing published behind it, since that combination needs a person to look at it.
 
 Leaving `dry_run` ticked (the default) runs the entire gate and stops at `npm publish --dry-run`, publishing nothing and creating no tag. That is the rehearsal.
+
+The run is split into `verify` and `publish`, and the split is a security boundary rather than a tidiness one. Verifying means executing a great deal of code this repository does not control — `dsh@latest` is deliberately unpinned, plus a Chromium download and the built artifact — while publishing holds an OIDC credential that can push a package under this name. Anything running beside that credential can mint it, so `publish` installs nothing, runs no lifecycle scripts, and takes the built `lib/` from `verify` as an artifact.
 
 All four verification layers run again on every release. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a commit that passed last week can fail against today's upstream. A SKIPPED e2e therefore blocks the release rather than passing.
 

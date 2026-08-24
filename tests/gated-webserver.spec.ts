@@ -1,6 +1,7 @@
 /** The gated carrier over a real listener: admission, the privileged pin, and TLS. */
 import { connect as tlsConnect } from 'node:tls'
 import { request as httpsRequest } from 'node:https'
+import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -19,7 +20,7 @@ let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
 
 /** A throwaway self-signed pair on disk, as the tls row would have produced. */
-function certificateFiles(): { certPath: string; keyPath: string } {
+function certificateFiles(): { certPath: string; keyPath: string; ca: string } {
   const pems = generate([{ name: 'commonName', value: 'dsh' }], {
     keySize: 2048,
     algorithm: 'sha256',
@@ -37,13 +38,13 @@ function certificateFiles(): { certPath: string; keyPath: string } {
   const keyPath = join(dir, 'key.pem')
   writeFileSync(certPath, pems.cert)
   writeFileSync(keyPath, pems.private)
-  return { certPath, keyPath }
+  return { certPath, keyPath, ca: pems.cert }
 }
 
 /** One HTTPS GET against the gated carrier, accepting its self-signed certificate. */
-function get(host: string, port: number, path: string, headers: Record<string, string> = {}): Promise<number> {
+function get(host: string, port: number, path: string, headers: Record<string, string> = {}, ca?: string): Promise<number> {
   return new Promise((resolve, reject) => {
-    const rq = httpsRequest({ host, port, path, method: 'GET', headers, rejectUnauthorized: false },
+    const rq = httpsRequest({ host, port, path, method: 'GET', headers, ...ca !== undefined && { ca } },
       (res) => { res.resume(); res.on('end', () => { resolve(res.statusCode ?? 0) }) })
     rq.on('error', reject); rq.end()
   })
@@ -70,7 +71,7 @@ function req(url: string, remoteAddress: string, headers: Record<string, string>
 
 describe('GatedWebServer', () => {
   it('serves TLS and gates an unmodified consumer\'s routes on the pairing token', async () => {
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath, ca } = certificateFiles()
     ctx = new Context()
     await ctx.plugin(GatedWebServer, {
       host: '127.0.0.1', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
@@ -82,12 +83,12 @@ describe('GatedWebServer', () => {
     server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
 
     expect(server.scheme).toBe('https')
-    const port = server.port
+    const port = server.networkPort
 
     // A loopback peer is exempt, so this leg only shows the listener is real
     // and routes reach their handlers; the network legs below carry the gate.
-    expect(await get('127.0.0.1', port, '/plugins/x/client.js')).toBe(200)
-    expect(await get('127.0.0.1', port, '/api/session.list')).toBe(200)
+    expect(await get('127.0.0.1', port, '/plugins/x/client.js', {}, ca)).toBe(200)
+    expect(await get('127.0.0.1', port, '/api/session.list', {}, ca)).toBe(200)
   })
 
   it('refuses an all-interfaces bind that carries no pairing token', async () => {
@@ -226,12 +227,19 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     server.registerUpgrade({ path: '/api/events', handler: () => { negotiated = true } })
     spy.mockRestore()
 
+    // `end` carries the bytes and closes; `write` + `destroy` could drop them.
+    // Recording both shows the refusal does not go out through the lossy pair.
+    const ended: string[] = []
     const written: string[] = []
     let destroyed = false
-    const socket = { write: (chunk: string) => written.push(chunk), destroy: () => { destroyed = true } }
+    const socket = {
+      end: (chunk: string) => ended.push(chunk),
+      write: (chunk: string) => written.push(chunk),
+      destroy: () => { destroyed = true },
+    }
     captured[0]?.handler(req('/api/events', '192.168.1.5'), socket, Buffer.alloc(0))
-    expect([written[0]?.startsWith('HTTP/1.1 403 Forbidden'), written[0]?.endsWith(REFUSAL_BODY), destroyed, negotiated])
-      .toEqual([true, true, true, false])
+    expect([ended[0]?.startsWith('HTTP/1.1 403 Forbidden'), ended[0]?.endsWith(REFUSAL_BODY), written.length, destroyed, negotiated])
+      .toEqual([true, true, 0, false, false])
   })
 })
 
@@ -241,7 +249,7 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
 describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer', () => {
   it('carries the real peer address through TLS termination', async () => {
     const lan = LAN as string
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath, ca } = certificateFiles()
     ctx = new Context()
     await ctx.plugin(GatedWebServer, {
       host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
@@ -254,22 +262,43 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
       handler: (request, res) => { seenPeer = request.socket.remoteAddress; res.writeHead(200); res.end('REACHED') },
     })
 
-    expect(await get(lan, server.port, '/api/session.list')).toBe(403)
+    expect(await get(lan, server.networkPort, '/api/session.list', {}, ca)).toBe(403)
     expect(seenPeer).toBeUndefined()
-    expect(await get(lan, server.port, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` })).toBe(200)
+    expect(await get(lan, server.networkPort, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` }, ca)).toBe(200)
     expect(seenPeer).toBe(lan)
   })
 
-  it('answers the same port over TLS only', async () => {
-    const lan = LAN as string
+  it('reports a loopback port that answers plain http, and a network port that answers TLS', async () => {
     const { certPath, keyPath } = certificateFiles()
     ctx = new Context()
     await ctx.plugin(GatedWebServer, {
       host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
     }).await()
     const server = ctx.get('webServer') as GatedWebServer
+    // Distinct listeners: `port` is the inherited plaintext server, which every
+    // consumer of that member builds `http://127.0.0.1:${port}` from, and
+    // `networkPort` is the TLS front a paired device connects to. Reporting the
+    // TLS port as `port` pointed the browser handoff at https over http.
+    expect(server.port).not.toBe(server.networkPort)
+    server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
+    const plain = await new Promise<number>((resolve, reject) => {
+      const rq = httpRequest({ host: '127.0.0.1', port: server.port, path: '/plugins/x/client.js', method: 'GET' },
+        (res) => { res.resume(); res.on('end', () => { resolve(res.statusCode ?? 0) }) })
+      rq.on('error', reject); rq.end()
+    })
+    expect(plain).toBe(200)
+  })
+
+  it('answers the same port over TLS only', async () => {
+    const lan = LAN as string
+    const { certPath, keyPath, ca } = certificateFiles()
+    ctx = new Context()
+    await ctx.plugin(GatedWebServer, {
+      host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
     const negotiated = await new Promise<string | false>((resolve, reject) => {
-      const socket = tlsConnect({ host: lan, port: server.port, rejectUnauthorized: false }, () => {
+      const socket = tlsConnect({ host: lan, port: server.networkPort, ca }, () => {
         const protocol = socket.getProtocol()
         socket.destroy()
         resolve(protocol ?? false)
@@ -378,6 +407,20 @@ describe('percent-encoded paths on a public route', () => {
 describe('assertRegistrarsWrapped', () => {
   it('accepts the WebServer this plugin was written against', () => {
     expect(() => { assertRegistrarsWrapped() }).not.toThrow()
+  })
+
+  it('fails the load when an unwrapped seat sits on a base class rather than the prototype itself', () => {
+    // Inspecting own properties only would call this clean: upstream moving a
+    // seat down into a shared base is a reshuffle, not a removal, and the seat
+    // is every bit as reachable from `ctx.webServer`.
+    class Base { registerStream(): void {} }
+    class Grown extends Base {
+      register(): void {}
+      registerUpgrade(): void {}
+      registerFallback(): void {}
+    }
+    expect(() => { assertRegistrarsWrapped(Grown.prototype) })
+      .toThrow(/"registerStream".*does not put behind admission/s)
   })
 
   it('fails the load when the harness grows a registration seat this gate does not wrap', () => {

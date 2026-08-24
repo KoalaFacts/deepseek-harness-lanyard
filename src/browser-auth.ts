@@ -70,12 +70,23 @@ export function bootstrapAuthToken(): void {
  * turn an injection into markup — impossible for the source above, and checked
  * so a future edit cannot make it possible silently.
  */
+/**
+ * Opening tag of {@link pairingBootstrapScript}'s output, exported so a caller
+ * that needs the body back strips an exact known wrapper instead of describing
+ * it with a pattern — one that would have to agree about case, whitespace and
+ * attributes with a string this module wrote itself.
+ */
+export const BOOTSTRAP_SCRIPT_OPEN = '<script>'
+
+/** Closing tag of {@link pairingBootstrapScript}'s output; see {@link BOOTSTRAP_SCRIPT_OPEN}. */
+export const BOOTSTRAP_SCRIPT_CLOSE = '</script>'
+
 export function pairingBootstrapScript(): string {
   const body = bootstrapAuthToken.toString()
   if (body.includes('</')) {
     throw new Error('lanyard: the pairing bootstrap contains "</", which would close the script element it is injected into')
   }
-  return `<script>try{(${body})()}catch{}</script>`
+  return `${BOOTSTRAP_SCRIPT_OPEN}try{(${body})()}catch{}${BOOTSTRAP_SCRIPT_CLOSE}`
 }
 
 /**

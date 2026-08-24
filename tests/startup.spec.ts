@@ -55,8 +55,13 @@ describe('the lanyard web command line', () => {
     expect(String(parse(['--host', '0.0.0.0']))).toMatch(/requires --pairing-token-env/)
   })
 
-  it('refuses --trusted-host without a pairing token, which could admit nothing anyway', () => {
-    expect(String(parse(['--trusted-host', 'app.internal']))).toMatch(/requires a pairing token/)
+  it('accepts --trusted-host without a pairing token, as the row it replaces does', () => {
+    // The flag declares an authority for dsh-client-connection's Host fence,
+    // which is what a loopback bind behind a tunnel or reverse proxy needs.
+    // That peer reads as loopback here and is admitted either way, so demanding
+    // a token refused a working stock invocation and protected nothing.
+    expect(parse(['--trusted-host', 'app.internal']))
+      .toEqual({ trustedHosts: ['app.internal'], openBrowser: true })
   })
 
   it('accepts --trusted-host alongside a token, in argument order', () => {

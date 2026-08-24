@@ -39,6 +39,8 @@ interface WebRuntimeValues {
 interface SchemeAwareServer {
   scheme?: 'http' | 'https'
   port: number
+  /** The port a remote device reaches; `port` is loopback-only under TLS. */
+  networkPort?: number
 }
 
 /** Stable Cordis plugin name. */
@@ -184,6 +186,21 @@ export function renderPairingQr(link: string, colour = true): Promise<string> {
  * @param wanted - the configured `printPairingQr`.
  * @param isTerminal - whether stdout is a TTY.
  */
+/**
+ * Whether to emit ANSI colour, honouring `NO_COLOR`.
+ *
+ * https://no-color.org counts the variable as set only "when present and not an
+ * empty string", and an empty one is what a shell writes for `NO_COLOR=`. A
+ * bare presence check therefore declined colour for a caller who asked for
+ * nothing — and declining is not neutral here: the encoder draws light modules
+ * as block characters, so an uncoloured code inverts on a light terminal and a
+ * scanner that does not try both polarities reads nothing.
+ * @param value - the raw environment value, absent when unset.
+ */
+export function wantsColour(value: string | undefined): boolean {
+  return value === undefined || value === ''
+}
+
 export function shouldDrawQr(wanted: boolean, isTerminal: boolean): boolean {
   return wanted && isTerminal
 }
@@ -223,14 +240,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
   const lanAddress = runtime?.lanAddresses[0]
   const announce = async (): Promise<void> => {
-    const { scheme, port } = ctx.webServer as unknown as SchemeAwareServer
-    const lines = pairingAnnouncement(scheme ?? 'http', port, lanAddress, token)
+    // `port` is what a loopback http client uses, which under TLS is the
+    // inherited plaintext listener — not somewhere a phone can reach. A gated
+    // carrier reports the reachable one separately; a shipped carrier has no
+    // such member and its single port is both.
+    const { scheme, port, networkPort } = ctx.webServer as unknown as SchemeAwareServer
+    const lines = pairingAnnouncement(scheme ?? 'http', networkPort ?? port, lanAddress, token)
     if (lines.local !== undefined) console.log(`lanyard: serving TLS — the local URL is ${lines.local}`)
     if (lines.pair === undefined) return
     console.log(`lanyard: pair a device by opening ${lines.pair} once`)
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
-    const code = await renderPairingQr(lines.pair, process.env.NO_COLOR === undefined)
+    const code = await renderPairingQr(lines.pair, wantsColour(process.env.NO_COLOR))
     const columns = terminalColumns(process.stdout.columns)
     if (!fitsTerminal(code, columns)) {
       console.log(`lanyard: the code needs ${String(renderedWidth(code))} columns and this terminal has ${String(columns)}, so open the link above instead`)

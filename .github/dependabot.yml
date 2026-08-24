@@ -11,17 +11,34 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # One PR for the lot. Each of these runs ci.yml's three jobs — a Chromium
+    # download and two full dsh boots — and ci.yml's own trigger set exists to
+    # avoid paying that twice per push, which a PR per action would undo.
+    groups:
+      actions:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
-      - "ci"
 
-  # The plugin's own dependencies. `dsh` itself is deliberately unpinned and
-  # tracked by the nightly against upstream's release channels instead, so what
-  # matters here is the small runtime surface: commander, qrcode-terminal,
-  # selfsigned, and the toolchain.
+  # The plugin's own dependencies: commander, qrcode-terminal, selfsigned, and
+  # the toolchain.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      npm:
+        patterns:
+          - "*"
+    # `dsh` is deliberately unpinned and tracked by the nightly against
+    # upstream's own release channels instead, so bumping it here would replace
+    # a floating range that is meant to float. Two of these are load-bearing:
+    # dsh-web-app is exact-pinned because tests/webstartup-contract.spec.ts
+    # reads the INSTALLED copy, so a bump silently changes what that test
+    # proves; and the peerDependencies ranges are hand-tuned because no range
+    # can express the supported window while upstream ships prereleases.
+    ignore:
+      - dependency-name: "@deepseek-ai/*"
     labels:
       - "dependencies"
