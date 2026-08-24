@@ -1,0 +1,172 @@
+name: release
+
+# Publishes @koalafacts/deepseek-harness-lanyard to npm, authenticating with npm
+# trusted publishing (OIDC). No npm token is stored in this repository: the
+# workflow exchanges a short-lived GitHub OIDC token for registry credentials,
+# so there is no long-lived secret to leak or rotate.
+#
+# Releasing is deliberate rather than automatic. This runs only when someone
+# starts it from the Actions tab and unticks `dry_run`; pushing a tag does not
+# publish anything. The version comes from package.json on whichever ref you
+# select, and the tag and GitHub Release are created here AFTER a successful
+# publish — so a failed publish leaves no tag claiming a version that is not on
+# the registry.
+#
+# The full gate runs again here rather than trusting the run that happened on
+# main. That matters more for this package than for most: nothing pins `dsh`,
+# so the same commit that passed a week ago can fail against today's upstream
+# release, and shipping a plugin that no longer composes with the harness is
+# the failure this workflow exists to prevent.
+#
+# Setting this up is not only this file — npmjs.com has to be told to trust it.
+# See "Releasing" in AGENTS.md; the trusted publisher is configured per package
+# and names this workflow by filename, so renaming this file breaks publishing
+# until the npm side is updated to match.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run the full gate but stop short of publishing'
+        required: false
+        default: true
+        type: boolean
+
+# Two releases racing would interleave their publishes.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # The OIDC token trusted publishing exchanges for registry credentials.
+      id-token: write
+      # Creating the tag and the GitHub Release at the end.
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Tags are not fetched by default, and the release guard below asks
+          # git whether v$VERSION already exists. Without the full fetch that
+          # question always answers "no" and the guard silently protects
+          # nothing.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Trusted publishing needs Node >= 22.14; the 22 line satisfies it.
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # The npm bundled with Node 22 predates trusted publishing, which landed
+      # in 11.5.1. Without this the publish fails on authentication with an
+      # error that does not mention the version at all.
+      - name: Upgrade npm to a version that speaks trusted publishing
+        run: |
+          set -euo pipefail
+          npm install -g npm@latest
+          npm --version
+
+      - run: pnpm install --frozen-lockfile
+
+      # Every value below reaches the shell through `env:` rather than `${{ }}`
+      # interpolation, which pastes into the script text before bash parses it.
+      - name: Resolve the version and its release channel
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="$(npm pkg get version | tr -d '"')"
+
+          # Upstream ships its prerelease line on `next`, and this plugin's own
+          # nightly tests against it. A prerelease landing on `latest` would
+          # hand every new installer an rc, so the channel follows the version.
+          case "$VERSION" in
+            *-*) DIST_TAG=next ;;
+            *)   DIST_TAG=latest ;;
+          esac
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          echo "publishing $VERSION to the $DIST_TAG channel"
+
+      # Both checks run before the twenty minutes of e2e rather than after, so
+      # an already-released version fails in seconds with a message naming the
+      # cause instead of at the last step.
+      - name: Refuse a version that is already released
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="$(npm pkg get name | tr -d '"')"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::$NAME@$VERSION is already on the registry; bump the version in package.json"
+            exit 1
+          fi
+          # A tag for this version means it was released from some other commit.
+          # Publishing again under the same version is what the check above
+          # catches; this catches the reverse — a tag with nothing behind it.
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists but $NAME@$VERSION is not on the registry; resolve that by hand before releasing"
+            exit 1
+          fi
+          echo "$NAME@$VERSION is not yet published and v$VERSION is free"
+
+      # Both e2e suites exit 2 with a SKIPPED message where they cannot run —
+      # no LAN interface, no Playwright. In CI that is a pass; here it stops the
+      # release, which is deliberate: a release nobody verified is worse than a
+      # release that did not happen. A run that fails with SKIPPED is a runner
+      # problem, not a code problem.
+      - run: npm run check
+      - run: npm run test:e2e
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e:browser
+
+      # No NODE_AUTH_TOKEN: trusted publishing supplies the credential from the
+      # OIDC token. --provenance is passed explicitly rather than relying on it
+      # being implied, so a change in that default cannot silently drop the
+      # attestation.
+      - name: Publish to npm
+        if: inputs.dry_run == false
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+        run: npm publish --provenance --tag "$DIST_TAG"
+
+      - name: Report what a dry run would have done
+        if: inputs.dry_run != false
+        env:
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          npm publish --provenance --tag "$DIST_TAG" --dry-run
+          echo "dry run only — nothing was published, and no tag or release was created"
+
+      # Only after the registry has the version. The reverse order would leave a
+      # tag claiming a release that failed, and the guard above would then block
+      # the retry. gh creates the tag from --target, so this is both steps at
+      # once, and the gh CLI ships on the runner so it needs no third-party
+      # action.
+      - name: Tag the commit and create the GitHub Release
+        if: inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+          TARGET: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          PRERELEASE=()
+          if [ "$DIST_TAG" = next ]; then PRERELEASE=(--prerelease); fi
+          gh release create "v$VERSION" \
+            --target "$TARGET" \
+            --title "v$VERSION" \
+            --generate-notes \
+            "${PRERELEASE[@]}"

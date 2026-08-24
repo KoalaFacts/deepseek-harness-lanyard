@@ -1,0 +1,27 @@
+# Pinned action SHAs do not rot on their own. Every `uses:` in this repository
+# names a commit rather than a mutable tag, which is what stops a compromised
+# action author from repointing `@v4` under a workflow that holds publish
+# credentials — but a pin with nothing bumping it is just an old version. This
+# is the other half of that convention.
+
+version: 2
+updates:
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # The plugin's own dependencies. `dsh` itself is deliberately unpinned and
+  # tracked by the nightly against upstream's release channels instead, so what
+  # matters here is the small runtime surface: commander, qrcode-terminal,
+  # selfsigned, and the toolchain.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
