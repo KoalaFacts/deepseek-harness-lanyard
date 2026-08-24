@@ -113,6 +113,18 @@ An install that cannot resolve is not a test result. `dsh` publishes as a wave o
 
 CI runs all four on pull requests, and the nightly re-runs the e2e on both channels.
 
+## Reviewing your own work
+
+The verification layers above catch code that does not do what it says. These catch the other thing — work that is correct everywhere the author looked. Each rule is here because it was broken here first, and each failure was invisible from inside the change that caused it.
+
+**Review every pull request before opening it, the ones that only touch CI included.** The plugin source got both `/code-review` and `/security-review`; the release workflow got neither, on the reasoning that it was plumbing rather than product. It was the plumbing holding a credential that can publish this package under its own name, and the first review ever pointed at it found the job running `dsh@latest` — deliberately unpinned — beside `id-token: write`. "It is only config" is exactly wrong where the config holds credentials.
+
+**A self-review checks the implementation against the author's threat model and cannot check the model.** `release.yml` was written believing trusted publishing means there is no secret to leak, and re-reading it confirmed the implementation matched that belief. What re-reading could not surface is that an OIDC credential is not stored but *is* mintable by anything sharing the job — the first question asked by a reader who does not already hold the belief. Where a change rests on a security argument, have the argument read by something that did not write it.
+
+**Apply a rule by enumerating instances, never from memory.** Three times here a rule landed everywhere but one place, and every instance that *was* written looked correct on its own, so nothing inside the change reported that it had stopped early: `register` and `registerUpgrade` wrapped but not `registerFallback`, which served the built frontend to the LAN ungated for a release; `permissions:` on two workflows of three; the safe `env:` form on one workflow step of five. The one time it went right — the action SHA pins — is the one time the list came from `grep` rather than recall.
+
+**A comment stating a policy is a claim the code has to honour.** `dependabot.yml` described `@deepseek-ai/*` as deliberately out of scope and then configured nothing of the kind, leaving the updater aimed at exactly the pins the paragraph above it explained must not move. Prose and code contradicting each other in the same file is not a subtle defect; it survives because the author re-reads the sentence they meant rather than the one they wrote.
+
 ## Releasing
 
 `.github/workflows/release.yml` publishes to npm with **npm trusted publishing (OIDC)**. No npm token is stored in this repository — the workflow exchanges a short-lived GitHub OIDC token for registry credentials, so there is nothing to leak or rotate.
