@@ -82,6 +82,30 @@ jobs:
         with:
           # The tag, not the branch. This is the whole point of the workflow.
           ref: refs/tags/v${{ inputs.version }}
+          # Enough history to prove the tag descends from the default branch,
+          # below. A shallow checkout of the tag alone cannot answer that.
+          fetch-depth: 0
+
+      # Restores a property the split removed rather than adding a new one.
+      # Publishing used to mean publishing `github.sha` on main, which the
+      # branch guard constrained. Now the tree comes from a tag, and a tag is
+      # pushable and force-updatable by anyone with write access — so `v1.2.3`
+      # can be made to point at a commit that was never on main, or moved after
+      # release.yml gated it. Requiring the tag to be an ancestor of the default
+      # branch puts it back on the reviewed line of history.
+      - name: Refuse a tag that is not on the default branch
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          TAG_SHA="$(git rev-parse "refs/tags/v$VERSION^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_SHA" refs/remotes/origin/main; then
+            echo "::error::tag v$VERSION points at $TAG_SHA, which is not on main. Publishing it would ship a commit that never landed on the default branch."
+            exit 1
+          fi
+          echo "v$VERSION is $TAG_SHA, which is on main"
+
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: 10
@@ -163,6 +187,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      # A job-level block REPLACES the workflow-level one rather than extending
+      # it, so every scope not named here is `none` — including the `contents:
+      # read` the checkout below needs. The job this was split out of carried
+      # `contents: write` for tagging and satisfied the checkout by accident;
+      # splitting it dropped that without replacing it.
+      contents: read
       # The OIDC token trusted publishing exchanges for registry credentials.
       id-token: write
     steps:

@@ -22,12 +22,12 @@ on:
         required: true
         type: string
       dry_run:
-        description: 'Run the full gate but stop short of publishing'
+        description: 'Run the full gate but stop short of tagging'
         required: false
         default: true
         type: boolean
 
-# Two releases racing would interleave their publishes.
+# Two releases racing would interleave their tagging.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -117,7 +117,7 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
-          echo "publishing $VERSION to the $DIST_TAG channel"
+          echo "releasing $VERSION, for publishing to the $DIST_TAG channel"
 
       # Both checks run before the long legs rather than after, so a version
       # that cannot be released fails in seconds with a message naming the
@@ -152,7 +152,7 @@ jobs:
           # A tag for this version with nothing published behind it means an
           # earlier release got part-way. That needs a person, not a retry.
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "::error::tag v$VERSION already exists but $NAME@$VERSION is not on the registry; an earlier release stopped part-way. Delete the tag to retry, or investigate before releasing."
+            echo "::error::tag v$VERSION already exists. If it was cut by an earlier run of this workflow, the release is done and what remains is to publish it: run publish-npm for $VERSION. Do not delete the tag — publish-npm reads it, and the GitHub Release survives a deleted tag, so the version could not be re-cut afterwards."
             exit 1
           fi
 
