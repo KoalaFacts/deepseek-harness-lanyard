@@ -35,14 +35,14 @@ describe('pairingLink', () => {
   })
 })
 
-describe('rankLanAddresses', () => {
-  /** A machine's interfaces as node reports them, from name → IPv4 literal. */
-  function interfaces(table: Record<string, string>): Parameters<typeof rankLanAddresses>[1] {
-    return Object.fromEntries(Object.entries(table).map(([name, address]) => [name, [{
-      address, family: 'IPv4', internal: false, netmask: '255.255.255.0', mac: '00:00:00:00:00:00', cidr: `${address}/24`,
-    }]])) as Parameters<typeof rankLanAddresses>[1]
-  }
+/** A machine's interfaces as node reports them, from name → IPv4 literal. */
+function interfaces(table: Record<string, string>): NonNullable<Parameters<typeof rankLanAddresses>[1]> {
+  return Object.fromEntries(Object.entries(table).map(([name, address]) => [name, [{
+    address, family: 'IPv4', internal: false, netmask: '255.255.255.0', mac: '00:00:00:00:00:00', cidr: `${address}/24`,
+  }]])) as NonNullable<Parameters<typeof rankLanAddresses>[1]>
+}
 
+describe('rankLanAddresses', () => {
   // Each rule is checked where the others point the other way, so a ranking
   // that ignored it could not pass on the strength of the rest.
 
@@ -77,6 +77,16 @@ describe('rankLanAddresses', () => {
     // macOS puts virtual-machine NAT on bridge100 and up.
     expect(rankLanAddresses(['192.168.64.1', '10.0.1.7'], interfaces({ bridge100: '192.168.64.1', en0: '10.0.1.7' })))
       .toEqual({ ranked: ['10.0.1.7', '192.168.64.1'], offered: ['10.0.1.7'] })
+  })
+
+  it('tells Windows\'s NAT switches from an external one carrying the real address', () => {
+    // Binding an external Hyper-V switch moves the machine's LAN address onto
+    // a vEthernet adapter; hiding it as a bridge would leave nothing to pair.
+    expect(rankLanAddresses(['172.20.0.1', '192.168.1.40', '172.21.0.1'], interfaces({
+      'vEthernet (WSL (Hyper-V firewall))': '172.20.0.1',
+      'vEthernet (External)': '192.168.1.40',
+      'vEthernet (Default Switch)': '172.21.0.1',
+    }))).toEqual({ ranked: ['192.168.1.40', '172.20.0.1', '172.21.0.1'], offered: ['192.168.1.40'] })
   })
 
   it('ranks an overlay a phone can join ahead of a bridge it never can', () => {
@@ -284,6 +294,19 @@ describe('the pairing row', () => {
     expect(printed.slice(1, 3)).toEqual([
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
       `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
+    ])
+  })
+
+  it('prints no link when every address is a bridge inside this machine, and says why', async () => {
+    // Wi-Fi off with Docker running: a code naming docker0 sends the phone
+    // nowhere, so there is no code at all.
+    vi.spyOn(Pairing.internals, 'networkInterfaces').mockReturnValue(interfaces({ docker0: '172.17.0.1', virbr0: '192.168.122.1' }))
+    const printed = await mount({}, {
+      lanAddresses: ['172.17.0.1', '192.168.122.1'],
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' },
+    })
+    expect(printed).toEqual([
+      'lanyard: no network a phone can join — 192.168.122.1, 172.17.0.1 are container or virtual-machine bridges inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh',
     ])
   })
 

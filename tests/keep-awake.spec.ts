@@ -127,6 +127,42 @@ describe('the keep-awake row', () => {
     expect(spawned).toEqual([])
   })
 
+  it('rejects its load when the inhibitor cannot start, though it was on PATH', async () => {
+    // A missing interpreter, a permission lost since the check, EAGAIN: the
+    // seam rejects `done` within a tick, before the load has resolved.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+    const { seam, spawned } = fakeSubprocess(Promise.reject(new Error('spawn EACCES')))
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
+    expect(spawned[0]?.terminated).toBe(true)
+  })
+
+  it('rejects its load when the spawn fails a few milliseconds after it was made', async () => {
+    // The seam settles `done` some time after `spawn` returns, not within the
+    // same tick; the confirmation window is what still catches it at load.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+    const seam = {
+      spawn: () => ({
+        done: new Promise((_resolve, reject) => { setTimeout(() => { reject(new Error('spawn EAGAIN')) }, 20) }),
+        terminate: () => {},
+        waitForExit: () => Promise.resolve(true),
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/could not start \(Error: spawn EAGAIN\)/)
+  })
+
+  it('rejects its load when the inhibitor exits at once, having never taken hold', async () => {
+    // systemd-inhibit with no logind to ask exits within milliseconds.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+    const { seam } = fakeSubprocess(Promise.resolve({ exitCode: 1, signal: null }))
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/exited at once \(code 1, signal null\)/)
+  })
+
   it('warns, and keeps serving, when a running inhibitor dies later', async () => {
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
     let exit = (_outcome: { exitCode: number; signal: string | null }): void => {}

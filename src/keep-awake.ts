@@ -15,6 +15,7 @@
 
 import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-subprocess'
@@ -69,6 +70,18 @@ const TERMINATE_GRACE_MS = 5_000
  * shutdown budget is the ceiling that actually ends a stuck teardown.
  */
 const RELEASE_TIMEOUT_MS = TERMINATE_GRACE_MS + 2_000
+
+/**
+ * How long activation waits for the inhibitor to fail before counting it as
+ * held. The seam has no started signal: it rejects `done` for a spawn that
+ * failed — a missing interpreter, a permission lost since the PATH check,
+ * EAGAIN — a tick or so after `spawn` returns, and an inhibitor that cannot
+ * take hold, such as `systemd-inhibit` with no logind to ask, exits within
+ * milliseconds. One still running after this long has taken hold, and only
+ * its later exit is downgraded to a warning. The cost is this much added to a
+ * `--keep-awake` boot.
+ */
+const HOLD_CONFIRM_MS = 250
 
 /**
  * The inhibitors print nothing in normal operation. Collecting a small bound
@@ -143,11 +156,9 @@ export const internals = { findOnPath }
 export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!config.enabled) return
   const { command, args } = resolveInhibitor(process.platform)
-  // The subprocess seam reports a spawn failure only by rejecting `done`, some
-  // time after `spawn` returns, and exposes no pid to test sooner. The one
-  // failure a person can actually cause — a platform without the inhibitor —
-  // is decided here instead, before anything runs, so it rejects this load
-  // rather than surfacing as a warning after the server is already serving.
+  // The common failure — a platform without the inhibitor — is decided before
+  // anything runs, so it gets a message naming the fix. The confirmation
+  // window below catches every other way the inhibitor fails to take hold.
   if (internals.findOnPath(command) === undefined) {
     throw new Error(`lanyard-keep-awake: ${command} is not on PATH, so --keep-awake cannot hold this host awake`)
   }
@@ -157,6 +168,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     stdio: { stdin: 'ignore', stdout: DISCARD_OUTPUT, stderr: DISCARD_OUTPUT },
     graceMs: TERMINATE_GRACE_MS,
   })
+  // An inhibitor that settles inside the window never held: fail the load
+  // rather than serve without what this invocation asked for.
+  const confirmation = new AbortController()
+  const early = await Promise.race([
+    held.done.then(
+      outcome => `exited at once (code ${String(outcome.exitCode)}, signal ${String(outcome.signal)})`,
+      (error: unknown) => `could not start (${String(error)})`,
+    ),
+    // Aborted once the race is decided, so no timer outlives it.
+    delay(HOLD_CONFIRM_MS, undefined, { signal: confirmation.signal }).catch(() => undefined),
+  ])
+  confirmation.abort()
+  if (early !== undefined) {
+    held.terminate()
+    throw new Error(`lanyard-keep-awake: ${command} ${early}, so --keep-awake cannot hold this host awake`)
+  }
   let disposed = false
   const report = (what: string): void => {
     if (!disposed) ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor ${what}; the host may sleep again`)

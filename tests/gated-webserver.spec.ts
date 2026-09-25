@@ -140,6 +140,17 @@ describe('GatedWebServer', () => {
     await expect(fiber.await()).rejects.toThrow(/all-interfaces bind requires TLS material/)
   })
 
+  it('refuses a bind host it cannot serve, rather than quietly serving loopback under that name', async () => {
+    // `--host 192.168.1.20` is published as given. The inherited server always
+    // binds loopback and TLS is only turned on for 0.0.0.0, so accepting it
+    // would serve this machine alone while reporting the address. The schema
+    // composes upstream's, whose host is 127.0.0.1 or 0.0.0.0, so it fails the
+    // load instead.
+    ctx = new Context()
+    const fiber = ctx.plugin(GatedWebServer, { host: '192.168.1.20', port: 0 } as never)
+    await expect(fiber.await()).rejects.toThrow(/\$\.host expected/)
+  })
+
   it('refuses a network port that is this machine\'s port too', async () => {
     // Loopback on a port and every interface on the same one collide on Linux,
     // and one port cannot be both plaintext and TLS.

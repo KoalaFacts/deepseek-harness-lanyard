@@ -60,7 +60,7 @@ Opening the link signs the phone in: dsh swaps the token for a session cookie an
 
 Three things to expect:
 
-- **Both devices must be on the same network.** The link uses your machine's LAN address; there is no relay and nothing leaves your network. On a machine with more than one network, the code names the likeliest home network, and a link is printed for each other network a phone could be on (container and virtual-machine networks are left out).
+- **Both devices must be on the same network.** The link uses your machine's LAN address; there is no relay and nothing leaves your network. On a machine with more than one network, the code names the likeliest home network, and a link is printed for each other network a phone could be on (container and virtual-machine networks are left out). If those are all it finds, it prints no link and says so.
 - **The link is a password until dsh restarts.** Anyone who opens it before then is signed in, so do not paste it into a group chat or leave the code on a shared screen. Restarting dsh retires it; phones already paired stay signed in.
 - **A new network means a new link.** The session is bound to the address it was opened on. If the machine's LAN address changes, scan what the startup line prints.
 

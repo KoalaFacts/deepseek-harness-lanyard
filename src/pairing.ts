@@ -112,15 +112,23 @@ export function pairingLink(
 
 /**
  * Interfaces a phone can never share: container and virtual-machine bridges,
- * which exist only inside this machine. Their addresses rank last and are
- * never offered as an alternative link.
+ * which exist only inside this machine. Their addresses rank last, are never
+ * offered as an alternative link, and never become the pairing address.
  *
- * Linux names them by prefix; Windows gives adapters friendly names
- * ("VirtualBox Host-Only Network", "VMware Network Adapter VMnet8",
- * "vEthernet (WSL)"); macOS puts its virtual-machine NAT on `bridge100` and up
- * (`bridge0` is Thunderbolt Bridge, a real link, and stays physical).
+ * Linux names them by lowercase prefix, and macOS puts its virtual-machine NAT
+ * on `bridge100` and up (`bridge0` is Thunderbolt Bridge, a real link, and
+ * stays physical). Matched case-sensitively, so `veth` does not swallow
+ * Windows's `vEthernet`.
  */
-const MACHINE_INTERNAL_INTERFACE = /^(docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge1\d\d)|virtualbox|vmware|vethernet/i
+const MACHINE_INTERNAL_INTERFACE = /^(?:docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge1\d\d)/
+
+/**
+ * Windows's friendly names for the same thing. Only the NAT switches are
+ * named: an external Hyper-V switch is also a `vEthernet (…)` adapter, but it
+ * carries the machine's real LAN address, so a name this pattern does not know
+ * stays physical rather than hiding the one network a phone can join.
+ */
+const MACHINE_INTERNAL_ADAPTER = /virtualbox|vmware|^vEthernet \((?:WSL|Default Switch|DockerNAT)/i
 
 /**
  * Overlay networks — VPNs and mesh tunnels. A phone on the same overlay can
@@ -145,12 +153,18 @@ function rangeRank(address: string): number {
 type InterfaceKind = 'physical' | 'overlay' | 'machine-internal'
 
 function interfaceKind(name: string | undefined): InterfaceKind {
-  if (name !== undefined && MACHINE_INTERNAL_INTERFACE.test(name)) return 'machine-internal'
+  if (name !== undefined && (MACHINE_INTERNAL_INTERFACE.test(name) || MACHINE_INTERNAL_ADAPTER.test(name))) return 'machine-internal'
   if (name !== undefined && OVERLAY_INTERFACE.test(name)) return 'overlay'
   return 'physical'
 }
 
 const KIND_RANK: Record<InterfaceKind, number> = { 'physical': 0, 'overlay': 1, 'machine-internal': 2 }
+
+/**
+ * Test hooks for the machine's interfaces; production never mutates them. The
+ * unit suite must not depend on which adapters the machine running it has.
+ */
+export const internals = { networkInterfaces }
 
 /** The addresses a pairing link could name, the likeliest first, and which of them a phone could use at all. */
 export interface RankedAddresses {
@@ -331,12 +345,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   if (!config.printPairingUrl) return
   const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
-  const { ranked, offered } = rankLanAddresses(runtime?.lanAddresses ?? [])
-  const lanAddress = ranked[0]
+  const { ranked, offered } = rankLanAddresses(runtime?.lanAddresses ?? [], internals.networkInterfaces())
   // A loopback bind has no network address to pair over. A tunnelled device
   // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
   // `dsh web:` link like any local browser.
-  if (lanAddress === undefined) return
+  if (ranked.length === 0) return
+  // Only an address a phone could be on is worth a link and a code.
+  const lanAddress = offered[0]
   const announce = async (): Promise<void> => {
     // `port` is this machine's plaintext listener, bound to loopback — not
     // somewhere a phone can reach; the gated carrier reports the TLS port as
@@ -352,6 +367,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         'lanyard: stop dsh now — it is serving your network without lanyard\'s TLS carrier or its gate. No pairing '
         + 'link is printed, since it would carry the launch token in the clear; the bundle needs updating for this dsh version',
       )
+      return
+    }
+    // Every address is a bridge inside this machine — Wi-Fi off, say, with
+    // Docker running. A code naming one would send the phone nowhere.
+    if (lanAddress === undefined) {
+      console.log(`lanyard: no network a phone can join — ${ranked.join(', ')} ${ranked.length === 1 ? 'is a container or virtual-machine bridge' : 'are container or virtual-machine bridges'} inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh`)
       return
     }
     const reachable = networkPort ?? port
