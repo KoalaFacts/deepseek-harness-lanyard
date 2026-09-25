@@ -397,8 +397,9 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     expect([server.port, server.networkPort]).toEqual([local, network])
     expect(await plainGet('127.0.0.1', local, '/api/session/list')).toBe(200)
     expect((await get(lan, network, '/api/session/list', { cookie: SESSION }, ca)).status).toBe(200)
-    // The dsh web line calls lan:<port> its LAN address. Nothing may answer
-    // there: a phone opening it would send the launch token in the clear.
+    // The dsh web line's `(LAN: …)` link names lan:<port> and carries the
+    // launch token over plain http. Nothing may answer there, so a phone that
+    // opens it sends nothing a passive listener could read.
     await expect(plainGet(lan, local, '/')).rejects.toThrow(/ECONNREFUSED/)
   })
 
@@ -455,6 +456,11 @@ describe('cookies set through the TLS front', () => {
     '/write-head-message': (res) => { res.writeHead(200, 'OK', { 'Set-Cookie': ['a=1'] }) },
     // Node's flat raw form: name, value, name, value.
     '/write-head-raw': (res) => { res.writeHead(200, ['Content-Type', 'text/plain', 'Set-Cookie', 'a=1']) },
+    // And its list of [name, value] pairs, which node accepts as well.
+    '/write-head-pairs': (res) => { res.writeHead(200, [['Content-Type', 'text/plain'], ['Set-Cookie', 'a=1']]) },
+    // Only the attribute counts as already Secure — not a name or a path
+    // that happens to contain the word.
+    '/look-alike': (res) => { res.setHeader('Set-Cookie', ['secure=1', 'a=1; Path=/secure', 'b=2; Securely=1']); res.writeHead(200) },
     // Headers set before writeHead send node down its merging path, which
     // calls setHeader itself — the mark must not land twice.
     '/write-head-merged': (res) => { res.setHeader('x-early', '1'); res.writeHead(200, { 'set-cookie': 'a=1' }) },
@@ -468,6 +474,8 @@ describe('cookies set through the TLS front', () => {
     '/write-head': ['a=1; HttpOnly; SameSite=Strict; Secure'],
     '/write-head-message': ['a=1; Secure'],
     '/write-head-raw': ['a=1; Secure'],
+    '/write-head-pairs': ['a=1; Secure'],
+    '/look-alike': ['secure=1; Secure', 'a=1; Path=/secure; Secure', 'b=2; Securely=1; Secure'],
     '/write-head-merged': ['a=1; Secure'],
   }
 
@@ -573,10 +581,15 @@ describe('the fallback seat', () => {
 
   it('never lets a source map ride the public exemption, however it is spelled', async () => {
     const handler = await gatedFallback()
-    // The literal, then the escape dsh-host-frontend-static decodes back to it,
-    // then the casing a case-insensitive filesystem resolves to the same file.
+    // The literal, then the escapes dsh-host-frontend-static decodes back to
+    // it, then the aliases its path.resolve and the filesystem open as the same
+    // file: a trailing separator or `.`, case, and on Windows trailing dots and
+    // spaces, a backslash, and an NTFS stream.
     for (const path of [
-      '/assets/index.js.map', '/assets/index.js.ma%70', '/assets/index.js%2Emap', '/assets/index.js.MAP', '/assets/index.js.Ma%50',
+      '/assets/index.js.map', '/assets/index.js.ma%70', '/assets/index.js%2Emap',
+      '/assets/index.js.map/', '/assets/index.js.map%2F', '/assets/index.js.map/.', '/assets/index.js.map//',
+      '/assets/index.js.MAP', '/assets/index.js.Ma%50',
+      '/assets/index.js.map.', '/assets/index.js.map%20', '/assets/index.js.map%5C', '/assets/index.js.map::$DATA',
     ]) {
       const anonymous = response()
       await handler(req(path, '192.168.1.5'), anonymous)
@@ -621,7 +634,10 @@ describe('the fallback seat', () => {
 // handlers behind the gate decode the pathname before resolving a file.
 describe('percent-encoded paths on a public route', () => {
   it('excludes a source map however it is spelled', async () => {
-    for (const path of ['/bundles/ui-theme/client.js.map', '/bundles/ui-theme/client.js.ma%70']) {
+    for (const path of [
+      '/bundles/ui-theme/client.js.map', '/bundles/ui-theme/client.js.ma%70', '/bundles/ui-theme/client.js.map/',
+      '/bundles/ui-theme/client.js.MAP', '/bundles/ui-theme/client.js.map.',
+    ]) {
       const captured: WebRoute[] = []
       const spy = vi.spyOn(WebServer.prototype, 'register')
         .mockImplementation((route: WebRoute) => { captured.push(route); return () => {} })

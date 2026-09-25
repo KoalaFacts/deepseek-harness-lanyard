@@ -53,7 +53,7 @@ export interface LaunchLinkIssuer {
 interface SchemeAwareServer {
   scheme?: 'http' | 'https'
   port: number
-  /** The port a remote device reaches; `port` is loopback-only under TLS. */
+  /** The port a remote device reaches; `port` is this machine's loopback listener. */
   networkPort?: number
   /** SHA-256 fingerprint of the certificate the TLS front presents. */
   certificateFingerprint?: string
@@ -114,15 +114,21 @@ export function pairingLink(
  * Interfaces a phone can never share: container and virtual-machine bridges,
  * which exist only inside this machine. Their addresses rank last and are
  * never offered as an alternative link.
+ *
+ * Linux names them by prefix; Windows gives adapters friendly names
+ * ("VirtualBox Host-Only Network", "VMware Network Adapter VMnet8",
+ * "vEthernet (WSL)"); macOS puts its virtual-machine NAT on `bridge100` and up
+ * (`bridge0` is Thunderbolt Bridge, a real link, and stays physical).
  */
-const MACHINE_INTERNAL_INTERFACE = /^(docker|br-|veth|virbr|lxc|lxd|podman|cni|flannel|cali|vboxnet|vmnet|vethernet)/i
+const MACHINE_INTERNAL_INTERFACE = /^(docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge1\d\d)|virtualbox|vmware|vethernet/i
 
 /**
  * Overlay networks — VPNs and mesh tunnels. A phone on the same overlay can
  * reach them, so they are offered, but after the network the machine is
- * physically on.
+ * physically on. The unanchored names are Windows adapters ("ZeroTier One
+ * [8056c2e21c000001]", "OpenVPN Wintun").
  */
-const OVERLAY_INTERFACE = /^(utun|tun|tap|wg|zt|tailscale|ipsec|ppp)/i
+const OVERLAY_INTERFACE = /^(utun|tun|tap|wg|zt|tailscale|ipsec|ppp)|zerotier|openvpn|wireguard|wintun|nordlynx/i
 
 /** How likely an IPv4 literal is to be the home network a phone shares: lower is likelier. */
 function rangeRank(address: string): number {
@@ -320,7 +326,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!isLaunchLinkIssuer(issuer)) {
     throw new Error(
       'lanyard: this dsh has no browser authentication to pair a device with; lanyard needs '
-      + '@deepseek-ai/dsh-client-connection 0.1.2 or later, whose ctx.connection issues launch-token links',
+      + 'dsh 0.1.5-rc.3 or later, whose ctx.connection issues launch-token links',
     )
   }
   if (!config.printPairingUrl) return
@@ -332,27 +338,30 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // `dsh web:` link like any local browser.
   if (lanAddress === undefined) return
   const announce = async (): Promise<void> => {
-    // `port` is what a loopback http client uses, which under TLS is the
-    // inherited plaintext listener — not somewhere a phone can reach. A gated
-    // carrier reports the reachable one separately; a shipped carrier has no
-    // such member and its single port is both.
+    // `port` is this machine's plaintext listener, bound to loopback — not
+    // somewhere a phone can reach; the gated carrier reports the TLS port as
+    // `networkPort`. A shipped carrier has neither that nor a scheme, and is
+    // refused just below.
     const { scheme = 'http', port, networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
     // A LAN address with a plaintext carrier means lanyard's is not the one
-    // serving — say, upstream renamed the row this bundle disables. A link
-    // printed now would carry the launch token across the network in the clear.
+    // serving — say, upstream renamed the row this bundle disables — so the
+    // network is meeting a carrier without this gate, over plaintext. A link
+    // printed now would carry the launch token across it in the clear.
     if (scheme !== 'https') {
       ctx.logger.error(
-        'lanyard: this machine is serving its network without lanyard\'s TLS carrier, so no pairing link is printed — '
-        + 'it would send the launch token in the clear; the bundle needs updating for this dsh version',
+        'lanyard: stop dsh now — it is serving your network without lanyard\'s TLS carrier or its gate. No pairing '
+        + 'link is printed, since it would carry the launch token in the clear; the bundle needs updating for this dsh version',
       )
       return
     }
     const reachable = networkPort ?? port
     const link = pairingLink(issuer, scheme, reachable, lanAddress)
     if (link === undefined) return
-    // The shipped line pairs the plaintext loopback port with the LAN address,
-    // which nothing answers under TLS; say so before a person tries it.
-    console.log(`lanyard: serving your network over TLS on port ${String(reachable)} — the LAN address on the dsh web line is not reachable from other devices`)
+    // The shipped line's `(LAN: …)` link pairs the plaintext loopback port with
+    // the LAN address and carries the launch token. Nothing answers it, so a
+    // passive listener learns nothing — but whoever impersonated this machine
+    // on the network would receive the token, so say not to open it.
+    console.log(`lanyard: serving your network over TLS on port ${String(reachable)} — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token`)
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.

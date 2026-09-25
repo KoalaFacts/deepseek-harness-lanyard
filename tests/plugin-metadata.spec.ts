@@ -2,15 +2,16 @@
  * What dsh reads from this package before it runs any of it: whether to admit
  * it, and what the Plugins page shows for it.
  *
- * Both fail quietly. A peer range dsh's check rejects — 0.1.7 onwards; earlier
- * releases check nothing — makes an install refuse and a boot skip the bundle
- * with one line on stderr; a locale file the `exports` map does not expose is
- * simply not found, and the page falls back to technical names. So both are
- * checked here the way dsh reads them.
+ * Both fail without much noise. A peer range dsh's check rejects — 0.1.7
+ * onwards; earlier releases check nothing — makes an install refuse and a boot
+ * skip the bundle with one line on stderr. An `en.json` the `exports` map does
+ * not expose is simply not found, and the page falls back to technical names;
+ * any other file beside it that dsh cannot read as a language turns the entry
+ * into a metadata error. So both are checked here the way dsh reads them.
  */
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, extname, join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -37,6 +38,9 @@ const rowModules = (parse(readFileSync(join(root, 'cordis.patch.yml'), 'utf8'), 
 /** The languages every locale directory must carry, mirroring the README pair. */
 const LANGUAGES = ['en', 'zh']
 
+/** dsh's rule for a locale file's name: a language id. */
+const LANGUAGE_ID = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u
+
 /** dsh's own admission rule: every DSH peer must match, and prereleases take part. */
 const admits = (range: string, version: string): boolean => semver.satisfies(version, range, { includePrerelease: true })
 
@@ -58,6 +62,14 @@ describe('what the Plugins page shows', () => {
           const value = meta?.[field]
           expect([specifier, language, field, typeof value === 'string' && value.trim() !== '']).toEqual([specifier, language, field, true])
         }
+      }
+      // dsh reads every `.json` beside the English file as a language, and one
+      // it cannot resolve through the exports map, or whose name is not a
+      // language id, replaces the entry's titles with an error.
+      for (const name of readdirSync(dirname(english)).filter(entry => entry.endsWith('.json'))) {
+        const language = name.slice(0, -'.json'.length)
+        expect([specifier, name, LANGUAGE_ID.test(language)]).toEqual([specifier, name, true])
+        expect([specifier, name, dirname(require.resolve(`${specifier}/locale/${name}`))]).toEqual([specifier, name, dirname(english)])
       }
     }
   })

@@ -43,6 +43,7 @@
 import { createServer as createTlsServer } from 'node:tls'
 import { readFile } from 'node:fs/promises'
 import { X509Certificate } from 'node:crypto'
+import { posix } from 'node:path'
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Server as TlsServer, TLSSocket } from 'node:tls'
@@ -123,10 +124,11 @@ export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
 
 /**
  * Exact `/api/<name>` routes, with no namespace, that a paired device may
- * reach. Upstream registers these beside the Gateway with
- * `connection.fetch.register`, so no namespace rule covers them, and like a
- * namespace an unlisted one is loopback-only — which pins `present.open` and
- * `changes.open`, the deliverables' twins of `session/openWorkspacePath`.
+ * reach. Upstream registers these beside the Gateway — the stream WebSocket
+ * with `registerUpgrade`, the rest with `connection.fetch.register` — so no
+ * namespace rule covers them, and like a namespace an unlisted one is
+ * loopback-only — which pins `present.open` and `changes.open`, the
+ * deliverables' twins of `session/openWorkspacePath`.
  *
  * - `remote.mux` is the WebSocket every stream rides.
  * - `file` serves chat images and document previews. It reads whatever this
@@ -329,6 +331,12 @@ function secured<T extends HeaderValue | undefined>(value: T): T {
  * Marked here, it only ever travels inside TLS. A plaintext response, from the
  * loopback listener, is left alone: a browser drops a `Secure` cookie set over
  * http, which would sign the local tab out.
+ *
+ * Every header setter a route handler reaches goes through one of these three:
+ * `setHeaders` and a first `appendHeader` call `setHeader`, and implicit
+ * headers call `writeHead`. What this does not see is an upgrade handler's raw
+ * socket writes and `writeEarlyHints`; upstream sets its one cookie through
+ * `writeHead` on the fallback seat, and none on an upgrade.
  * @param res - the response about to be handed to the route's owner.
  */
 function secureCookiesOf(res: ServerResponse): void {
@@ -339,7 +347,12 @@ function secureCookiesOf(res: ServerResponse): void {
   const writeHead = res.writeHead.bind(res) as (status: number, ...rest: unknown[]) => ServerResponse
   res.writeHead = ((status: number, ...rest: unknown[]) => writeHead(status, ...rest.map((argument) => {
     if (Array.isArray(argument)) {
-      // Node's flat raw form: name, value, name, value…
+      // Node's raw forms, told apart the way node tells them apart: a list of
+      // [name, value] pairs, or one flat list of name, value, name, value…
+      if (Array.isArray(argument[0])) {
+        return (argument as unknown[][]).map(pair =>
+          pair.map((part, index) => index === 1 && isSetCookie(String(pair[0])) ? secured(part as HeaderValue) : part))
+      }
       return argument.map((entry, index) =>
         index % 2 === 1 && isSetCookie(String(argument[index - 1])) ? secured(entry as HeaderValue) : entry)
     }
@@ -445,6 +458,25 @@ function decodedPathname(pathname: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * The name a file owner behind the gate actually opens for a decoded pathname,
+ * for matching {@link Config.publicPathExcludedSuffixes}, or undefined when it
+ * cannot be pinned down.
+ *
+ * `dsh-host-frontend-static` resolves `join(distRoot, decoded)`, and
+ * `path.resolve` drops a trailing separator and collapses `.` segments, so
+ * `index.js.map/` opens the map a bare suffix test calls something else. The
+ * filesystems add their own aliases: case, and on Windows trailing dots and
+ * spaces, a backslash separator, and an NTFS stream (`index.js.map::$DATA`).
+ * A colon has no business in a static asset's path, so one is refused rather
+ * than enumerated.
+ * @param decoded - the decoded pathname.
+ */
+function openedName(decoded: string): string | undefined {
+  if (decoded.includes(':')) return undefined
+  return posix.normalize(decoded.replaceAll('\\', '/')).replace(/[/. ]+$/, '').toLowerCase()
 }
 
 export class GatedWebServer extends WebServer {
@@ -654,11 +686,12 @@ export class GatedWebServer extends WebServer {
     const raw = new URL(req.url ?? '/', 'http://x').pathname
     if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
     const decoded = decodedPathname(raw)
-    // A pathname whose escapes do not decode cannot be checked against the
-    // exclusions, so it never rides the public exemption.
-    // Case-insensitive: on a case-insensitive filesystem `.MAP` is the same file.
-    const excluded = decoded === undefined
-      || this.publicPathExcludedSuffixes.some(suffix => decoded.toLowerCase().endsWith(suffix.toLowerCase()))
+    // A pathname whose escapes do not decode, or whose opened name cannot be
+    // pinned down, cannot be checked against the exclusions, so it never
+    // rides the public exemption.
+    const opened = decoded === undefined ? undefined : openedName(decoded)
+    const excluded = opened === undefined
+      || this.publicPathExcludedSuffixes.some(suffix => opened.endsWith(suffix.toLowerCase()))
     if (admission === 'public' && !excluded) return true
     // Looked up per request: Connection mounts after this carrier, since it
     // registers its own routes here, and may be replaced while the carrier

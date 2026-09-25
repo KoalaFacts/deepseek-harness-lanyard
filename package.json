@@ -1,7 +1,7 @@
 {
   "name": "@koalafacts/deepseek-harness-lanyard",
   "version": "0.1.0",
-  "description": "Use dsh from your phone on your own network: scan a code once, over TLS, with settings kept at the machine",
+  "description": "Use dsh from your phone on your own network: scan a code once, over TLS, behind dsh's own sign-in",
   "icon": "./icon.svg",
   "keywords": [
     "dsh",

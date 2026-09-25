@@ -18,11 +18,13 @@ const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as
   exports: Record<string, unknown>
 }
 
-for (const subpath of Object.keys(manifest.exports)) {
-  if (subpath.endsWith('.json') || subpath.endsWith('.yml')) continue
+// Data entries — the patch, the manifest, the locale files — are not modules;
+// tests/plugin-metadata.spec.ts resolves the locale files the way dsh does.
+const modules = Object.keys(manifest.exports).filter(subpath => !subpath.endsWith('.json') && !subpath.endsWith('.yml'))
+for (const subpath of modules) {
   const specifier = subpath === '.' ? manifest.name : `${manifest.name}${subpath.slice(1)}`
   const loaded = await import(specifier) as Record<string, unknown>
   assert.ok(Object.keys(loaded).length > 0, `${specifier} loaded but exported nothing`)
 }
 
-console.log(`lanyard: build verified — ${String(Object.keys(manifest.exports).length)} exports load`)
+console.log(`lanyard: build verified — ${String(modules.length)} module exports load`)

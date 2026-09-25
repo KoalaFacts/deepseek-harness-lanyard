@@ -127,8 +127,11 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
     refused(await probe(lan, '/api/remote.mux', { headers: upgradeHeaders() })), true)
   check('and the client bundles, which only a loaded page ever needs',
     refused(await probe(lan, '/plugins/')), true)
-  check('a source map is refused anonymously',
-    refused(await probe(lan, '/assets/index.js.map')), true)
+  // The real dsh-host-frontend-static sits behind this seat, and its
+  // path.resolve opens `index.js.map/` as the map itself.
+  for (const path of ['/assets/index.js.map', '/assets/index.js.map/', '/assets/index.js.MAP']) {
+    check(`a source map is refused anonymously, spelled ${path}`, refused(await probe(lan, path)), true)
+  }
   const cold = await probe(lan, '/')
   check('the index answers a peer with no session with upstream\'s own refusal, not the GUI',
     cold.status === 401 && !refused(cold), true)
@@ -188,10 +191,12 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
   // tab out; the mark belongs to the network listener alone.
   check('with a session cookie left unmarked, as a plaintext loopback tab needs', sessionCookieSecure(localExchange), false)
   // What the dsh web line calls its LAN address pairs the network address with
-  // the loopback port. Nothing may answer there — a phone opening it would send
-  // the launch token in the clear before any refusal could arrive.
+  // the loopback port, and its link carries the launch token. Nothing may
+  // answer there: a phone opening it gets a refused connection, and a passive
+  // listener sees no token. (Someone impersonating this machine could still
+  // answer, which is why the pairing line says not to open it.)
   const lanLine = await plainGet(`http://${lan}:${String(localPort)}/`).then(() => 'answered', () => 'refused')
-  check('nothing answers the dsh web line\'s plaintext LAN address, so its token never crosses the network', lanLine, 'refused')
+  check('nothing answers the dsh web line\'s plaintext LAN address, so no request carrying its token completes', lanLine, 'refused')
   const loopbackExchange = await probe('127.0.0.1', target(pairingLink))
   const loopback: OutgoingHttpHeaders = { cookie: sessionCookie(loopbackExchange) ?? '' }
   check('the loopback peer reaches the configuration plane',

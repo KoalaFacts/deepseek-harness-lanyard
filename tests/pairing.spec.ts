@@ -65,6 +65,20 @@ describe('rankLanAddresses', () => {
     })
   })
 
+  it('recognises the names Windows and macOS give the same adapters', () => {
+    // VirtualBox's host-only network sits in 192.168 on every Windows machine
+    // that has it installed; ranked as physical, the code would name it.
+    expect(rankLanAddresses(['192.168.56.1', '10.0.0.5'], interfaces({
+      'VirtualBox Host-Only Network': '192.168.56.1', 'Wi-Fi': '10.0.0.5',
+    }))).toEqual({ ranked: ['10.0.0.5', '192.168.56.1'], offered: ['10.0.0.5'] })
+    expect(rankLanAddresses(['192.168.191.5', '10.1.1.2'], interfaces({
+      'ZeroTier One [8056c2e21c000001]': '192.168.191.5', 'Ethernet': '10.1.1.2',
+    }))).toEqual({ ranked: ['10.1.1.2', '192.168.191.5'], offered: ['10.1.1.2', '192.168.191.5'] })
+    // macOS puts virtual-machine NAT on bridge100 and up.
+    expect(rankLanAddresses(['192.168.64.1', '10.0.1.7'], interfaces({ bridge100: '192.168.64.1', en0: '10.0.1.7' })))
+      .toEqual({ ranked: ['10.0.1.7', '192.168.64.1'], offered: ['10.0.1.7'] })
+  })
+
   it('ranks an overlay a phone can join ahead of a bridge it never can', () => {
     const machine = interfaces({ docker0: '172.17.0.1', tailscale0: '100.101.102.103' })
     expect(rankLanAddresses(['172.17.0.1', '100.101.102.103'], machine)).toEqual({
@@ -241,13 +255,14 @@ describe('the pairing row', () => {
     return printed
   }
 
-  it('never prints a pairing link a plaintext carrier would answer', async () => {
+  it('never prints a pairing link a plaintext carrier would answer, and says to stop', async () => {
     // A LAN address beside a carrier with no TLS means lanyard's carrier is
-    // not the one serving: the link would carry the launch token in the clear.
+    // not the one serving: the network meets no gate, and the link would carry
+    // the launch token in the clear.
     const errors: string[] = []
     const printed = await mount({}, { onError: (line) => { errors.push(line) } })
     expect(printed).toEqual([])
-    expect(errors).toEqual([expect.stringMatching(/without lanyard's TLS carrier.*in the clear/)])
+    expect(errors).toEqual([expect.stringMatching(/^lanyard: stop dsh now .*without lanyard's TLS carrier.*in the clear/)])
   })
 
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
@@ -255,7 +270,7 @@ describe('the pairing row', () => {
     // naming it sends the phone to a port nothing on the network answers.
     const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' } })
     expect(printed).toEqual([
-      'lanyard: serving your network over TLS on port 3443 — the LAN address on the dsh web line is not reachable from other devices',
+      'lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token',
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
       'lanyard: the phone should show certificate SHA-256 AB:CD:EF — if it ever shows another, do not continue',
     ])
@@ -275,7 +290,7 @@ describe('the pairing row', () => {
   it('fails the load on a dsh whose connection cannot issue pairing links', async () => {
     // A connection from before upstream's browser authentication: there is no
     // session to pair, and the gate refuses every network peer anyway.
-    await expect(mount({}, { connection: { rpc: {} } })).rejects.toThrow(/no browser authentication to pair a device with/)
+    await expect(mount({}, { connection: { rpc: {} } })).rejects.toThrow(/no browser authentication to pair a device with.*dsh 0\.1\.5-rc\.3 or later/)
   })
 
   it('prints nothing when the line is turned off', async () => {
