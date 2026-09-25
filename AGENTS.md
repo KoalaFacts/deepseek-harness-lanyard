@@ -6,7 +6,9 @@ Guidance for coding agents (including Claude Code) working in this repository. `
 
 `@koalafacts/deepseek-harness-lanyard` is an **out-of-tree `dsh` plugin bundle** with exactly one purpose: letting its author use the `dsh` web GUI from a phone, on a home network. It publishes to npm and installs with `dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard`.
 
-Everything in it — the pairing token, the self-signed TLS, the loopback pins — exists to make that one thing safe enough to leave running. **It is not a general-purpose gateway, reverse proxy, or auth layer, and should not grow into one.** A change that does not serve someone opening the GUI on their phone is out of scope, however reasonable it sounds; the security surface here is small because the use case is small, and that is the whole design.
+Everything in it — the self-signed TLS, the gate that holds every network request to upstream's own browser session, the loopback pins — exists to make that one thing safe enough to leave running. **It is not a general-purpose gateway, reverse proxy, or auth layer, and should not grow into one.** A change that does not serve someone opening the GUI on their phone is out of scope, however reasonable it sounds; the security surface here is small because the use case is small, and that is the whole design.
+
+**Authentication is upstream's, and this plugin issues no credential of its own.** Since 0.1.2, `dsh` signs browsers in itself: a per-process launch token, printed on its `dsh web:` line, is exchanged for a signed, host-bound session cookie. Before that this plugin carried its own pairing token and browser bootstrap; once upstream authenticated, the two conflicted — a phone holding lanyard's cookie met upstream's 401 — and the nightly e2e sat red for three weeks. Upstream still refuses `--host 0.0.0.0`, serves plain HTTP, and treats any signed-in browser as the operator at the keyboard, so what remains here is exactly that gap: the bind, TLS, the session check at every seat, and the configuration pins.
 
 **It changes no harness source, and must not start.** It composes over the shipped tree through `cordis.patch.yml`, which is the documented extension mechanism ([bundle authoring](https://github.com/deepseek-ai/deepseek-harness/blob/main/docs/user/develop/basic/publish.md)). Everything here is judged by that constraint.
 
@@ -43,28 +45,33 @@ Scripts are TypeScript run directly by Node (type stripping, ≥22.18). No build
 
 | Row | Replaces | Provides |
 |---|---|---|
-| `lanyard-startup` | `web-startup` | `webStartup`; lifts the `--host 0.0.0.0` refusal, requires a pairing token instead |
+| `lanyard-startup` | `web-startup` | `webStartup`; lifts the `--host 0.0.0.0` refusal |
 | `lanyard-tls` | — | `lanyardTls` (PEM paths only, never key material) |
-| `lanyard-webserver` | `webserver` | `webServer` — a `WebServer` subclass |
+| `lanyard-webserver` | `webserver` | `webServer` — a `WebServer` subclass; refuses an all-interfaces bind without TLS |
 | `lanyard-keep-awake` | — | platform sleep inhibitor |
-| `lanyard-pairing` | — | index tap for the browser half, plus the pairing line |
+| `lanyard-pairing` | — | the pairing line: upstream's launch-token link at the address and port a device reaches, plus its QR code |
 
 The gate works because **every consumer contributes through one of `WebServer`'s three registration seats** — `register`, `registerUpgrade`, and the single-owner `registerFallback` that answers whatever no named route matched. Overriding all three puts admission in front of every request the composition serves, so `dsh-client-connection` — which owns `/api` — runs completely unmodified. `assertRegistrarsWrapped()` fails the load if a future harness grows a fourth.
+
+Admission itself is upstream's decision: a network peer passes a seat only if `ctx.connection.requestRejection(req)` admits it — the check `dsh-client-connection` publishes for route owners to apply to their own routes. A loopback peer is exempt from this gate, not from upstream, which still authenticates every route it owns.
 
 ## Load-bearing invariants
 
 Break any of these and the plugin fails **open** — serving the LAN with no gate — while tests may still look green. Each has a test that fails when mutated; keep it that way.
 
-- **TLS is terminated in-process and the decrypted socket handed to the inherited `node:http` server.** A TCP-forwarding proxy would make every request read as a loopback peer and silently disable the token gate entirely. Do not "simplify" this into a proxy. Held down by the real-LAN-peer test in `tests/gated-webserver.spec.ts`.
+- **TLS is terminated in-process and the decrypted socket handed to the inherited `node:http` server.** A TCP-forwarding proxy would make every request read as a loopback peer and silently lift both the session requirement and the configuration pin. Do not "simplify" this into a proxy. Held down by the real-LAN-peer test in `tests/gated-webserver.spec.ts`.
 - **Loopback means the socket peer, never the `Host` header.** On an all-interfaces bind any client can claim `Host: localhost`.
+- **A network peer is admitted only on upstream's say-so, and no connection means no admission.** `admit()` reads `ctx.connection` per request, because Connection mounts after the carrier it registers on; before it mounts, after it is disposed, and on a connection that predates browser authentication, every network peer is refused. Treating "nothing to ask" as "nothing to check" would serve the LAN with no gate at all.
+- **An all-interfaces bind requires TLS material.** The launch token rides the pairing link's query and upstream's session cookie is not `Secure`; over plaintext either is readable by anyone on the network. The carrier throws rather than bind.
 - **Unknown Gateway namespaces deny.** The Typert Gateway claims every `namespace/method` a live service exposes, so a per-method allowlist would default each new endpoint to reachable.
-- **`bootstrapAuthToken` must stay entirely self-contained.** It reaches the browser through `Function.prototype.toString`, so a reference to module scope would serialize to an identifier that does not exist in the page. `npm run build` evaluates the built artifact and fails if it stops working.
-- **The gate's refusal body is its own marker**, not the bare `forbidden` that `dsh-client-connection`'s Host fence also answers with — otherwise nothing can tell admission from the fence behind it.
+- **Stream methods are admitted by the socket, not the method.** Every stream-mode Remote method rides one WebSocket, `/api/remote.mux`, and this gate admits or refuses that socket as a whole — it does not parse frames, and should not grow to. So a *stream* method in a pinned namespace is reachable by a paired device; today that is only `account/watch` and `account/watchExpiry`, read-only. Unary methods, which carry every write, go over HTTP and are classified one by one. A new stream method in a pinned namespace needs a person to decide whether that is acceptable.
+- **The gate's refusal body is its own marker**, not the bare `forbidden` / `unauthorized` that `dsh-client-connection` answers with itself — otherwise nothing can tell this gate from upstream behind it.
 - **Every registration seat is wrapped, and a new one fails the load.** Wrapping `register` and `registerUpgrade` but not `registerFallback` shipped the built frontend to the LAN ungated for a release, and looked identical from inside this class — no path is registered for that seat, so even the unclaimed-path warning was blind to it. `assertRegistrarsWrapped()` turns an upstream `register*` addition into a loud load failure instead of a silent widening.
 - **Route matching decodes the pathname; endpoint classification reads both forms.** `dsh-client-modules` and `dsh-host-frontend-static` both `decodeURIComponent` before resolving a file, so a raw-form suffix match let `%70` spell `.map` past the exclusion. A pathname whose escapes do not decode is refused rather than admitted.
 - **`port` is the loopback listener; `networkPort` is the one a device reaches.** Every consumer of `port` in the shipped composition builds `http://127.0.0.1:${port}` from it — the browser handoff, the `DSH_WEB_URL` shell variable, and the URL the model is told it is serving. Under TLS that has to be the inherited plaintext server, not the TLS front, or all three name an https listener over http. A pairing link needs the opposite and says so explicitly.
 - **A reused certificate must still name the addresses the pairing link advertises.** The subject alternative names are a snapshot of the interfaces present when it was generated, and the certificate outlives them; reuse is what keeps a paired device's accept-once exception valid, but a certificate that no longer covers the current LAN address gives the phone a name mismatch rather than the untrusted-issuer prompt the README promises. `certificateCovers()` decides, matching whole rendered entries — a substring test lets `10.0.0.71` answer for `10.0.0.7`.
 - **`assertServer()` guards the inherited private `server` field.** TypeScript `private` is erased at runtime, so the subclass can reach it; an upstream rename must fail the load loudly rather than quietly serve plaintext.
+- **The inherited carrier's config reaches `super` whole.** Under TLS the constructor rebuilds the object it hands the parent, which is exactly where upstream's `compression` was once dropped; it spreads the whole config and overrides only host and port. The schema composes `WebServer.Config`, so those fields are also validated and defaulted exactly as the stock row would.
 
 ## Replacing a shipped row means owning its whole contract
 
@@ -73,11 +80,49 @@ Break any of these and the plugin fails **open** — serving the LAN with no gat
 - a field this provider forgets falls back to the consuming row's schema default (this is how the shipped `--no-open` flag once went missing);
 - an id the patch disables that no longer exists upstream is skipped with only a warning, leaving the stock ungated carrier mounted beside this one.
 
-`tests/webstartup-contract.spec.ts` checks both against the **installed** `@deepseek-ai/dsh-web-app`, never a vendored copy. When upstream moves, that test is the first thing to read.
+`lanyard-webserver` owns the same kind of contract for the `webserver` row: a config key the shipped row sets and the replacement does not falls back to the carrier's schema default, which is how the Web profile's gzip went missing.
+
+`tests/webstartup-contract.spec.ts` checks all of it against the **installed** `@deepseek-ai/dsh-web-app` — every patch file its manifest declares, not only the first — never a vendored copy. When upstream moves, that test is the first thing to read.
+
+## Deferring authentication to upstream
+
+Two members of `ctx.connection` are the whole contract, both read structurally so this plugin imports nothing from `@deepseek-ai/dsh-client-connection`:
+
+| Member | Used by | If it is missing |
+|---|---|---|
+| `requestRejection(req)` | the gate, per request | every network peer is refused |
+| `authenticatedUrl(base)` | the pairing line | the pairing row fails the load, naming the version it needs |
+
+What that buys, and what it does not, as of 0.1.5 and 0.1.7: the launch token is per process, so a pairing link dies with the process that printed it; the cookie is HMAC-signed with a secret kept in the credential store, bound to the authority it was issued for, `HttpOnly` and `SameSite=Strict`, and lives `cookieMaxAgeDays` (30 by default) across restarts. It is not `Secure`, which is one reason the carrier insists on TLS. Revocation is rotating that one secret, which signs every device out at once.
+
+`tests/upstream-session.spec.ts` drives this contract against the **installed** package, from the LAN address over real TLS: the exchange, the host binding, a forged signature, and the configuration pin behind a valid session. The nightly contract job reruns it against upstream's `next`. When upstream's sign-in changes shape, that is the test that says so.
 
 ## Client-owned paths are configuration
 
-Every route path the gate keys on belongs to a *client* package — `API_PATH` (`dsh-client-connection`), `EVENTS_ENDPOINT` (`dsh-client-hmr`), the bundle prefix (`dsh-client-modules`). None is this plugin's to hardcode, and `apiPathPrefix` and `loopbackOnlyPaths` fail **open** on drift. They are schema-defaulted `Config` fields, and `GatedWebServer` warns once the tree settles about any configured path no row claimed.
+Every route path the gate keys on belongs to a *client* package — `API_PATH` (`dsh-client-connection`), `EVENTS_ENDPOINT` (`dsh-client-hmr`), the open route (`dsh-host-open-in-app`). None is this plugin's to hardcode, and `apiPathPrefix` and `loopbackOnlyPaths` fail **open** on drift. They are schema-defaulted `Config` fields, and `GatedWebServer` warns once the tree settles about any configured path no row claimed.
+
+No named route is public by default. `/plugins` used to be, because the browser had to load client bundles before it held a credential; upstream's exchange sets the session cookie on the redirect that precedes the first page load, so that reason is gone. The fallback seat stays public because the exchange itself arrives there, and upstream authenticates the index on that seat by itself.
+
+## Classifying the Remote surface
+
+A session proves a device was paired, not that someone is at the keyboard. The paired surface is everything the shipped GUI needs to hold a session from a phone; the rest is the configuration plane, or acts on this machine's own screen. The classification below was taken from the installed packages of **both** upstream channels, reading each Remote service's `super(ctx, key[, { namespace }])` and its `Remote(...)` methods, plus what the GUI actually calls on load — never from memory.
+
+| Namespace | Paired device | Why |
+|---|---|---|
+| `session`, `subagents`, `skills`, `commands`, `goals`, `fileReferences`, `fileUploads`, `sessionReferenceResolver`, `messageFeedback`, `sessionFeedback`, `permissionPresets` | reachable | the conversation itself |
+| `agentPresets` | reachable, except `read`, `copy`, `deletePreset` | listing and selecting a preset is using it; its documents configure the agent |
+| `$events` | reachable | tool approvals and the agent's questions are answered at `$events/result`; pinned, the agent waits on a prompt the phone can see |
+| `workspace`, `workspaceFiles`, `officeToPdf` | reachable | workspaces and reading their files |
+| `directoryPicker` | reachable, except `pick` | `list` is the in-app browser; `pick` opens the host's native chooser |
+| `job`, `terminal`, `schedule` | reachable | work on the session's behalf; a paired device already drives an agent that runs commands and answers its approvals |
+| `settings`, `credentials`, `account`, `llm` | loopback only | the configuration plane |
+| `pluginManager`, `pluginRegistryProbe`, `pluginInventory` | loopback only | installing code, and an inventory that echoes the composed configuration |
+| `dynamicCordisRunner` | loopback only | runs plugin code from the panel |
+| `speech`, anything else | loopback only | unclassified; only an experimental bundle mounts `speech` |
+
+`session/openWorkspacePath` and the `/open-in-app/open` route are pinned too: both launch applications on this machine's desktop. The dot-form API proxy the earlier defaults classified (`settings.update` and kin) no longer exists upstream.
+
+A namespace the GUI calls on load that this table misses fails `npm run test:e2e:browser`, which asserts that every refusal the shell meets is a deliberate pin. A namespace it calls later does not — so when upstream grows one, classify it here before it ships, rather than waiting for a phone to find it.
 
 ## Conventions
 
@@ -99,11 +144,13 @@ Four layers, each covering what the one below cannot:
 | | |
 |---|---|
 | `npm run test` | unit behavior against published `@deepseek-ai/dsh-*`, no harness checkout |
-| `npm run build` | the shipped `lib/` loads and the serialized bootstrap still runs |
+| `npm run build` | every subpath the shipped `lib/` exports loads |
 | `npm run test:e2e` | a real `dsh` boot, gate driven from the machine's LAN address over TLS |
-| `npm run test:e2e:browser` | the pairing flow in Chromium — the only thing that proves the cookie rides a real fetch |
+| `npm run test:e2e:browser` | the pairing flow in Chromium — the only thing that proves the session rides the shell's own fetches and WebSocket, and that nothing the shell calls on load is refused by accident |
 
-**Mutation-test any guard you add or change**: break what it guards and confirm the test fails. This repo has twice found tests that passed against the mutation and guarded nothing. A green suite is not evidence until it can go red.
+**Mutation-test any guard you add or change**: break what it guards and confirm the test fails. This repo has three times found tests that passed against the mutation and guarded nothing. A green suite is not evidence until it can go red.
+
+**Assert that something worked, not that this gate stayed out of the way.** `admitted()` means only "not refused by lanyard". Once upstream began refusing on its own, the e2e check "a paired LAN peer reaches the api" stayed green while every paired device got upstream's 401, because a 401 is not this gate's refusal. A claim that a device *can* do something is checked as success — a 200 carrying `ok: true`, a 101 — and `admitted()` is kept for the narrow claim it actually makes.
 
 Both e2e suites exit **2 with a loud SKIPPED message** where they cannot run (no LAN interface, no Playwright) rather than passing vacuously.
 

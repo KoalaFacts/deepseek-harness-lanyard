@@ -14,10 +14,22 @@ import { assertRegistrarsWrapped, GatedWebServer, REFUSAL_BODY } from '../src/we
 import type { Config } from '../src/webserver.ts'
 import { lanIpv4Addresses } from '../src/tls.ts'
 
-const TOKEN = 'pairing-token_0123456789-ab'
+const SESSION = 'dsh-auth-test=v1.valid'
 const LAN = lanIpv4Addresses()[0]
 let ctx: Context | undefined
-afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
+afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
+
+/**
+ * A context with upstream's connection stood in for: exactly one cookie is a
+ * session. The real one is exercised in `upstream-session.spec.ts`.
+ */
+function withSession(): Context {
+  const context = new Context()
+  context.provide('connection', {
+    requestRejection: (request: IncomingMessage) => request.headers.cookie === SESSION ? undefined : 401,
+  })
+  return context
+}
 
 /** A throwaway self-signed pair on disk, as the tls row would have produced. */
 function certificateFiles(): { certPath: string; keyPath: string; ca: string } {
@@ -41,11 +53,14 @@ function certificateFiles(): { certPath: string; keyPath: string; ca: string } {
   return { certPath, keyPath, ca: pems.cert }
 }
 
-/** One HTTPS GET against the gated carrier, accepting its self-signed certificate. */
-function get(host: string, port: number, path: string, headers: Record<string, string> = {}, ca?: string): Promise<number> {
+/** One HTTPS GET against the gated carrier, validated against its own certificate. */
+function get(host: string, port: number, path: string, headers: Record<string, string> = {}, ca?: string):
+Promise<{ status: number; encoding: string | undefined }> {
   return new Promise((resolve, reject) => {
-    const rq = httpsRequest({ host, port, path, method: 'GET', headers, ...ca !== undefined && { ca } },
-      (res) => { res.resume(); res.on('end', () => { resolve(res.statusCode ?? 0) }) })
+    const rq = httpsRequest({ host, port, path, method: 'GET', headers, ...ca !== undefined && { ca } }, (res) => {
+      res.resume()
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, encoding: res.headers['content-encoding'] }) })
+    })
     rq.on('error', reject); rq.end()
   })
 }
@@ -70,45 +85,26 @@ function req(url: string, remoteAddress: string, headers: Record<string, string>
 }
 
 describe('GatedWebServer', () => {
-  it('serves TLS and gates an unmodified consumer\'s routes on the pairing token', async () => {
+  it('serves TLS and hands a loopback peer to an unmodified consumer\'s routes', async () => {
     const { certPath, keyPath, ca } = certificateFiles()
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, {
-      host: '127.0.0.1', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
-    }).await()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
     const server = ctx.get('webServer') as GatedWebServer
     // Exactly what dsh-client-connection does, unmodified.
     server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => { res.writeHead(200); res.end('REACHED') } })
-    // The shell must load before a token exists.
-    server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
 
     expect(server.scheme).toBe('https')
-    const port = server.networkPort
-
     // A loopback peer is exempt, so this leg only shows the listener is real
     // and routes reach their handlers; the network legs below carry the gate.
-    expect(await get('127.0.0.1', port, '/plugins/x/client.js', {}, ca)).toBe(200)
-    expect(await get('127.0.0.1', port, '/api/session.list', {}, ca)).toBe(200)
+    expect((await get('127.0.0.1', server.networkPort, '/api/session/list', {}, ca)).status).toBe(200)
   })
 
-  it('refuses an all-interfaces bind that carries no pairing token', async () => {
+  it('refuses an all-interfaces bind that has no TLS material', async () => {
+    // The launch token and the session cookie are what authenticate a device;
+    // over plaintext, anyone on the network could read either.
     ctx = new Context()
     const fiber = ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0 })
-    await expect(fiber.await()).rejects.toThrow(/all-interfaces bind requires a pairing token/)
-  })
-
-  it('rejects a token that is too weak to guard network access', async () => {
-    ctx = new Context()
-    const fiber = ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: 'short' })
-    await expect(fiber.await()).rejects.toThrow(/at least 16 characters/)
-  })
-
-  it('refuses a token configured two ways at once', async () => {
-    ctx = new Context()
-    const fiber = ctx.plugin(GatedWebServer, {
-      host: '127.0.0.1', port: 0, pairingToken: TOKEN, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
-    })
-    await expect(fiber.await()).rejects.toThrow(/either pairingTokenEnv or pairingToken, not both/)
+    await expect(fiber.await()).rejects.toThrow(/all-interfaces bind requires TLS material/)
   })
 
   it('refuses TLS material configured by halves', async () => {
@@ -117,23 +113,33 @@ describe('GatedWebServer', () => {
     await expect(fiber.await()).rejects.toThrow(/must be configured together/)
   })
 
-  it('resolves the pairing token through the credentials seam before it binds', async () => {
-    ctx = new Context()
-    ctx.provide('credentials', {
-      resolve: (ref: string) => Promise.resolve(ref === 'DSH_PAIRING_TOKEN' ? { value: TOKEN, source: 'env' } : undefined),
-    })
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, pairingTokenEnv: 'DSH_PAIRING_TOKEN' }).await()
+  it('passes the inherited carrier\'s own fields through, compression included', async () => {
+    // The TLS branch rebuilds the config it hands `super`, which is exactly
+    // where a field upstream added — gzip for the Web profile — got dropped.
+    const { certPath, keyPath, ca } = certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, compression: 'gzip',
+    }).await()
     const server = ctx.get('webServer') as GatedWebServer
-    expect(server.host).toBe('0.0.0.0')
-    // Plain HTTP without TLS material: the gate does not depend on the certificate.
-    expect(server.scheme).toBe('http')
+    server.register({
+      kind: 'exact',
+      path: '/large',
+      handler: (_q, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('x'.repeat(8192)) },
+    })
+    const answer = await get('127.0.0.1', server.networkPort, '/large', { 'accept-encoding': 'gzip' }, ca)
+    expect(answer).toEqual({ status: 200, encoding: 'gzip' })
   })
 
-  it('fails the load when the configured reference holds no value', async () => {
-    ctx = new Context()
-    ctx.provide('credentials', { resolve: () => Promise.resolve(undefined) })
-    const fiber = ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, pairingTokenEnv: 'DSH_PAIRING_TOKEN' })
-    await expect(fiber.await()).rejects.toThrow(/holds no value/)
+  it('validates the inherited carrier\'s fields exactly as the stock carrier does', async () => {
+    // The schema composes upstream's own, so a value the stock row would refuse
+    // is refused here too rather than reaching the inherited constructor.
+    for (const Carrier of [WebServer, GatedWebServer]) {
+      ctx = new Context()
+      const fiber = ctx.plugin(Carrier, { host: '127.0.0.1', port: 0, compressionLevel: 12 })
+      await expect(fiber.await()).rejects.toThrow(/compressionLevel expected number <= 9/)
+      await ctx.fiber.dispose(); ctx = undefined
+    }
   })
 })
 
@@ -143,14 +149,15 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
    * the seam the whole design rests on: `GatedWebServer.register` must hand
    * `WebServer.register` a handler that has already decided admission.
    */
-  async function gatedHandler(path: string, kind: WebRoute['kind'] = 'prefix'): Promise<WebRoute['handler']> {
+  async function gatedHandler(path: string, kind: WebRoute['kind'] = 'prefix', context = withSession()):
+  Promise<WebRoute['handler']> {
     const captured: WebRoute[] = []
     const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((route: WebRoute) => {
       captured.push(route)
       return () => {}
     })
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN }).await()
+    ctx = context
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     server.register({ kind, path, handler: (_q, res) => { res.writeHead(200); res.end('REACHED') } })
     spy.mockRestore()
@@ -159,24 +166,43 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     return route.handler
   }
 
-  it('refuses an anonymous LAN peer and admits one presenting the token', async () => {
+  it('refuses an anonymous LAN peer and admits one upstream\'s session vouches for', async () => {
     const handler = await gatedHandler('/api')
     const anonymous = response()
-    await handler(req('/api/session.list', '192.168.1.5'), anonymous)
+    await handler(req('/api/session/list', '192.168.1.5'), anonymous)
     expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
 
-    for (const headers of [{ cookie: `dsh_auth=${TOKEN}` }, { authorization: `Bearer ${TOKEN}` }]) {
-      const paired = response()
-      await handler(req('/api/session.list', '192.168.1.5', headers), paired)
-      expect([headers, paired.status, paired.body]).toEqual([headers, 200, 'REACHED'])
-    }
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect([paired.status, paired.body]).toEqual([200, 'REACHED'])
+  })
+
+  it('refuses every LAN peer while no connection is mounted to vouch for it', async () => {
+    // Connection mounts after the carrier and can be disposed before it; in
+    // between, and in a composition without it, the network gets nothing.
+    const handler = await gatedHandler('/api', 'prefix', new Context())
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
+    const local = response()
+    await handler(req('/api/session/list', '127.0.0.1'), local)
+    expect(local.status).toBe(200)
+  })
+
+  it('refuses a LAN peer when the connection predates upstream\'s browser authentication', async () => {
+    const context = new Context()
+    context.provide('connection', { rpc: {}, fetch: {} })
+    const handler = await gatedHandler('/api', 'prefix', context)
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
   })
 
   it('keeps the configuration plane at the machine even for a paired device', async () => {
     const handler = await gatedHandler('/api')
-    for (const endpoint of ['settings.update', 'credentials.set', 'dynamicCordisRunner/invoke']) {
+    for (const endpoint of ['settings/update', 'credentials/set', 'dynamicCordisRunner/invoke', 'session/openWorkspacePath']) {
       const paired = response()
-      await handler(req(`/api/${endpoint}`, '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+      await handler(req(`/api/${endpoint}`, '192.168.1.5', { cookie: SESSION }), paired)
       expect([endpoint, paired.status]).toEqual([endpoint, 403])
       const local = response()
       await handler(req(`/api/${endpoint}`, '127.0.0.1'), local)
@@ -184,34 +210,43 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     }
   })
 
-  it('serves the client bundle anonymously but never its source map', async () => {
-    const handler = await gatedHandler('/plugins')
-    const bundle = response()
-    await handler(req('/plugins/ui-theme/client.js', '192.168.1.5'), bundle)
-    expect([bundle.status, bundle.body]).toEqual([200, 'REACHED'])
-
-    // sourcemap: true ships the full client source beside every bundle; the
-    // shell needs the bundle to boot, never the map.
-    const map = response()
-    await handler(req('/plugins/ui-theme/client.js.map', '192.168.1.5'), map)
-    expect(map.status).toBe(403)
-
-    const pairedMap = response()
-    await handler(req('/plugins/ui-theme/client.js.map', '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), pairedMap)
-    expect(pairedMap.status).toBe(200)
+  it('pins a method however its separator is spelled', async () => {
+    // Upstream rejects a `%` in an endpoint today; one that starts decoding
+    // would read `%2F` as the separator, so both readings are classified.
+    const handler = await gatedHandler('/api')
+    const paired = response()
+    await handler(req('/api/session%2FopenWorkspacePath', '192.168.1.5', { cookie: SESSION }), paired)
+    expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
   })
 
-  it('keeps the uncapped dev reload channel off the network entirely', async () => {
+  it('serves the client bundles only to a device holding a session', async () => {
+    // The session cookie is set on the redirect before the first page load, so
+    // nothing the loaded page fetches needs an anonymous exemption any more.
+    const handler = await gatedHandler('/plugins')
+    const anonymous = response()
+    await handler(req('/plugins/ui-theme/client.js', '192.168.1.5'), anonymous)
+    expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
+    for (const path of ['/plugins/ui-theme/client.js', '/plugins/ui-theme/client.js.map']) {
+      const paired = response()
+      await handler(req(path, '192.168.1.5', { cookie: SESSION }), paired)
+      expect([path, paired.status]).toEqual([path, 200])
+    }
+  })
+
+  it('keeps the dev reload channel and the desktop opener off the network entirely', async () => {
     // /plugins/events has no admission of its own and holds a connection open
-    // until its client closes; a paired device gains nothing from it and could
-    // exhaust the process's sockets with it.
-    const handler = await gatedHandler('/plugins/events', 'exact')
-    const paired = response()
-    await handler(req('/plugins/events', '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
-    expect(paired.status).toBe(403)
-    const local = response()
-    await handler(req('/plugins/events', '127.0.0.1'), local)
-    expect(local.status).toBe(200)
+    // until its client closes; /open-in-app/open launches an application on
+    // this machine's desktop. A paired device gains nothing from either.
+    for (const path of ['/plugins/events', '/open-in-app/open']) {
+      const handler = await gatedHandler(path, 'exact')
+      const paired = response()
+      await handler(req(path, '192.168.1.5', { cookie: SESSION }), paired)
+      expect([path, paired.status]).toEqual([path, 403])
+      const local = response()
+      await handler(req(path, '127.0.0.1'), local)
+      expect([path, local.status]).toEqual([path, 200])
+      await ctx?.fiber.dispose(); ctx = undefined
+    }
   })
 
   it('refuses an upgrade handshake before protocol negotiation', async () => {
@@ -220,11 +255,11 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
       captured.push(route as (typeof captured)[number])
       return () => {}
     })
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN }).await()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     let negotiated = false
-    server.registerUpgrade({ path: '/api/events', handler: () => { negotiated = true } })
+    server.registerUpgrade({ path: '/api/remote.mux', handler: () => { negotiated = true } })
     spy.mockRestore()
 
     // `end` carries the bytes and closes; `write` + `destroy` could drop them.
@@ -237,23 +272,24 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
       write: (chunk: string) => written.push(chunk),
       destroy: () => { destroyed = true },
     }
-    captured[0]?.handler(req('/api/events', '192.168.1.5'), socket, Buffer.alloc(0))
+    captured[0]?.handler(req('/api/remote.mux', '192.168.1.5'), socket, Buffer.alloc(0))
     expect([ended[0]?.startsWith('HTTP/1.1 403 Forbidden'), ended[0]?.endsWith(REFUSAL_BODY), written.length, destroyed, negotiated])
       .toEqual([true, true, 0, false, false])
+
+    captured[0]?.handler(req('/api/remote.mux', '192.168.1.5', { cookie: SESSION }), socket, Buffer.alloc(0))
+    expect(negotiated).toBe(true)
   })
 })
 
 // The whole gate depends on the decrypted socket keeping the underlying
 // connection's peer address: a TCP-forwarding proxy in this seat would make
-// every request read as loopback and silently admit the entire LAN.
+// every request read as loopback and silently lift the session requirement.
 describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer', () => {
   it('carries the real peer address through TLS termination', async () => {
     const lan = LAN as string
     const { certPath, keyPath, ca } = certificateFiles()
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, {
-      host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
-    }).await()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
     const server = ctx.get('webServer') as GatedWebServer
     let seenPeer: string | undefined
     server.register({
@@ -262,18 +298,16 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
       handler: (request, res) => { seenPeer = request.socket.remoteAddress; res.writeHead(200); res.end('REACHED') },
     })
 
-    expect(await get(lan, server.networkPort, '/api/session.list', {}, ca)).toBe(403)
+    expect((await get(lan, server.networkPort, '/api/session/list', {}, ca)).status).toBe(403)
     expect(seenPeer).toBeUndefined()
-    expect(await get(lan, server.networkPort, '/api/session.list', { cookie: `dsh_auth=${TOKEN}` }, ca)).toBe(200)
+    expect((await get(lan, server.networkPort, '/api/session/list', { cookie: SESSION }, ca)).status).toBe(200)
     expect(seenPeer).toBe(lan)
   })
 
   it('reports a loopback port that answers plain http, and a network port that answers TLS', async () => {
     const { certPath, keyPath } = certificateFiles()
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, {
-      host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
-    }).await()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
     const server = ctx.get('webServer') as GatedWebServer
     // Distinct listeners: `port` is the inherited plaintext server, which every
     // consumer of that member builds `http://127.0.0.1:${port}` from, and
@@ -292,10 +326,8 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
   it('answers the same port over TLS only', async () => {
     const lan = LAN as string
     const { certPath, keyPath, ca } = certificateFiles()
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, {
-      host: '0.0.0.0', port: 0, pairingToken: TOKEN, tlsCertPath: certPath, tlsKeyPath: keyPath,
-    }).await()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
     const server = ctx.get('webServer') as GatedWebServer
     const negotiated = await new Promise<string | false>((resolve, reject) => {
       const socket = tlsConnect({ host: lan, port: server.networkPort, ca }, () => {
@@ -312,15 +344,15 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
 // The fallback seat answers every request no named route matched — in the
 // shipped Web composition that is dsh-host-frontend-static serving the built
 // SPA. It is a third registration path, so overriding register/registerUpgrade
-// alone left the whole frontend reachable from the LAN with no token.
+// alone once left the whole frontend reachable from the LAN.
 describe('the fallback seat', () => {
   /** The handler the gate actually handed to `WebServer.registerFallback`. */
   async function gatedFallback(config: Partial<Config> = {}): Promise<WebRoute['handler']> {
     const captured: WebRoute['handler'][] = []
     const spy = vi.spyOn(WebServer.prototype, 'registerFallback')
       .mockImplementation((handler: WebRoute['handler']) => { captured.push(handler); return () => {} })
-    ctx = new Context()
-    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN, ...config }).await()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, ...config }).await()
     const server = ctx.get('webServer') as GatedWebServer
     server.registerFallback((_q, res) => { res.writeHead(200); res.end('DIST') })
     spy.mockRestore()
@@ -329,9 +361,11 @@ describe('the fallback seat', () => {
     return handler
   }
 
-  it('serves the built frontend to an anonymous LAN peer, so a first pairing load resolves', async () => {
+  it('lets the pairing exchange and the built frontend through to a device holding no session yet', async () => {
+    // Pairing is `GET /?token=…` from a device with nothing to present; the
+    // seat's owner authenticates the index itself.
     const handler = await gatedFallback()
-    for (const path of ['/', '/assets/index-ClqxG24t.js', '/assets/vendor-CjyC-hUb.css']) {
+    for (const path of ['/?token=launch-token', '/', '/assets/index-ClqxG24t.js', '/assets/vendor-CjyC-hUb.css']) {
       const anonymous = response()
       await handler(req(path, '192.168.1.5'), anonymous)
       expect([path, anonymous.status, anonymous.body]).toEqual([path, 200, 'DIST'])
@@ -346,7 +380,7 @@ describe('the fallback seat', () => {
       await handler(req(path, '192.168.1.5'), anonymous)
       expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
       const paired = response()
-      await handler(req(path, '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+      await handler(req(path, '192.168.1.5', { cookie: SESSION }), paired)
       expect([path, paired.status]).toEqual([path, 200])
     }
   })
@@ -358,20 +392,22 @@ describe('the fallback seat', () => {
     expect([malformed.status, malformed.body]).toEqual([403, REFUSAL_BODY])
   })
 
-  it('gates the seat entirely when a deployment configures it that way', async () => {
+  it('closes pairing to new devices when a deployment gates the seat', async () => {
     const handler = await gatedFallback({ fallbackAdmission: 'gated' })
-    const anonymous = response()
-    await handler(req('/assets/index.js', '192.168.1.5'), anonymous)
-    expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
+    for (const path of ['/?token=launch-token', '/assets/index.js']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+    }
     const paired = response()
-    await handler(req('/assets/index.js', '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+    await handler(req('/assets/index.js', '192.168.1.5', { cookie: SESSION }), paired)
     expect(paired.status).toBe(200)
   })
 
   it('pins the seat to this machine when a deployment configures it that way', async () => {
     const handler = await gatedFallback({ fallbackAdmission: 'loopback-only' })
     const paired = response()
-    await handler(req('/assets/index.js', '192.168.1.5', { cookie: `dsh_auth=${TOKEN}` }), paired)
+    await handler(req('/assets/index.js', '192.168.1.5', { cookie: SESSION }), paired)
     expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
     const local = response()
     await handler(req('/assets/index.js', '127.0.0.1'), local)
@@ -379,21 +415,24 @@ describe('the fallback seat', () => {
   })
 })
 
-// A percent-encoded suffix slipped the exclusion on the client-bundle prefix
-// too: dsh-client-modules decodes the pathname before resolving a file.
+// A percent-encoded suffix slipped the exclusion on a public route too: the
+// handlers behind the gate decode the pathname before resolving a file.
 describe('percent-encoded paths on a public route', () => {
-  it('excludes a source map under the bundle prefix however it is spelled', async () => {
-    for (const path of ['/plugins/ui-theme/client.js.map', '/plugins/ui-theme/client.js.ma%70']) {
+  it('excludes a source map however it is spelled', async () => {
+    for (const path of ['/bundles/ui-theme/client.js.map', '/bundles/ui-theme/client.js.ma%70']) {
       const captured: WebRoute[] = []
       const spy = vi.spyOn(WebServer.prototype, 'register')
         .mockImplementation((route: WebRoute) => { captured.push(route); return () => {} })
-      ctx = new Context()
-      await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN }).await()
+      ctx = withSession()
+      await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/bundles'] }).await()
       const server = ctx.get('webServer') as GatedWebServer
-      server.register({ kind: 'prefix', path: '/plugins', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
+      server.register({ kind: 'prefix', path: '/bundles', handler: (_q, res) => { res.writeHead(200); res.end('BUNDLE') } })
       spy.mockRestore()
       const handler = captured.at(-1)?.handler
       if (handler === undefined) throw new Error('the gate never reached WebServer.register')
+      const bundle = response()
+      await handler(req('/bundles/ui-theme/client.js', '192.168.1.5'), bundle)
+      expect(bundle.status).toBe(200)
       const anonymous = response()
       await handler(req(path, '192.168.1.5'), anonymous)
       expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])

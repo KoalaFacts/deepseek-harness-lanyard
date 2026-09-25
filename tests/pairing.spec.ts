@@ -1,42 +1,51 @@
-/** The pairing line and the index tap that makes the link work. */
+/** The pairing link, its QR code, and the row that announces them. */
 import jsQR from 'jsqr'
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import { fitsTerminal, pairingAnnouncement, renderPairingQr, renderedWidth, shouldDrawQr, terminalColumns, type Config as PairingConfig, wantsColour } from '../src/pairing.ts'
+import {
+  fitsTerminal, isLaunchLinkIssuer, pairingLink, renderPairingQr, renderedWidth, shouldDrawQr, terminalColumns,
+  type Config as PairingConfig, type LaunchLinkIssuer, wantsColour,
+} from '../src/pairing.ts'
 import * as Pairing from '../src/pairing.ts'
-import { AUTH_COOKIE_NAME } from '../src/admission.ts'
 
-const TOKEN = 'pairing-token_0123456789-ab'
+/** A launch token of the length upstream mints: 32 random bytes, base64url. */
+const LAUNCH_TOKEN = 'nWXNEOWudT5Vfz4m2-h1bY2lU-pBvOB2oHCufgtaH2E'
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
-describe('pairingAnnouncement', () => {
-  it('names the pairing link for a LAN bind serving TLS', () => {
-    expect(pairingAnnouncement('https', 3080, '192.168.1.5', TOKEN)).toEqual({
-      local: 'https://127.0.0.1:3080',
-      pair: `https://192.168.1.5:3080/#auth=${TOKEN}`,
-    })
+/** Upstream's link issuer as a stand-in; the real one is exercised in `upstream-session.spec.ts`. */
+const issuer: LaunchLinkIssuer = {
+  authenticatedUrl: (baseUrl: string) => `${baseUrl}?token=${LAUNCH_TOKEN}`,
+}
+
+describe('pairingLink', () => {
+  it('asks upstream for the link at the scheme and port a device reaches', () => {
+    expect(pairingLink(issuer, 'https', 3080, '192.168.1.5')).toBe(`https://192.168.1.5:3080/?token=${LAUNCH_TOKEN}`)
   })
 
-  it('says nothing on a loopback bind with no LAN address to advertise', () => {
-    expect(pairingAnnouncement('http', 3080, undefined, TOKEN)).toEqual({})
+  it('hands upstream the clean origin root, so the token is upstream\'s to add', () => {
+    const asked: string[] = []
+    pairingLink({ authenticatedUrl: (baseUrl) => { asked.push(baseUrl); return baseUrl } }, 'https', 3080, '192.168.1.5')
+    expect(asked).toEqual(['https://192.168.1.5:3080/'])
   })
 
-  it('says nothing without a token, because there is nothing to pair', () => {
-    expect(pairingAnnouncement('https', 3080, '192.168.1.5', undefined)).toEqual({ local: 'https://127.0.0.1:3080' })
+  it('has no link on a loopback bind with no LAN address to advertise', () => {
+    expect(pairingLink(issuer, 'http', 3080, undefined)).toBeUndefined()
   })
+})
 
-  it('corrects the scheme only when the shipped line would be wrong', () => {
-    // `@deepseek-ai/dsh-web-app` hardcodes http:// in its own URL line; naming
-    // the real scheme only helps when TLS made that line inaccurate.
-    expect(pairingAnnouncement('http', 3080, undefined, TOKEN).local).toBeUndefined()
-    expect(pairingAnnouncement('https', 3080, undefined, TOKEN).local).toBe('https://127.0.0.1:3080')
+describe('isLaunchLinkIssuer', () => {
+  it('recognises a connection that issues launch-token links, and nothing else', () => {
+    expect(isLaunchLinkIssuer(issuer)).toBe(true)
+    for (const candidate of [undefined, {}, { authenticatedUrl: 'x' }, { requestRejection: () => undefined }]) {
+      expect([candidate, isLaunchLinkIssuer(candidate)]).toEqual([candidate, false])
+    }
   })
 })
 
 describe('the pairing QR code', () => {
-  const link = 'https://192.168.1.5:3080/#auth=pairing-token_0123456789-ab'
+  const link = `https://192.168.1.5:3080/?token=${LAUNCH_TOKEN}`
 
   /**
    * Decode a rendered block the way a phone camera would.
@@ -88,7 +97,7 @@ describe('the pairing QR code', () => {
   })
 
   it('carries the token, so a scan pairs rather than just opening the GUI', async () => {
-    const other = link.replace('0123456789', '9876543210')
+    const other = link.replace('nWXNEOWud', 'dUWOENXWn')
     expect(decode(await renderPairingQr(other))).toBe(other)
   })
 
@@ -119,7 +128,7 @@ describe('the pairing QR code', () => {
   it('fits an ordinary 80-column terminal at the length a real link reaches', async () => {
     // The size follows the link's length, so this is the property that keeps a
     // realistic deployment scannable rather than wrapped.
-    const realistic = 'https://192.168.100.200:31080/#auth=' + 'a'.repeat(43)
+    const realistic = 'https://192.168.100.200:31080/?token=' + 'a'.repeat(43)
     const code = await renderPairingQr(realistic, false)
     expect(fitsTerminal(code, 80)).toBe(true)
     expect(code.split('\n').filter(row => row.length > 0).length).toBeLessThan(30)
@@ -157,52 +166,61 @@ describe('shouldDrawQr', () => {
 })
 
 describe('the pairing row', () => {
-  /** Mount the row over a real carrier, with the LAN snapshot web-app would have provided. */
-  async function mount(config: Partial<PairingConfig>, lanAddresses: string[] = ['192.168.1.5']): Promise<string[]> {
+  /**
+   * Mount the row with the LAN snapshot web-app would have provided and the
+   * connection upstream would have provided.
+   * @param server - a real carrier by default; a stand-in reports a gated one's ports.
+   */
+  async function mount(
+    config: Partial<PairingConfig>,
+    { lanAddresses = ['192.168.1.5'], connection = issuer as unknown, server }: {
+      lanAddresses?: string[]
+      connection?: unknown
+      server?: { scheme: 'https'; port: number; networkPort: number }
+    } = {},
+  ): Promise<string[]> {
     const printed: string[] = []
     vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
     ctx = new Context()
     ctx.provide('webRuntime', { lanAddresses, trustedHosts: lanAddresses })
-    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }).await()
+    ctx.provide('connection', connection)
+    if (server === undefined) await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }).await()
+    else ctx.provide('webServer', server)
     // Schemastery fills printPairingUrl from its default, as the Loader does.
     await ctx.plugin(Pairing, config as PairingConfig).await()
     return printed
   }
 
-  it('taps the index so the shell adopts the token before its first /api request', async () => {
-    await mount({ pairingToken: TOKEN })
-    const server = ctx?.get('webServer') as WebServer
-    const injected = server.applyIndexTaps('<html><head></head><body></body></html>')
-    expect(injected).toContain('<script>')
-    expect(injected).toContain(AUTH_COOKIE_NAME)
-  })
-
-  it('announces the pairing link once the tree has settled', async () => {
-    const printed = await mount({ pairingToken: TOKEN })
-    expect(printed).toEqual([`lanyard: pair a device by opening http://192.168.1.5:${String((ctx?.get('webServer') as WebServer).port)}/#auth=${TOKEN} once`])
-  })
-
-  it('stays silent, and taps nothing, on a deployment with no token', async () => {
+  it('announces upstream\'s pairing link once the tree has settled', async () => {
     const printed = await mount({})
-    const server = ctx?.get('webServer') as WebServer
-    expect(server.applyIndexTaps('<html><head></head></html>')).toBe('<html><head></head></html>')
-    expect(printed).toEqual([])
+    const port = (ctx?.get('webServer') as WebServer).port
+    expect(printed).toEqual([`lanyard: pair a device by opening http://192.168.1.5:${String(port)}/?token=${LAUNCH_TOKEN} once`])
   })
 
-  it('taps the index but prints nothing when the line is turned off', async () => {
-    const printed = await mount({ pairingToken: TOKEN, printPairingUrl: false })
-    const server = ctx?.get('webServer') as WebServer
-    expect(server.applyIndexTaps('<html><head></head></html>')).toContain('<script>')
-    expect(printed).toEqual([])
+  it('names the TLS port a device reaches, never the loopback one, and says why the shipped line is wrong', async () => {
+    // Under TLS `port` is the inherited plaintext listener, bound to loopback;
+    // a link naming it sends the phone to a port nothing on the network answers.
+    const printed = await mount({}, { server: { scheme: 'https', port: 41235, networkPort: 3080 } })
+    expect(printed).toEqual([
+      'lanyard: serving your network over TLS on port 3080 — the LAN address on the dsh web line is not reachable from other devices',
+      `lanyard: pair a device by opening https://192.168.1.5:3080/?token=${LAUNCH_TOKEN} once`,
+    ])
   })
 
-  it('has no link to print on a loopback bind, but still publishes the browser half', async () => {
+  it('fails the load on a dsh whose connection cannot issue pairing links', async () => {
+    // A connection from before upstream's browser authentication: there is no
+    // session to pair, and the gate refuses every network peer anyway.
+    await expect(mount({}, { connection: { rpc: {} } })).rejects.toThrow(/no browser authentication to pair a device with/)
+  })
+
+  it('prints nothing when the line is turned off', async () => {
+    expect(await mount({ printPairingUrl: false })).toEqual([])
+  })
+
+  it('has no link to print on a loopback bind', async () => {
     // A tunnelled device (adb reverse, ssh -R) reaches this deployment as a
-    // loopback peer and needs no token; there is simply no LAN link to show.
-    const printed = await mount({ pairingToken: TOKEN }, [])
-    const server = ctx?.get('webServer') as WebServer
-    expect(server.applyIndexTaps('<html><head></head></html>')).toContain('<script>')
-    expect(printed).toEqual([])
+    // loopback peer and opens the shipped dsh web link instead.
+    expect(await mount({}, { lanAddresses: [] })).toEqual([])
   })
 })
 

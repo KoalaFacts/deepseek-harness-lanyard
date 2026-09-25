@@ -76,19 +76,23 @@ describe('the bundle patch', () => {
     expect(startup?.config).toBeUndefined()
   })
 
-  it('injects the credentials seam into every row that resolves a token reference', () => {
-    for (const id of ['lanyard-webserver', 'lanyard-pairing']) {
-      const row = inserted.find(entry => entry.id === id)
-      expect([id, row?.inject]).toEqual([id, expect.arrayContaining(['credentials'])])
-      expect([id, row?.config?.pairingTokenEnv]).toEqual([id, { expression: 'ctx.webStartup.pairingTokenEnv' }])
+  it('injects what each row reads, and no credentials seam', () => {
+    // Authentication is upstream's: no row resolves a credential of its own, so
+    // none has a reason to reach the credential store.
+    const inject = (id: string): string[] | undefined => inserted.find(row => row.id === id)?.inject
+    expect(inject('lanyard-webserver')).toEqual(['webStartup', 'lanyardTls'])
+    expect(inject('lanyard-pairing')).toEqual(['webServer', 'webRuntime', 'connection'])
+    for (const row of inserted) {
+      expect([row.id, row.inject ?? []]).toEqual([row.id, expect.not.arrayContaining(['credentials'])])
     }
   })
 
-  it('never carries the token itself into a config surface', () => {
+  it('carries no secret into any config surface', () => {
     // Config is echoed by `dsh --dump-config`, the plugin-inventory RPC, and
-    // crash dumps; only the reference may travel through it.
+    // crash dumps. TLS travels as paths; nothing else here is secret.
     for (const row of inserted) {
-      expect([row.id, Object.keys(row.config ?? {})]).toEqual([row.id, expect.not.arrayContaining(['pairingToken'])])
+      const keys = Object.keys(row.config ?? {})
+      expect([row.id, keys.filter(key => /token|secret|password|^tlsKey$|^tlsCert$/i.test(key))]).toEqual([row.id, []])
     }
   })
 

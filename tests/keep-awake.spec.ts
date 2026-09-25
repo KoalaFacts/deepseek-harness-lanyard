@@ -1,21 +1,24 @@
 /** The sleep inhibitor: which facility each platform holds, and how it fails. */
-import { describe, expect, it, afterEach } from 'vitest'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { delimiter, join } from 'node:path'
+import { describe, expect, it, afterEach, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import * as KeepAwake from '../src/keep-awake.ts'
-import { resolveInhibitor } from '../src/keep-awake.ts'
+import { findOnPath, internals, resolveInhibitor } from '../src/keep-awake.ts'
 
 let ctx: Context | undefined
-afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
+afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
 /** One spawn the fake seam recorded. */
 interface Spawned { argv: string[]; terminated: boolean }
 
 /**
- * A subprocess seam whose spawns never run anything.
- * @param pid - the pid to report; zero or less means the platform binary is missing.
+ * A subprocess seam whose spawns never run anything, shaped like the seam's
+ * handle: no pid, a `done` that settles on exit, and termination.
  * @param done - the outcome the spawn settles to.
  */
-function fakeSubprocess(pid: number, done: Promise<{ exitCode: number; signal: string | null }>): {
+function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null }>): {
   seam: unknown
   spawned: Spawned[]
 } {
@@ -25,7 +28,6 @@ function fakeSubprocess(pid: number, done: Promise<{ exitCode: number; signal: s
       const record: Spawned = { argv: options.argv, terminated: false }
       spawned.push(record)
       return {
-        pid,
         done,
         terminate: () => { record.terminated = true },
         waitForExit: () => Promise.resolve(true),
@@ -60,9 +62,40 @@ describe('resolveInhibitor', () => {
   })
 })
 
+describe.skipIf(process.platform === 'win32')('findOnPath', () => {
+  /** A PATH of two directories, the second holding the files this test names. */
+  function pathWith(files: Record<string, number>): string {
+    const empty = mkdtempSync(join(tmpdir(), 'lanyard-path-'))
+    const full = mkdtempSync(join(tmpdir(), 'lanyard-path-'))
+    for (const [name, mode] of Object.entries(files)) {
+      writeFileSync(join(full, name), '#!/bin/sh\n')
+      chmodSync(join(full, name), mode)
+    }
+    return ['', empty, full].join(delimiter)
+  }
+
+  it('finds an executable in any PATH entry, skipping empty ones', () => {
+    const path = pathWith({ inhibitor: 0o755 })
+    expect(findOnPath('inhibitor', path, [''])).toMatch(/inhibitor$/)
+  })
+
+  it('does not count a file it could not execute, or a directory by that name', () => {
+    const path = pathWith({ inhibitor: 0o644 })
+    expect(findOnPath('inhibitor', path, [''])).toBeUndefined()
+    const dir = mkdtempSync(join(tmpdir(), 'lanyard-path-'))
+    mkdirSync(join(dir, 'inhibitor'))
+    expect(findOnPath('inhibitor', dir, [''])).toBeUndefined()
+  })
+
+  it('tries each extension it is given, as Windows resolves PATHEXT', () => {
+    const path = pathWith({ 'inhibitor.exe': 0o755 })
+    expect(findOnPath('inhibitor', path, ['', '.com', '.exe'])).toMatch(/inhibitor\.exe$/)
+  })
+})
+
 describe('the keep-awake row', () => {
   it('spawns nothing when the invocation did not ask to stay awake', async () => {
-    const { seam, spawned } = fakeSubprocess(1234, new Promise(() => {}))
+    const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await ctx.plugin(KeepAwake, { enabled: false }).await()
@@ -70,7 +103,8 @@ describe('the keep-awake row', () => {
   })
 
   it('holds the inhibitor while it lives and releases it on disposal', async () => {
-    const { seam, spawned } = fakeSubprocess(1234, new Promise(() => {}))
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+    const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await ctx.plugin(KeepAwake, { enabled: true }).await()
@@ -82,10 +116,28 @@ describe('the keep-awake row', () => {
     expect(spawned[0]?.terminated).toBe(true)
   })
 
-  it('rejects its load when the platform binary is missing, rather than serving without the inhibitor', async () => {
-    const { seam } = fakeSubprocess(-1, Promise.reject(new Error('ENOENT')))
+  it('rejects its load when the platform binary is not on PATH, rather than serving without the inhibitor', async () => {
+    // The seam reports a failed spawn only through `done`, after the load has
+    // finished; the missing binary is decided before anything runs instead.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue(undefined)
+    const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
     ctx = new Context()
     ctx.provide('subprocess', seam)
-    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/ENOENT/)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/is not on PATH/)
+    expect(spawned).toEqual([])
+  })
+
+  it('warns, and keeps serving, when a running inhibitor dies later', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+    let exit = (_outcome: { exitCode: number; signal: string | null }): void => {}
+    const { seam } = fakeSubprocess(new Promise((resolve) => { exit = resolve }))
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await ctx.plugin(KeepAwake, { enabled: true }).await()
+    exit({ exitCode: 1, signal: null })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(warnings).toEqual([expect.stringMatching(/sleep inhibitor exited \(code 1, signal null\); the host may sleep again/)])
   })
 })

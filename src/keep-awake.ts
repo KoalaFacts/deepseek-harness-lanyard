@@ -6,13 +6,15 @@
  * `SetThreadExecutionState` holder on Windows — so the OS drops the lock when
  * that child exits, and disposal is what ends it. A dsh killed abruptly
  * (`SIGKILL`, power loss) runs no disposer and orphans the child, which holds
- * the inhibitor until it is killed or the machine restarts. A spawn that
- * produces no pid rejects activation: a deployment that asked to stay awake
+ * the inhibitor until it is killed or the machine restarts. An inhibitor that
+ * is not on PATH rejects activation: a deployment that asked to stay awake
  * must never silently serve without it. A child that dies later logs a warning
  * and serving continues.
  * @module
  */
 
+import { accessSync, constants, statSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-subprocess'
@@ -96,6 +98,44 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
 }
 
 /**
+ * Where an executable name resolves on PATH, the way the platform's spawn
+ * would find it: each PATH entry in order, and on Windows each `PATHEXT`
+ * extension within it.
+ * @param command - a bare executable name.
+ * @param path - the PATH value to search.
+ * @param extensions - candidate suffixes; `['']` outside Windows.
+ * @returns the first match, or undefined when nothing on PATH answers to it.
+ */
+export function findOnPath(command: string, path = process.env.PATH ?? '', extensions = pathExtensions()): string | undefined {
+  for (const dir of path.split(delimiter)) {
+    if (dir === '') continue
+    for (const extension of extensions) {
+      const candidate = join(dir, `${command}${extension}`)
+      try {
+        accessSync(candidate, constants.X_OK)
+        if (statSync(candidate).isFile()) return candidate
+      } catch {
+        // Not here; keep looking.
+      }
+    }
+  }
+  return undefined
+}
+
+/** `PATHEXT` on Windows, where a bare name resolves through it; nothing elsewhere. */
+function pathExtensions(): string[] {
+  if (process.platform !== 'win32') return ['']
+  return ['', ...(process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(extension => extension !== '')]
+}
+
+/**
+ * Test hooks for the host's PATH; production never mutates them. The unit
+ * suite must not depend on whether the machine running it has
+ * `systemd-inhibit`.
+ */
+export const internals = { findOnPath }
+
+/**
  * Hold the sleep inhibitor while this plugin lives.
  * @param ctx - plugin context carrying the subprocess seam.
  * @param config - validated {@link Config}.
@@ -103,15 +143,20 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
 export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!config.enabled) return
   const { command, args } = resolveInhibitor(process.platform)
+  // The subprocess seam reports a spawn failure only by rejecting `done`, some
+  // time after `spawn` returns, and exposes no pid to test sooner. The one
+  // failure a person can actually cause — a platform without the inhibitor —
+  // is decided here instead, before anything runs, so it rejects this load
+  // rather than surfacing as a warning after the server is already serving.
+  if (internals.findOnPath(command) === undefined) {
+    throw new Error(`lanyard-keep-awake: ${command} is not on PATH, so --keep-awake cannot hold this host awake`)
+  }
   const held = ctx.subprocess.spawn({
     argv: [command, ...args],
     cwd: process.cwd(),
     stdio: { stdin: 'ignore', stdout: DISCARD_OUTPUT, stderr: DISCARD_OUTPUT },
     graceMs: TERMINATE_GRACE_MS,
   })
-  // A missing platform binary leaves no pid; `done` carries the spawn error, so
-  // awaiting it rejects this load rather than serving without the inhibitor.
-  if (held.pid <= 0) await held.done
   let disposed = false
   const report = (what: string): void => {
     if (!disposed) ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor ${what}; the host may sleep again`)
@@ -125,7 +170,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     held.terminate()
     const released = await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))
     if (!released) {
-      ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor did not exit within teardown; process ${String(held.pid)} may keep the host awake until it is killed`)
+      ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor did not exit within teardown; ${command} may keep the host awake until it is killed`)
     }
   }, 'lanyard-keep-awake: sleep inhibitor')
 }

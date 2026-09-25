@@ -1,38 +1,47 @@
 /**
- * Pairing-token admission for every request the gated carrier serves. The
- * decision reads the socket peer the kernel reported, never a request header:
- * on an all-interfaces bind any client reaching the socket can claim
- * `Host: localhost`, so a header-derived exemption is a token bypass.
+ * Network admission for every request the gated carrier serves.
+ *
+ * Authentication belongs to upstream. Since 0.1.2, `dsh-client-connection`
+ * turns the launch token `dsh web` prints into a signed, host-bound browser
+ * session, and publishes the check as `ctx.connection.requestRejection` for
+ * every route owner to apply to its own routes. This module decides only
+ * *where* that check is mandatory — on every request from a peer that is not
+ * this machine, whichever seat it arrives at — and never issues or verifies a
+ * credential of its own.
+ *
+ * The peer is the socket the kernel reported, never a request header: on an
+ * all-interfaces bind any client reaching the socket can claim
+ * `Host: localhost`, so a header-derived exemption would be a bypass.
  * @module
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 
-/** Cookie the browser half publishes after adopting a `#auth=` pairing link. */
-export const AUTH_COOKIE_NAME = 'dsh_auth'
-
-/** URL-fragment parameter carrying the token on a pairing link (`#auth=<token>`); a fragment never reaches the server or its logs. */
-export const AUTH_FRAGMENT_PARAM = 'auth'
-
-/** localStorage key the browser half keeps the adopted token under. */
-export const AUTH_STORAGE_KEY = 'dsh.pairingToken'
-
-/** A pairing token is at least 16 characters of the URL-, cookie-, and shell-safe alphabet. */
-export const PAIRING_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,}$/
-
-/** Human-readable form of {@link PAIRING_TOKEN_PATTERN}, used in load-time errors. */
-export const PAIRING_TOKEN_REQUIREMENT = 'at least 16 characters of A-Za-z0-9_-'
+/**
+ * The part of upstream's `ctx.connection` this gate relies on: the Host/Origin
+ * fence plus browser-session verification, applicable to any route.
+ *
+ * Read structurally rather than through the Context augmentation
+ * `@deepseek-ai/dsh-client-connection` declares: this plugin does not import
+ * that package, and re-declaring its service key would collide with its own
+ * declaration in any composition that does.
+ */
+export interface SessionAuthority {
+  /**
+   * @param request - the request, read for its Host, Origin, and Cookie headers.
+   * @returns 401 or 403 to refuse, undefined to admit.
+   */
+  requestRejection: (request: IncomingMessage) => 401 | 403 | undefined
+}
 
 /**
- * Assert a configured pairing token is strong enough to guard network access.
- * Anything else — too short, cookie-breaking punctuation, non-ASCII — fails the
- * load loudly rather than silently weakening or corrupting the cookie exchange.
- * @param token - the configured value, verbatim.
+ * Whether a service offers the session check this gate needs. A connection
+ * that predates upstream's browser authentication has no such member, and
+ * neither does whatever a rename upstream leaves behind — both read as absent.
+ * @param candidate - `ctx.get('connection')`, whatever it holds.
  */
-export function assertPairingToken(token: string): void {
-  if (PAIRING_TOKEN_PATTERN.test(token)) return
-  throw new Error(`lanyard: pairing token must be ${PAIRING_TOKEN_REQUIREMENT}`)
+export function isSessionAuthority(candidate: unknown): candidate is SessionAuthority {
+  return typeof (candidate as Partial<SessionAuthority> | undefined)?.requestRejection === 'function'
 }
 
 /**
@@ -52,7 +61,7 @@ function isIpv4Loopback(literal: string): boolean {
  * Whether a socket peer address is the loopback interface: IPv4 `127.0.0.0/8`,
  * IPv6 `::1`, or an IPv4-mapped loopback. An address this does not recognize —
  * an unusual literal, a non-IP transport, `undefined` — is not loopback, so it
- * fails closed to token-required.
+ * fails closed to session-required.
  * @param address - `req.socket.remoteAddress`, or undefined.
  * @returns true only for a genuine loopback peer.
  */
@@ -62,39 +71,22 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return isIpv4Loopback(address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address)
 }
 
-/** Every token the request presents: the Bearer authorization plus each pairing cookie value. */
-function presentedTokens(req: IncomingMessage): string[] {
-  const tokens: string[] = []
-  const authorization = req.headers.authorization
-  if (authorization?.startsWith('Bearer ') === true) tokens.push(authorization.slice('Bearer '.length))
-  const cookies = req.headers.cookie
-  if (cookies !== undefined) {
-    for (const pair of cookies.split(';')) {
-      const separator = pair.indexOf('=')
-      if (separator === -1) continue
-      // The name is compared whole: a neighbouring `dsh_auth_x` carrying a
-      // valid token must not satisfy this one.
-      if (pair.slice(0, separator).trim() === AUTH_COOKIE_NAME) tokens.push(pair.slice(separator + 1).trim())
-    }
-  }
-  return tokens
-}
-
-/** Constant-time equality over sha256 digests: length-independent, prefix-blind. */
-function tokenMatches(presented: string, token: string): boolean {
-  return timingSafeEqual(
-    createHash('sha256').update(presented).digest(),
-    createHash('sha256').update(token).digest(),
-  )
-}
-
 /**
  * Whether one request may proceed to the handler it addressed.
+ *
+ * A loopback peer is exempt here, not unauthenticated: upstream still applies
+ * its own session check to every route that owns one. What this adds is the
+ * same check in front of every *other* route, for a peer elsewhere on the
+ * network — so a route whose owner authenticates nothing is not thereby open
+ * to the LAN.
  * @param req - the incoming request, whose socket carries the peer address.
- * @param token - the deployment's pairing token; absent admits only loopback peers.
- * @returns true for a loopback peer, or a non-loopback peer presenting the token.
+ * @param authority - `ctx.get('connection')` at request time; absent before
+ * Connection mounts and after it is disposed.
+ * @returns true for a loopback peer, or a network peer upstream admits.
  */
-export function admit(req: IncomingMessage, token: string | undefined): boolean {
+export function admit(req: IncomingMessage, authority: unknown): boolean {
   if (isLoopbackAddress(req.socket.remoteAddress)) return true
-  return token !== undefined && presentedTokens(req).some(presented => tokenMatches(presented, token))
+  // Without the check there is no telling a paired device from anyone else on
+  // the network, so the peer is refused rather than waved through.
+  return isSessionAuthority(authority) && authority.requestRejection(req) === undefined
 }

@@ -1,6 +1,7 @@
 /**
  * The command-line provider: the flag family it accepts, and the usage errors
- * that keep an unauthenticated network bind from ever happening.
+ * it still raises. Whether an all-interfaces bind may proceed is the carrier's
+ * decision, not this provider's — see `gated-webserver.spec.ts`.
  */
 import { describe, expect, it } from 'vitest'
 import type { Command } from 'commander'
@@ -41,36 +42,18 @@ describe('the lanyard web command line', () => {
     expect(parse(['--no-open'])).toEqual({ trustedHosts: [], openBrowser: false })
   })
 
-  it('accepts the all-interfaces bind upstream refuses, given a pairing token', () => {
+  it('accepts the all-interfaces bind upstream refuses', () => {
     // This is the whole point of replacing the stock provider: upstream calls
-    // program.error() here, because without authentication the bind hands
-    // remote code execution to the network.
-    expect(parse(['--host', '0.0.0.0', '--pairing-token-env', 'DSH_PAIRING_TOKEN'])).toEqual({
-      host: '0.0.0.0', trustedHosts: [], openBrowser: true, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
-    })
+    // program.error() here. What makes the bind safe — upstream's session on
+    // every request, and TLS, which the carrier insists on — is not a flag.
+    expect(parse(['--host', '0.0.0.0'])).toEqual({ host: '0.0.0.0', trustedHosts: [], openBrowser: true })
   })
 
-  it('still refuses an all-interfaces bind with no pairing token', () => {
-    expect(parse(['--host', '0.0.0.0'])).toBeInstanceOf(Error)
-    expect(String(parse(['--host', '0.0.0.0']))).toMatch(/requires --pairing-token-env/)
-  })
-
-  it('accepts --trusted-host without a pairing token, as the row it replaces does', () => {
+  it('accepts --trusted-host, in argument order, as the row it replaces does', () => {
     // The flag declares an authority for dsh-client-connection's Host fence,
     // which is what a loopback bind behind a tunnel or reverse proxy needs.
-    // That peer reads as loopback here and is admitted either way, so demanding
-    // a token refused a working stock invocation and protected nothing.
-    expect(parse(['--trusted-host', 'app.internal']))
-      .toEqual({ trustedHosts: ['app.internal'], openBrowser: true })
-  })
-
-  it('accepts --trusted-host alongside a token, in argument order', () => {
-    expect(parse([
-      '--pairing-token-env', 'DSH_PAIRING_TOKEN',
-      '--trusted-host', 'app.internal', 'app2.internal',
-    ])).toEqual({
-      trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
-    })
+    expect(parse(['--trusted-host', 'app.internal', 'app2.internal']))
+      .toEqual({ trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true })
   })
 
   it('refuses a non-numeric port', () => {
@@ -82,10 +65,9 @@ describe('the lanyard web command line', () => {
     expect(parse([])).not.toHaveProperty('keepAwake')
   })
 
-  it('documents the pairing flags in its help text', () => {
+  it('documents the network bind and --keep-awake in its help text', () => {
     const help = webCommand().helpInformation()
-    expect(help).toContain('--pairing-token-env')
     expect(help).toContain('--keep-awake')
-    expect(help).toContain('at least 16 characters of A-Za-z0-9_-')
+    expect(help).toContain('0.0.0.0 serves your network over TLS')
   })
 })

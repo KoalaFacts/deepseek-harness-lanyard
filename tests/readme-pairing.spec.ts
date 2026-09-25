@@ -23,8 +23,8 @@ const headingLevels = (markdown: string): number[] =>
 /**
  * Fenced code blocks with trailing comments stripped. The commands a reader
  * copies must be identical; the comment explaining one is prose, and belongs
- * in the reader's language. A `#` with no space before it — the `#auth=`
- * fragment of a pairing link — is part of a URL, not a comment.
+ * in the reader's language. A `#` with no space before it — a URL fragment —
+ * is part of the command, not a comment.
  */
 const codeBlocks = (markdown: string): string[] =>
   [...markdown.matchAll(/^```[a-z]*\n([\s\S]*?)^```/gm)]
