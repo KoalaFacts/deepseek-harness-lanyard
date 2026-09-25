@@ -40,7 +40,9 @@
         dir: !!js dshHomePath('lanyard-tls')
 
     # The gated carrier. It provides `webServer`, so every consumer that injects
-    # that service reaches this one instead of the disabled row above. The
+    # that service reaches this one instead of the disabled row above. `port`
+    # stays this machine's plaintext listener, exactly as the stock row binds
+    # it; devices on the network reach the TLS front on `networkPort`. The
     # compression keys restate the disabled row's own, which a replacement
     # would otherwise silently drop.
     - id: lanyard-webserver
@@ -49,6 +51,7 @@
       config:
         host: !!js ctx.webStartup.host ?? '127.0.0.1'
         port: !!js ctx.webStartup.port ?? 3080
+        networkPort: !!js ctx.webStartup.networkPort ?? 3443
         compression: gzip
         compressionLevel: 1
         compressionThresholdBytes: 1024

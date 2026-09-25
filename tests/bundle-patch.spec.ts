@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
+import { DEFAULT_NETWORK_PORT } from '../src/webserver.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
@@ -94,6 +95,14 @@ describe('the bundle patch', () => {
       const keys = Object.keys(row.config ?? {})
       expect([row.id, keys.filter(key => /token|secret|password|^tlsKey$|^tlsCert$/i.test(key))]).toEqual([row.id, []])
     }
+  })
+
+  it('gives the network its own port, defaulting to the carrier\'s own default', () => {
+    // Two defaults for one value — the patch's and the schema's — must agree,
+    // or which one applies depends on how the carrier was composed.
+    const carrier = inserted.find(row => row.id === 'lanyard-webserver')
+    expect(carrier?.config?.networkPort).toEqual({ expression: `ctx.webStartup.networkPort ?? ${String(DEFAULT_NETWORK_PORT)}` })
+    expect(carrier?.config?.port).toEqual({ expression: 'ctx.webStartup.port ?? 3080' })
   })
 
   it('turns TLS on exactly when the bind is all-interfaces', () => {

@@ -1,21 +1,36 @@
 /** The gated carrier over a real listener: admission, the privileged pin, and TLS. */
 import { connect as tlsConnect } from 'node:tls'
+import { createServer as createTcpServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { X509Certificate } from 'node:crypto'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import WebServer, { type WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import WebServer, { type Config as WebServerConfig, type WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { generate } from 'selfsigned'
 import { assertRegistrarsWrapped, GatedWebServer, REFUSAL_BODY } from '../src/webserver.ts'
 import type { Config } from '../src/webserver.ts'
 import { lanIpv4Addresses } from '../src/tls.ts'
+import { freePort } from '../scripts/dsh-harness.ts'
 
 const SESSION = 'dsh-auth-test=v1.valid'
 const LAN = lanIpv4Addresses()[0]
+
+/**
+ * Every field this plugin adds to the carrier's config. The compiler holds it
+ * to the interface — a field added there without a line here fails typecheck —
+ * so the schema is checked against the interface, not against itself.
+ */
+const OWN_FIELDS = {
+  networkPort: true, tlsCertPath: true, tlsKeyPath: true, publicPaths: true, publicPathExcludedSuffixes: true,
+  loopbackOnlyPaths: true, fallbackAdmission: true, apiPathPrefix: true, privilegedMethods: true,
+  pairedNamespaces: true, pairedRoutes: true,
+} satisfies Record<Exclude<keyof Config, keyof WebServerConfig>, true>
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
@@ -65,6 +80,24 @@ Promise<{ status: number; encoding: string | undefined }> {
   })
 }
 
+/** One plain-HTTP GET; rejects when nothing answers at that address. */
+function plainGet(host: string, port: number, path: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const rq = httpRequest({ host, port, path, method: 'GET' }, (res) => {
+      res.resume(); res.on('end', () => { resolve(res.statusCode ?? 0) })
+    })
+    rq.on('error', reject); rq.end()
+  })
+}
+
+/** Two distinct ports free right now. */
+async function twoFreePorts(): Promise<[number, number]> {
+  const first = await freePort()
+  let second = await freePort()
+  while (second === first) second = await freePort()
+  return [first, second]
+}
+
 /** The response facts a wrapped handler wrote. */
 interface Written { status: number; body: string }
 
@@ -88,7 +121,7 @@ describe('GatedWebServer', () => {
   it('serves TLS and hands a loopback peer to an unmodified consumer\'s routes', async () => {
     const { certPath, keyPath, ca } = certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     // Exactly what dsh-client-connection does, unmodified.
     server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => { res.writeHead(200); res.end('REACHED') } })
@@ -107,6 +140,33 @@ describe('GatedWebServer', () => {
     await expect(fiber.await()).rejects.toThrow(/all-interfaces bind requires TLS material/)
   })
 
+  it('refuses a network port that is this machine\'s port too', async () => {
+    // Loopback on a port and every interface on the same one collide on Linux,
+    // and one port cannot be both plaintext and TLS.
+    const { certPath, keyPath } = certificateFiles()
+    ctx = new Context()
+    const fiber = ctx.plugin(GatedWebServer, {
+      host: '0.0.0.0', port: 4080, networkPort: 4080, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    })
+    await expect(fiber.await()).rejects.toThrow(/port and networkPort are both 4080/)
+  })
+
+  it('names the way out when the network port is already taken', async () => {
+    const { certPath, keyPath } = certificateFiles()
+    const squatter = createTcpServer()
+    await new Promise<void>((resolve) => { squatter.listen(0, '0.0.0.0', resolve) })
+    const taken = (squatter.address() as AddressInfo).port
+    try {
+      ctx = withSession()
+      const fiber = ctx.plugin(GatedWebServer, {
+        host: '0.0.0.0', port: 0, networkPort: taken, tlsCertPath: certPath, tlsKeyPath: keyPath,
+      })
+      await expect(fiber.await()).rejects.toThrow(new RegExp(`port ${String(taken)} is already in use.*--network-port.*--host 127\\.0\\.0\\.1`, 's'))
+    } finally {
+      squatter.close()
+    }
+  })
+
   it('refuses TLS material configured by halves', async () => {
     ctx = new Context()
     const fiber = ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: '/tmp/cert.pem' })
@@ -119,7 +179,7 @@ describe('GatedWebServer', () => {
     const { certPath, keyPath, ca } = certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, {
-      host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, compression: 'gzip',
+      host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0, compression: 'gzip',
     }).await()
     const server = ctx.get('webServer') as GatedWebServer
     server.register({
@@ -129,6 +189,18 @@ describe('GatedWebServer', () => {
     })
     const answer = await get('127.0.0.1', server.networkPort, '/large', { 'accept-encoding': 'gzip' }, ca)
     expect(answer).toEqual({ status: 200, encoding: 'gzip' })
+  })
+
+  it('validates every field of its own at load, so a malformed value never reaches the gate', async () => {
+    // Schemastery passes a key its schema does not name straight through, so a
+    // field missing from the schema is neither defaulted nor checked: a string
+    // where a list belongs would become a Set of its characters.
+    for (const field of Object.keys(OWN_FIELDS)) {
+      ctx = new Context()
+      const fiber = ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, [field]: { malformed: true } } as never)
+      await expect(fiber.await()).rejects.toThrow(new RegExp(`\\$\\.${field} expected`))
+      await ctx.fiber.dispose(); ctx = undefined
+    }
   })
 
   it('validates the inherited carrier\'s fields exactly as the stock carrier does', async () => {
@@ -210,13 +282,18 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     }
   })
 
-  it('pins a method however its separator is spelled', async () => {
+  it('pins a method however it is spelled', async () => {
     // Upstream rejects a `%` in an endpoint today; one that starts decoding
-    // would read `%2F` as the separator, so both readings are classified.
+    // would read the escapes, so both readings are classified. An escaped
+    // separator reads as one unlisted name and is pinned either way; an escape
+    // inside a method of a paired namespace is what only the decoded reading
+    // catches — raw, `openWorkspace%50ath` is no method the pin names.
     const handler = await gatedHandler('/api')
-    const paired = response()
-    await handler(req('/api/session%2FopenWorkspacePath', '192.168.1.5', { cookie: SESSION }), paired)
-    expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
+    for (const endpoint of ['session%2FopenWorkspacePath', 'session/openWorkspace%50ath', 'directoryPicker/pic%6B']) {
+      const paired = response()
+      await handler(req(`/api/${endpoint}`, '192.168.1.5', { cookie: SESSION }), paired)
+      expect([endpoint, paired.status, paired.body]).toEqual([endpoint, 403, REFUSAL_BODY])
+    }
   })
 
   it('serves the client bundles only to a device holding a session', async () => {
@@ -289,7 +366,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     const lan = LAN as string
     const { certPath, keyPath, ca } = certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     let seenPeer: string | undefined
     server.register({
@@ -304,10 +381,31 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     expect(seenPeer).toBe(lan)
   })
 
+  it('keeps this machine on the port the stock carrier would bind, and gives the network its own', async () => {
+    // Switching the plugin on must not move a desktop tab: the plaintext
+    // listener stays on the configured port, bound to loopback, and devices
+    // reach TLS on a port of their own.
+    const lan = LAN as string
+    const { certPath, keyPath, ca } = certificateFiles()
+    const [local, network] = await twoFreePorts()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '0.0.0.0', port: local, networkPort: network, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => { res.writeHead(200); res.end('REACHED') } })
+    expect([server.port, server.networkPort]).toEqual([local, network])
+    expect(await plainGet('127.0.0.1', local, '/api/session/list')).toBe(200)
+    expect((await get(lan, network, '/api/session/list', { cookie: SESSION }, ca)).status).toBe(200)
+    // The dsh web line calls lan:<port> its LAN address. Nothing may answer
+    // there: a phone opening it would send the launch token in the clear.
+    await expect(plainGet(lan, local, '/')).rejects.toThrow(/ECONNREFUSED/)
+  })
+
   it('reports a loopback port that answers plain http, and a network port that answers TLS', async () => {
     const { certPath, keyPath } = certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     // Distinct listeners: `port` is the inherited plaintext server, which every
     // consumer of that member builds `http://127.0.0.1:${port}` from, and
@@ -327,7 +425,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     const lan = LAN as string
     const { certPath, keyPath, ca } = certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     const negotiated = await new Promise<string | false>((resolve, reject) => {
       const socket = tlsConnect({ host: lan, port: server.networkPort, ca }, () => {
@@ -338,6 +436,107 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
       socket.on('error', reject)
     })
     expect(negotiated).toMatch(/^TLSv1/)
+  })
+})
+
+// Upstream's session cookie is not `Secure`, and a browser scopes cookies by
+// host, not scheme or port, so without the mark it would ride any later
+// http:// request a paired phone made to this machine's address.
+describe('cookies set through the TLS front', () => {
+  /** Every way node lets a handler set a cookie, keyed by the path that uses it. */
+  const SETTERS: Record<string, (res: ServerResponse) => void> = {
+    '/set-header': (res) => { res.setHeader('Set-Cookie', 'a=1; HttpOnly'); res.writeHead(200) },
+    '/set-header-list': (res) => { res.setHeader('set-cookie', ['a=1', 'b=2; secure']); res.writeHead(200) },
+    // Appending to a header that already exists: node hands a first append to
+    // setHeader, but pushes onto an existing one directly.
+    '/append-header': (res) => { res.setHeader('Set-Cookie', 'a=1'); res.appendHeader('set-cookie', 'b=2'); res.writeHead(200) },
+    // Upstream's exchange: the object form, on a 303.
+    '/write-head': (res) => { res.writeHead(303, { location: './', 'set-cookie': 'a=1; HttpOnly; SameSite=Strict' }) },
+    '/write-head-message': (res) => { res.writeHead(200, 'OK', { 'Set-Cookie': ['a=1'] }) },
+    // Node's flat raw form: name, value, name, value.
+    '/write-head-raw': (res) => { res.writeHead(200, ['Content-Type', 'text/plain', 'Set-Cookie', 'a=1']) },
+    // Headers set before writeHead send node down its merging path, which
+    // calls setHeader itself — the mark must not land twice.
+    '/write-head-merged': (res) => { res.setHeader('x-early', '1'); res.writeHead(200, { 'set-cookie': 'a=1' }) },
+  }
+
+  /** What each path answers with, marked Secure, except what already was. */
+  const MARKED: Record<string, string[]> = {
+    '/set-header': ['a=1; HttpOnly; Secure'],
+    '/set-header-list': ['a=1; Secure', 'b=2; secure'],
+    '/append-header': ['a=1; Secure', 'b=2; Secure'],
+    '/write-head': ['a=1; HttpOnly; SameSite=Strict; Secure'],
+    '/write-head-message': ['a=1; Secure'],
+    '/write-head-raw': ['a=1; Secure'],
+    '/write-head-merged': ['a=1; Secure'],
+  }
+
+  /** Every Set-Cookie line one GET received. */
+  function cookiesFrom(url: string, ca?: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      const request = url.startsWith('https:') ? httpsRequest : httpRequest
+      const rq = request(url, { method: 'GET', ...ca !== undefined && { ca } }, (res) => {
+        res.resume(); res.on('end', () => { resolve(res.headers['set-cookie'] ?? []) })
+      })
+      rq.on('error', reject); rq.end()
+    })
+  }
+
+  /** A TLS carrier with every setter on a named route and one on the fallback seat. */
+  async function cookieCarrier(): Promise<{ server: GatedWebServer; ca: string }> {
+    const { certPath, keyPath, ca } = certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    for (const [path, setter] of Object.entries(SETTERS)) {
+      server.register({ kind: 'exact', path, handler: (_q, res) => { setter(res); res.end() } })
+    }
+    // Where the exchange actually happens: dsh-host-frontend-static's seat.
+    server.registerFallback((_q, res) => { SETTERS['/write-head']?.(res); res.end() })
+    return { server, ca }
+  }
+
+  it('marks every cookie Secure, however the handler set it, on every seat', async () => {
+    const { server, ca } = await cookieCarrier()
+    for (const [path, expected] of Object.entries(MARKED)) {
+      expect([path, await cookiesFrom(`https://127.0.0.1:${String(server.networkPort)}${path}`, ca)]).toEqual([path, expected])
+    }
+    expect(await cookiesFrom(`https://127.0.0.1:${String(server.networkPort)}/?token=launch-token`, ca))
+      .toEqual(MARKED['/write-head'])
+  })
+
+  it('leaves this machine\'s plaintext listener alone, where a browser would drop a Secure cookie', async () => {
+    const { server } = await cookieCarrier()
+    expect(await cookiesFrom(`http://127.0.0.1:${String(server.port)}/write-head`)).toEqual(['a=1; HttpOnly; SameSite=Strict'])
+    expect(await cookiesFrom(`http://127.0.0.1:${String(server.port)}/?token=launch-token`)).toEqual(['a=1; HttpOnly; SameSite=Strict'])
+  })
+})
+
+describe('the certificate fingerprint', () => {
+  it('is the one a device is shown for the certificate the TLS front presents', async () => {
+    const { certPath, keyPath, ca } = certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const presented = await new Promise<string>((resolve, reject) => {
+      const socket = tlsConnect({ host: '127.0.0.1', port: server.networkPort, ca }, () => {
+        const { fingerprint256 } = socket.getPeerCertificate()
+        socket.destroy()
+        resolve(fingerprint256)
+      })
+      socket.on('error', reject)
+    })
+    expect(server.certificateFingerprint).toBe(presented)
+    expect(presented).toBe(new X509Certificate(ca).fingerprint256)
+    // Gone with the listener, like the scheme and the network port.
+    await ctx.fiber.dispose(); ctx = undefined
+    expect([server.scheme, server.certificateFingerprint]).toEqual(['http', undefined])
+  })
+
+  it('is absent while no TLS front listens', async () => {
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0 }).await()
+    expect((ctx.get('webServer') as GatedWebServer).certificateFingerprint).toBeUndefined()
   })
 })
 
@@ -374,8 +573,11 @@ describe('the fallback seat', () => {
 
   it('never lets a source map ride the public exemption, however it is spelled', async () => {
     const handler = await gatedFallback()
-    // The literal, then the escape dsh-host-frontend-static decodes back to it.
-    for (const path of ['/assets/index.js.map', '/assets/index.js.ma%70', '/assets/index.js%2Emap']) {
+    // The literal, then the escape dsh-host-frontend-static decodes back to it,
+    // then the casing a case-insensitive filesystem resolves to the same file.
+    for (const path of [
+      '/assets/index.js.map', '/assets/index.js.ma%70', '/assets/index.js%2Emap', '/assets/index.js.MAP', '/assets/index.js.Ma%50',
+    ]) {
       const anonymous = response()
       await handler(req(path, '192.168.1.5'), anonymous)
       expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])

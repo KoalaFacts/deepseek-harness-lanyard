@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Command } from 'commander'
 import { resolveStartupValues, webCommand, type WebStartupValues } from '../src/startup.ts'
+import { DEFAULT_NETWORK_PORT } from '../src/webserver.ts'
 
 /**
  * Parse one invocation the way `parseCmdline` does, without a launcher.
@@ -60,14 +61,28 @@ describe('the lanyard web command line', () => {
     expect(String(parse(['--port', '80a']))).toMatch(/--port must be a number/)
   })
 
+  it('carries --network-port through, and refuses a non-numeric one', () => {
+    // The port devices on the network reach over TLS; `--port` stays this
+    // machine's plaintext listener, exactly as the stock provider means it.
+    expect(parse(['--host', '0.0.0.0', '--port', '3080', '--network-port', '8443'])).toEqual({
+      host: '0.0.0.0', port: 3080, networkPort: 8443, trustedHosts: [], openBrowser: true,
+    })
+    expect(parse([])).not.toHaveProperty('networkPort')
+    expect(String(parse(['--network-port', '84a']))).toMatch(/--network-port must be a number/)
+  })
+
   it('carries --keep-awake through, and omits it when absent', () => {
     expect(parse(['--keep-awake'])).toEqual({ trustedHosts: [], openBrowser: true, keepAwake: true })
     expect(parse([])).not.toHaveProperty('keepAwake')
   })
 
-  it('documents the network bind and --keep-awake in its help text', () => {
-    const help = webCommand().helpInformation()
+  it('documents the network bind, its port, and --keep-awake in its help text', () => {
+    // Commander wraps at the terminal width, so a phrase may span lines.
+    const help = webCommand().helpInformation().replace(/\s+/g, ' ')
     expect(help).toContain('--keep-awake')
-    expect(help).toContain('0.0.0.0 serves your network over TLS')
+    expect(help).toContain('--network-port')
+    expect(help).toContain('0.0.0.0 also serves your network over TLS')
+    // The default the help names is the one the carrier applies.
+    expect(help).toContain(`(default ${String(DEFAULT_NETWORK_PORT)})`)
   })
 })

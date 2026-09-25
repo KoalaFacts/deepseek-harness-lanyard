@@ -64,7 +64,8 @@ function publishedFields(): Set<string> {
   let keys: string[] = []
   program.action(() => { keys = Object.keys(resolveStartupValues(program)) })
   program.parse([
-    '--host', '0.0.0.0', '--port', '3080', '--no-open', '--keep-awake', '--trusted-host', 'app.internal',
+    '--host', '0.0.0.0', '--port', '3080', '--network-port', '3443', '--no-open', '--keep-awake',
+    '--trusted-host', 'app.internal',
   ], { from: 'user' })
   return new Set(keys)
 }

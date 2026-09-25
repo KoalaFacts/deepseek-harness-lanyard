@@ -4,8 +4,8 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import {
-  fitsTerminal, isLaunchLinkIssuer, pairingLink, renderPairingQr, renderedWidth, shouldDrawQr, terminalColumns,
-  type Config as PairingConfig, type LaunchLinkIssuer, wantsColour,
+  fitsTerminal, isLaunchLinkIssuer, pairingLink, rankLanAddresses, renderPairingQr, renderedWidth, shouldDrawQr,
+  terminalColumns, type Config as PairingConfig, type LaunchLinkIssuer, wantsColour,
 } from '../src/pairing.ts'
 import * as Pairing from '../src/pairing.ts'
 
@@ -32,6 +32,54 @@ describe('pairingLink', () => {
 
   it('has no link on a loopback bind with no LAN address to advertise', () => {
     expect(pairingLink(issuer, 'http', 3080, undefined)).toBeUndefined()
+  })
+})
+
+describe('rankLanAddresses', () => {
+  /** A machine's interfaces as node reports them, from name → IPv4 literal. */
+  function interfaces(table: Record<string, string>): Parameters<typeof rankLanAddresses>[1] {
+    return Object.fromEntries(Object.entries(table).map(([name, address]) => [name, [{
+      address, family: 'IPv4', internal: false, netmask: '255.255.255.0', mac: '00:00:00:00:00:00', cidr: `${address}/24`,
+    }]])) as Parameters<typeof rankLanAddresses>[1]
+  }
+
+  // Each rule is checked where the others point the other way, so a ranking
+  // that ignored it could not pass on the strength of the rest.
+
+  it('puts the network the machine is on ahead of a container bridge, whatever their ranges', () => {
+    // Upstream lists interfaces in the order the OS reports them, and a bridge
+    // routinely comes first — minikube's even sits in 192.168: the code would
+    // name an address no phone reaches.
+    const machine = interfaces({ 'br-5f2': '192.168.49.1', 'en0': '10.1.2.3' })
+    expect(rankLanAddresses(['192.168.49.1', '10.1.2.3'], machine)).toEqual({
+      ranked: ['10.1.2.3', '192.168.49.1'], offered: ['10.1.2.3'],
+    })
+  })
+
+  it('offers an overlay after the physical network, even in a likelier range', () => {
+    // WireGuard subnets are routinely 192.168.x; ranked on range alone, the
+    // tunnel would win over the network the machine is physically on.
+    const machine = interfaces({ wg0: '192.168.100.2', eth0: '10.0.0.5' })
+    expect(rankLanAddresses(['192.168.100.2', '10.0.0.5'], machine)).toEqual({
+      ranked: ['10.0.0.5', '192.168.100.2'], offered: ['10.0.0.5', '192.168.100.2'],
+    })
+  })
+
+  it('ranks an overlay a phone can join ahead of a bridge it never can', () => {
+    const machine = interfaces({ docker0: '172.17.0.1', tailscale0: '100.101.102.103' })
+    expect(rankLanAddresses(['172.17.0.1', '100.101.102.103'], machine)).toEqual({
+      ranked: ['100.101.102.103', '172.17.0.1'], offered: ['100.101.102.103'],
+    })
+  })
+
+  it('prefers home-network ranges among physical interfaces, then keeps interface order', () => {
+    const machine = interfaces({ eth1: '203.0.113.9', eth0: '10.0.0.5', wlan0: '192.168.1.5', eth2: '10.0.0.6' })
+    expect(rankLanAddresses(['203.0.113.9', '10.0.0.5', '192.168.1.5', '10.0.0.6'], machine).ranked)
+      .toEqual(['192.168.1.5', '10.0.0.5', '10.0.0.6', '203.0.113.9'])
+  })
+
+  it('treats an address it cannot place as the machine\'s own network, and link-local as a last resort', () => {
+    expect(rankLanAddresses(['169.254.3.4', '203.0.113.9'], interfaces({})).ranked).toEqual(['203.0.113.9', '169.254.3.4'])
   })
 })
 
@@ -173,15 +221,17 @@ describe('the pairing row', () => {
    */
   async function mount(
     config: Partial<PairingConfig>,
-    { lanAddresses = ['192.168.1.5'], connection = issuer as unknown, server }: {
+    { lanAddresses = ['192.168.1.5'], connection = issuer as unknown, server, onError }: {
       lanAddresses?: string[]
       connection?: unknown
-      server?: { scheme: 'https'; port: number; networkPort: number }
+      server?: { scheme: 'https'; port: number; networkPort: number; certificateFingerprint?: string }
+      onError?: (line: string) => void
     } = {},
   ): Promise<string[]> {
     const printed: string[] = []
     vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
     ctx = new Context()
+    if (onError !== undefined) vi.spyOn(ctx.logger, 'error').mockImplementation(((line: unknown) => { onError(String(line)) }) as never)
     ctx.provide('webRuntime', { lanAddresses, trustedHosts: lanAddresses })
     ctx.provide('connection', connection)
     if (server === undefined) await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }).await()
@@ -191,19 +241,34 @@ describe('the pairing row', () => {
     return printed
   }
 
-  it('announces upstream\'s pairing link once the tree has settled', async () => {
-    const printed = await mount({})
-    const port = (ctx?.get('webServer') as WebServer).port
-    expect(printed).toEqual([`lanyard: pair a device by opening http://192.168.1.5:${String(port)}/?token=${LAUNCH_TOKEN} once`])
+  it('never prints a pairing link a plaintext carrier would answer', async () => {
+    // A LAN address beside a carrier with no TLS means lanyard's carrier is
+    // not the one serving: the link would carry the launch token in the clear.
+    const errors: string[] = []
+    const printed = await mount({}, { onError: (line) => { errors.push(line) } })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/without lanyard's TLS carrier.*in the clear/)])
   })
 
-  it('names the TLS port a device reaches, never the loopback one, and says why the shipped line is wrong', async () => {
-    // Under TLS `port` is the inherited plaintext listener, bound to loopback;
-    // a link naming it sends the phone to a port nothing on the network answers.
-    const printed = await mount({}, { server: { scheme: 'https', port: 41235, networkPort: 3080 } })
+  it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
+    // `port` is this machine's plaintext listener, bound to loopback; a link
+    // naming it sends the phone to a port nothing on the network answers.
+    const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' } })
     expect(printed).toEqual([
-      'lanyard: serving your network over TLS on port 3080 — the LAN address on the dsh web line is not reachable from other devices',
-      `lanyard: pair a device by opening https://192.168.1.5:3080/?token=${LAUNCH_TOKEN} once`,
+      'lanyard: serving your network over TLS on port 3443 — the LAN address on the dsh web line is not reachable from other devices',
+      `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
+      'lanyard: the phone should show certificate SHA-256 AB:CD:EF — if it ever shows another, do not continue',
+    ])
+  })
+
+  it('pairs over the likeliest address, and offers a link for each other one a phone could share', async () => {
+    const printed = await mount({}, {
+      lanAddresses: ['10.8.0.2', '192.168.1.5'],
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' },
+    })
+    expect(printed.slice(1, 3)).toEqual([
+      `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
+      `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
     ])
   })
 

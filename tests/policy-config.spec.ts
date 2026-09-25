@@ -90,7 +90,7 @@ describe('the api prefix is configuration, not a constant', () => {
 describe('endpoint authority is per deployment, and denies by default', () => {
   it('reaches a namespace this deployment classified as pairable', () => {
     const authority = {
-      privilegedMethods: DEFAULT_ENDPOINT_AUTHORITY.privilegedMethods,
+      ...DEFAULT_ENDPOINT_AUTHORITY,
       pairedNamespaces: new Set([...DEFAULT_PAIRED_NAMESPACES, 'myPlugin']),
     }
     expect(isPrivilegedEndpoint('myPlugin/read', authority)).toBe(false)
@@ -108,6 +108,20 @@ describe('endpoint authority is per deployment, and denies by default', () => {
     const handler = await gatedHandler({ pairedNamespaces: ['commands'] }, { path: '/api' })
     expect(await pairedStatus(handler, '/api/commands/execute')).toBe(200)
     expect(await pairedStatus(handler, '/api/goals/create')).toBe(403)
+  })
+
+  it('decides exact routes by name, reaching the previews and pinning the desktop openers', async () => {
+    const handler = await gatedHandler({}, { path: '/api' })
+    expect(await pairedStatus(handler, '/api/file')).toBe(200)
+    expect(await pairedStatus(handler, '/api/present.open')).toBe(403)
+  })
+
+  it('takes a deployment\'s own list of exact routes in place of the shipped one', async () => {
+    // What it names is reachable; everything it left out, the shipped entries
+    // included, is pinned.
+    const handler = await gatedHandler({ pairedRoutes: ['present.open'] }, { path: '/api' })
+    expect(await pairedStatus(handler, '/api/present.open')).toBe(200)
+    expect(await pairedStatus(handler, '/api/file')).toBe(403)
   })
 })
 

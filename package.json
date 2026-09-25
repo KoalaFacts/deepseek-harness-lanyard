@@ -1,7 +1,8 @@
 {
   "name": "@koalafacts/deepseek-harness-lanyard",
   "version": "0.1.0",
-  "description": "Use the DeepSeek Harness web GUI from your phone: pair a device once, then reach dsh over your own network",
+  "description": "Use dsh from your phone on your own network: scan a code once, over TLS, with settings kept at the machine",
+  "icon": "./icon.svg",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -22,6 +23,7 @@
     "url": "git+https://github.com/KoalaFacts/deepseek-harness-lanyard.git"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
@@ -57,13 +59,21 @@
       "types": "./lib/types/keep-awake.d.ts",
       "default": "./lib/keep-awake.js"
     },
+    "./startup/locale/*.json": "./locale/startup/*.json",
+    "./tls/locale/*.json": "./locale/tls/*.json",
+    "./webserver/locale/*.json": "./locale/webserver/*.json",
+    "./keep-awake/locale/*.json": "./locale/keep-awake/*.json",
+    "./pairing/locale/*.json": "./locale/pairing/*.json",
+    "./locale/*.json": "./locale/*.json",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/**/*.js",
     "lib/types/**/*.d.ts",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/**/*.json"
   ],
   "scripts": {
     "prepare": "tsc -p tsconfig.build.json --noCheck",
@@ -76,10 +86,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1 <5",
-    "@deepseek-ai/dsh-client-connection": ">=0.1.2-rc.1 <0.2.0",
-    "@deepseek-ai/dsh-cmdline": ">=0.1.2-rc.1 <0.2.0",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.2-rc.1 <0.2.0",
-    "@deepseek-ai/dsh-subprocess": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-connection": ">=0.1.5-rc.3 <0.2.0-0",
+    "@deepseek-ai/dsh-cmdline": ">=0.1.5-rc.3 <0.2.0-0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.5-rc.3 <0.2.0-0",
+    "@deepseek-ai/dsh-subprocess": ">=0.1.5-rc.3 <0.2.0-0",
     "@deepseek-ai/schemastery": ">=3.18.1 <4"
   },
   "peerDependenciesMeta": {
@@ -116,13 +126,16 @@
     "@deepseek-ai/dsh-web-app": "0.1.5-rc.3",
     "@deepseek-ai/schemastery": "^3.18.2",
     "@types/node": "^22.19.0",
+    "@types/semver": "^7.8.0",
     "jsqr": "^1.4.0",
     "playwright": "^1.62.1",
+    "semver": "^7.8.5",
     "typescript": "~5.9.3",
     "vitest": "^4.1.8",
     "yaml": "^2.9.0"
   },
   "engines": {
+    "dsh": ">=0.1.5-rc.3 <0.2.0-0",
     "node": "^22.19 || >=24"
   }
 }

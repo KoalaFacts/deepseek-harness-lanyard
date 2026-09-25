@@ -11,6 +11,12 @@
  * gated carrier supplies both and refuses an all-interfaces bind without TLS
  * material, so this provider lifts the refusal and the carrier holds the line.
  *
+ * Serving the network stays an explicit choice per invocation: without
+ * `--host 0.0.0.0` the composition binds this machine only, exactly as the
+ * stock provider does. This provider only publishes what an invocation names;
+ * the bundle patch carries the defaults beside each consuming row, as
+ * upstream's own rows do.
+ *
  * It parses the same flag family as the stock provider so nothing else in the
  * composition changes: rows keep injecting `webStartup` and reading it from
  * lazy config. That contract is total — a shipped row reading a field this
@@ -39,6 +45,8 @@ export interface WebStartupValues {
   host?: string
   /** `--port`, absent when the invocation did not name one. */
   port?: number
+  /** `--network-port`, absent when the invocation did not name one. */
+  networkPort?: number
   /** Explicit `--trusted-host` authorities, in argument order. */
   trustedHosts: string[]
   /** `--no-open` inverted: whether to open the Web UI in the default browser. */
@@ -53,6 +61,7 @@ interface WebOptions {
   /** Commander's `--no-open` counterpart: true unless the flag was passed. */
   open?: boolean
   port?: string
+  networkPort?: string
   trustedHost?: string[]
   keepAwake?: boolean
 }
@@ -64,19 +73,21 @@ interface WebOptions {
 export function webCommand(): Command {
   return new Command()
     .name('dsh --profile web')
-    .description('Serve the DeepSeek Harness browser UI (lanyard: your own network, over TLS).')
+    .description('Serve the DeepSeek Harness browser UI (lanyard: and, with --host 0.0.0.0, your phone over your own network).')
     .helpOption('-h, --help', 'show this help')
-    .option('--host <host>', 'bind host; 0.0.0.0 serves your network over TLS and prints a link to pair a device')
+    .option('--host <host>', 'bind host; 0.0.0.0 also serves your network over TLS and prints a code to pair a phone')
     .option('--no-open', 'do not open the Web UI in the default browser')
-    .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
+    .option('--port <port>', 'listen port on this machine; pass 0 to let the OS pick a free one')
+    .option('--network-port <port>', 'port devices on your network reach over TLS (default 3443)')
     .option('--trusted-host <authority...>', 'extra authority the /api browser-trust fence accepts (host or host:port; repeatable)')
     .option('--keep-awake', 'hold the platform sleep inhibitor while dsh serves, so idle sleep cannot cut off sessions or paired devices')
     .addHelpText('after', `
 Examples:
-  dsh --profile web                          serve on the composed host and port
+  dsh --profile web                          serve this machine only, on the composed port
+  dsh --profile web --host 0.0.0.0           also serve your network over TLS; scan the printed code with a phone
+  dsh --profile web --host 0.0.0.0 --network-port 8443
+                                             serve your network on another port
   dsh --profile web --no-open                serve without opening a browser
-  dsh --profile web --port 8080              serve on another port
-  dsh --profile web --host 0.0.0.0           serve your network over TLS; scan the printed code to pair a phone
 `)
 }
 
@@ -92,8 +103,10 @@ export function resolveStartupValues(program: Command): WebStartupValues {
   // refused unless TLS material came with it. Keeping the condition beside the
   // listener, not the flag, means a composition that configures the carrier
   // directly meets the same refusal.
-  if (options.port !== undefined && !/^\d+$/.test(options.port)) {
-    program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
+  for (const [flag, value] of [['--port', options.port], ['--network-port', options.networkPort]] as const) {
+    if (value !== undefined && !/^\d+$/.test(value)) {
+      program.error(`error: ${flag} must be a number, got ${JSON.stringify(value)}`)
+    }
   }
   return {
     // Always published, like the shipped provider: the consuming row's schema
@@ -101,6 +114,7 @@ export function resolveStartupValues(program: Command): WebStartupValues {
     openBrowser: options.open ?? true,
     ...options.host !== undefined && { host: options.host },
     ...options.port !== undefined && { port: Number(options.port) },
+    ...options.networkPort !== undefined && { networkPort: Number(options.networkPort) },
     trustedHosts: options.trustedHost ?? [],
     ...options.keepAwake === true && { keepAwake: true },
   }

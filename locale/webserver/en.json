@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Network gate",
+    "description": "Serves devices on your network over TLS, only with dsh's own sign-in, and keeps settings at the machine"
+  }
+}

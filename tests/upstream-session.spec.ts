@@ -77,7 +77,7 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     const { certPath, keyPath, ca } = certificateFiles()
     ctx = new Context()
     ctx.provide('credentials', memoryCredentials())
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath }).await()
+    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     // Exactly the trust dsh-web-app derives from an all-interfaces bind.
     await ctx.plugin(ClientConnection, { trustedHosts: [lan] }).await()
     const connection = ctx.get('connection') as HostConnectionHandle
@@ -158,6 +158,17 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     const listed = await call(lan, 'POST', '/api/session/list', { ...rpc, cookie }, envelope('session/list'))
     expect(listed.status).toBe(200)
     expect(JSON.parse(listed.body)).toMatchObject({ type: 'server-response', result: { ok: true, value: 'session/list' } })
+  })
+
+  it('marks the session cookie Secure, which upstream leaves to the carrier', async () => {
+    // Upstream mints `HttpOnly; SameSite=Strict` only. A browser scopes cookies
+    // by host rather than scheme or port, so an unmarked one would ride any
+    // later http:// request the phone made to this machine's address.
+    const { connection, call, port } = await compose()
+    const lan = LAN as string
+    const { answer } = await pair(call, lan, pairingLink(connection, 'https', port, lan) as string)
+    expect(answer.status).toBe(303)
+    expect(answer.headers['set-cookie']?.[0]).toMatch(/;\s*Secure\s*(;|$)/i)
   })
 
   it('keeps the configuration plane at the machine, even for a device holding a session', async () => {

@@ -26,6 +26,12 @@
  *   credentials, plugin installation and anything acting on the host's desktop
  *   stay pinned to a loopback peer.
  *
+ * Two listeners, so enabling this plugin changes nothing on the machine itself:
+ * the inherited plaintext server keeps `127.0.0.1:<port>` exactly as the stock
+ * carrier would, and devices on the network reach a TLS front on its own
+ * `networkPort`. A desktop tab, its session cookie and the URL `dsh web`
+ * prints all stay valid when the bundle is switched on live.
+ *
  * TLS is terminated here and the decrypted socket is handed to the inherited
  * HTTP server, which preserves `req.socket.remoteAddress` as the real client
  * address. That is the property the loopback exemption depends on: a
@@ -36,9 +42,10 @@
 
 import { createServer as createTlsServer } from 'node:tls'
 import { readFile } from 'node:fs/promises'
-import type { IncomingMessage, Server } from 'node:http'
+import { X509Certificate } from 'node:crypto'
+import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { Server as TlsServer } from 'node:tls'
+import type { Server as TlsServer, TLSSocket } from 'node:tls'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
@@ -115,6 +122,24 @@ export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
 ]
 
 /**
+ * Exact `/api/<name>` routes, with no namespace, that a paired device may
+ * reach. Upstream registers these beside the Gateway with
+ * `connection.fetch.register`, so no namespace rule covers them, and like a
+ * namespace an unlisted one is loopback-only — which pins `present.open` and
+ * `changes.open`, the deliverables' twins of `session/openWorkspacePath`.
+ *
+ * - `remote.mux` is the WebSocket every stream rides.
+ * - `file` serves chat images and document previews. It reads whatever this
+ *   user can read — as a paired device already can through the agent or the
+ *   terminal — so pinning it would cost the phone its previews and buy nothing.
+ * - `session.export`, `present.host`, `changes.summary` and `changes.diff` are
+ *   reads the session views make.
+ */
+export const DEFAULT_PAIRED_ROUTES: readonly string[] = [
+  'remote.mux', 'file', 'session.export', 'present.host', 'changes.summary', 'changes.diff',
+]
+
+/**
  * Body of a refusal this gate issued.
  *
  * Deliberately not the bare `forbidden` / `unauthorized` that
@@ -175,18 +200,29 @@ export type Admission = 'public' | 'gated' | 'loopback-only'
  */
 export const DEFAULT_FALLBACK_ADMISSION: Admission = 'public'
 
+/**
+ * Port devices on the network reach over TLS, when a deployment names none.
+ * Deliberately not the carrier's own port: that one stays the loopback
+ * listener every local URL is built from, so switching this plugin on never
+ * moves a desktop tab.
+ */
+export const DEFAULT_NETWORK_PORT = 3443
+
 /** How an `/api` endpoint's reachability is decided, as one deployment classified it. */
 export interface EndpointAuthority {
   /** Endpoints pinned to a loopback peer even inside a paired namespace. */
   privilegedMethods: ReadonlySet<string>
   /** Gateway namespaces a paired device may reach; anything else is pinned. */
   pairedNamespaces: ReadonlySet<string>
+  /** Namespace-less `/api/<name>` routes a paired device may reach; anything else is pinned. */
+  pairedRoutes: ReadonlySet<string>
 }
 
 /** The shipped classification, used when a caller names none. */
 export const DEFAULT_ENDPOINT_AUTHORITY: EndpointAuthority = {
   privilegedMethods: new Set(DEFAULT_PRIVILEGED_METHODS),
   pairedNamespaces: new Set(DEFAULT_PAIRED_NAMESPACES),
+  pairedRoutes: new Set(DEFAULT_PAIRED_ROUTES),
 }
 
 /**
@@ -197,6 +233,11 @@ export const DEFAULT_ENDPOINT_AUTHORITY: EndpointAuthority = {
  * that field is validated and defaulted exactly as the stock row would.
  */
 export interface Config extends WebServerConfig {
+  /**
+   * Port the TLS front listens on for devices on the network; `port` stays the
+   * loopback listener. Zero requests an OS-assigned port.
+   */
+  networkPort?: number
   /** PEM certificate path; set with {@link tlsKeyPath} to serve HTTPS. */
   tlsCertPath?: string
   /** PEM private-key path — a path, never inline material, so config surfaces cannot carry the key. */
@@ -219,11 +260,14 @@ export interface Config extends WebServerConfig {
   privilegedMethods?: string[]
   /** Gateway namespaces a paired device may reach; anything else is pinned. */
   pairedNamespaces?: string[]
+  /** Namespace-less `/api/<name>` routes a paired device may reach; anything else is pinned. */
+  pairedRoutes?: string[]
 }
 
 export const Config: z<Config> = z.intersect([
   WebServer.Config,
   z.object({
+    networkPort: z.natural().max(65535).default(DEFAULT_NETWORK_PORT),
     tlsCertPath: z.string(),
     tlsKeyPath: z.string(),
     publicPaths: z.array(String).default([...DEFAULT_PUBLIC_PATHS]),
@@ -234,6 +278,7 @@ export const Config: z<Config> = z.intersect([
     apiPathPrefix: z.string().default(DEFAULT_API_PATH_PREFIX),
     privilegedMethods: z.array(String).default([...DEFAULT_PRIVILEGED_METHODS]),
     pairedNamespaces: z.array(String).default([...DEFAULT_PAIRED_NAMESPACES]),
+    pairedRoutes: z.array(String).default([...DEFAULT_PAIRED_ROUTES]),
   }),
 ])
 
@@ -241,9 +286,9 @@ export const Config: z<Config> = z.intersect([
  * Whether an `/api` endpoint stays pinned to a loopback peer. An endpoint named
  * in the privileged set is pinned outright; otherwise the Gateway's
  * `namespace/method` form is decided by namespace, so a method added to an
- * unlisted namespace inherits the pin rather than defaulting to reachable. An
- * endpoint with no namespace is not a Gateway method — upstream's
- * `/api/remote.mux` WebSocket is one — and is reachable unless named.
+ * unlisted namespace inherits the pin rather than defaulting to reachable, and
+ * a namespace-less route — upstream's exact Fetch routes and `remote.mux` — is
+ * decided by name, on the same deny-by-default terms.
  * @param endpoint - endpoint identity, either `name` or `namespace/method`.
  * @param authority - this deployment's classification; defaults to the shipped one.
  * @returns true when only a loopback peer may reach it.
@@ -253,7 +298,60 @@ export function isPrivilegedEndpoint(
 ): boolean {
   if (authority.privilegedMethods.has(endpoint)) return true
   const separator = endpoint.indexOf('/')
-  return separator !== -1 && !authority.pairedNamespaces.has(endpoint.slice(0, separator))
+  if (separator === -1) return !authority.pairedRoutes.has(endpoint)
+  return !authority.pairedNamespaces.has(endpoint.slice(0, separator))
+}
+
+/** Whether a response header name is `Set-Cookie`, however it is cased. */
+function isSetCookie(name: string): boolean {
+  return name.toLowerCase() === 'set-cookie'
+}
+
+/** A header value as node's response setters accept it. */
+type HeaderValue = string | number | readonly string[]
+
+/** One cookie string, or each of several, marked `Secure` unless already so. */
+function secured<T extends HeaderValue | undefined>(value: T): T {
+  const mark = (cookie: string): string => /;\s*secure\s*(;|$)/i.test(cookie) ? cookie : `${cookie}; Secure`
+  if (typeof value === 'string') return mark(value) as T
+  if (Array.isArray(value)) return (value as readonly string[]).map(cookie => mark(String(cookie))) as unknown as T
+  return value
+}
+
+/**
+ * Mark every cookie a response sets over this carrier's TLS front `Secure`.
+ *
+ * Upstream's session cookie is `HttpOnly; SameSite=Strict` but not `Secure`,
+ * and a browser scopes cookies by host, not by port or scheme: a phone that
+ * later opened any `http://` address on this machine's IP — typed without the
+ * scheme, another service on the host, another device handed the same address
+ * — would send it in the clear, and one sniffed cookie is a month-long session.
+ * Marked here, it only ever travels inside TLS. A plaintext response, from the
+ * loopback listener, is left alone: a browser drops a `Secure` cookie set over
+ * http, which would sign the local tab out.
+ * @param res - the response about to be handed to the route's owner.
+ */
+function secureCookiesOf(res: ServerResponse): void {
+  const setHeader = res.setHeader.bind(res)
+  res.setHeader = (name, value) => setHeader(name, isSetCookie(name) ? secured(value) : value)
+  const appendHeader = res.appendHeader.bind(res)
+  res.appendHeader = (name, value) => appendHeader(name, isSetCookie(name) ? secured(value) : value)
+  const writeHead = res.writeHead.bind(res) as (status: number, ...rest: unknown[]) => ServerResponse
+  res.writeHead = ((status: number, ...rest: unknown[]) => writeHead(status, ...rest.map((argument) => {
+    if (Array.isArray(argument)) {
+      // Node's flat raw form: name, value, name, value…
+      return argument.map((entry, index) =>
+        index % 2 === 1 && isSetCookie(String(argument[index - 1])) ? secured(entry as HeaderValue) : entry)
+    }
+    if (typeof argument !== 'object' || argument === null) return argument
+    return Object.fromEntries(Object.entries(argument as OutgoingHttpHeaders)
+      .map(([name, value]) => [name, isSetCookie(name) ? secured(value) : value]))
+  }))) as ServerResponse['writeHead']
+}
+
+/** Whether a request arrived through this carrier's TLS front. */
+function overTls(req: IncomingMessage): boolean {
+  return (req.socket as Partial<TLSSocket>).encrypted === true
 }
 
 /**
@@ -361,17 +459,20 @@ export class GatedWebServer extends WebServer {
   private readonly authority: EndpointAuthority
   /** Route paths some row actually claimed, for the drift warning below. */
   private readonly claimedPaths = new Set<string>()
+  private readonly networkPortConfigured: number
   private tls: TlsServer | undefined
   private tlsPort: number | undefined
+  private fingerprint: string | undefined
 
   constructor(ctx: Context, config: Config) {
     assertRegistrarsWrapped()
-    // With TLS the inherited server must not own the public port: this class
-    // binds it and forwards decrypted sockets, so the parent gets an ephemeral
-    // loopback socket whose only role is to route what TLS hands it. Every
-    // other inherited field — compression among them — passes through.
+    // The inherited server is always the loopback listener on the configured
+    // port — the one every local URL names — and never sees the network: under
+    // TLS this class binds the network port itself and forwards decrypted
+    // sockets to it. Every other inherited field, compression among them,
+    // passes through.
+    super(ctx, { ...config, host: '127.0.0.1' })
     const servesTls = config.tlsCertPath !== undefined && config.tlsKeyPath !== undefined
-    super(ctx, servesTls ? { ...config, host: '127.0.0.1', port: 0 } : config)
     if ((config.tlsCertPath === undefined) !== (config.tlsKeyPath === undefined)) {
       throw new Error('lanyard: tlsCertPath and tlsKeyPath must be configured together')
     }
@@ -379,6 +480,16 @@ export class GatedWebServer extends WebServer {
       throw new Error(
         'lanyard: an all-interfaces bind requires TLS material (tlsCertPath and tlsKeyPath), because the launch token '
         + 'and the session cookie that authenticate a device would otherwise cross the network in plaintext',
+      )
+    }
+    this.networkPortConfigured = config.networkPort ?? DEFAULT_NETWORK_PORT
+    // Loopback on one port and every interface on the same one collide on
+    // Linux, and a port shared by plaintext and TLS is neither; zero asks the
+    // OS for two different ports, so only an explicit clash is refused.
+    if (servesTls && config.port !== 0 && config.port === this.networkPortConfigured) {
+      throw new Error(
+        `lanyard: port and networkPort are both ${String(config.port)}; this machine's plaintext listener and the `
+        + 'TLS front devices reach need a port each',
       )
     }
     this.gate = config
@@ -390,6 +501,7 @@ export class GatedWebServer extends WebServer {
     this.authority = {
       privilegedMethods: new Set(config.privilegedMethods ?? DEFAULT_PRIVILEGED_METHODS),
       pairedNamespaces: new Set(config.pairedNamespaces ?? DEFAULT_PAIRED_NAMESPACES),
+      pairedRoutes: new Set(config.pairedRoutes ?? DEFAULT_PAIRED_ROUTES),
     }
   }
 
@@ -430,11 +542,11 @@ export class GatedWebServer extends WebServer {
    * `http://127.0.0.1:${port}` for the browser handoff, the `DSH_WEB_URL` shell
    * variable, and the URL it tells the model it is serving.
    *
-   * Under TLS that is the inherited server, which binds an ephemeral loopback
-   * port in plaintext while this class terminates TLS in front of it. Reporting
-   * the TLS port here instead pointed all three at an https listener over http,
-   * so the handoff opened a browser on a connection error. Nothing is newly
-   * reachable: the inherited listener is loopback-only.
+   * That is always the inherited plaintext server on the configured port,
+   * bound to loopback. Reporting the TLS port here instead pointed all three at
+   * an https listener over http, so the handoff opened a browser on a
+   * connection error; and because the port is the configured one rather than
+   * one the OS picked, a bookmark survives a restart.
    */
   override get port(): number {
     return super.port
@@ -464,6 +576,16 @@ export class GatedWebServer extends WebServer {
     return this.tls === undefined ? 'http' : 'https'
   }
 
+  /**
+   * SHA-256 fingerprint of the certificate the TLS front presents, as a phone
+   * shows it before accepting; undefined while no TLS front listens. The
+   * certificate is self-signed, so this is the one thing a person can compare
+   * to know the warning they are accepting is this machine's.
+   */
+  get certificateFingerprint(): string | undefined {
+    return this.fingerprint
+  }
+
   /** Listen, and add the TLS frontend when material is configured. */
   override async [Service.init](): Promise<void> {
     await super[Service.init]()
@@ -478,16 +600,27 @@ export class GatedWebServer extends WebServer {
     if (tlsCertPath === undefined || tlsKeyPath === undefined) return
     const routed = assertServer((this as unknown as { server: unknown }).server)
     const [cert, key] = await Promise.all([readFile(tlsCertPath), readFile(tlsKeyPath)])
+    const fingerprint = new X509Certificate(cert).fingerprint256
     const tls = createTlsServer({ cert, key })
     // The decrypted TLSSocket keeps the underlying connection's remoteAddress,
     // so admission still reads the real peer rather than this process.
     tls.on('secureConnection', socket => { routed.emit('connection', socket) })
     tls.on('error', error => { this.ctx.logger.warn(error) })
     await new Promise<void>((resolve, reject) => {
-      tls.once('error', reject)
-      tls.listen(this.gate.port, this.gate.host, () => {
-        tls.off('error', reject)
+      const failed = (error: NodeJS.ErrnoException): void => {
+        reject(error.code === 'EADDRINUSE'
+          ? new Error(
+            `lanyard: port ${String(this.networkPortConfigured)} is already in use, so devices on your network cannot `
+            + 'reach this machine on it; pass --network-port to choose another, or --host 127.0.0.1 to serve this machine only',
+            { cause: error },
+          )
+          : error)
+      }
+      tls.once('error', failed)
+      tls.listen(this.networkPortConfigured, this.gate.host, () => {
+        tls.off('error', failed)
         this.tlsPort = (tls.address() as AddressInfo).port
+        this.fingerprint = fingerprint
         this.tls = tls
         resolve()
       })
@@ -496,6 +629,7 @@ export class GatedWebServer extends WebServer {
       await new Promise<void>((resolve) => { tls.close(() => { resolve() }) })
       this.tls = undefined
       this.tlsPort = undefined
+      this.fingerprint = undefined
     }, 'lanyard: TLS listener')
   }
 
@@ -522,8 +656,9 @@ export class GatedWebServer extends WebServer {
     const decoded = decodedPathname(raw)
     // A pathname whose escapes do not decode cannot be checked against the
     // exclusions, so it never rides the public exemption.
+    // Case-insensitive: on a case-insensitive filesystem `.MAP` is the same file.
     const excluded = decoded === undefined
-      || this.publicPathExcludedSuffixes.some(suffix => decoded.endsWith(suffix))
+      || this.publicPathExcludedSuffixes.some(suffix => decoded.toLowerCase().endsWith(suffix.toLowerCase()))
     if (admission === 'public' && !excluded) return true
     // Looked up per request: Connection mounts after this carrier, since it
     // registers its own routes here, and may be replaced while the carrier
@@ -560,6 +695,7 @@ export class GatedWebServer extends WebServer {
           res.end(REFUSAL_BODY)
           return
         }
+        if (overTls(req)) secureCookiesOf(res)
         await inner(req, res)
       },
     })
@@ -606,6 +742,7 @@ export class GatedWebServer extends WebServer {
         res.end(REFUSAL_BODY)
         return
       }
+      if (overTls(req)) secureCookiesOf(res)
       await handler(req, res)
     })
   }

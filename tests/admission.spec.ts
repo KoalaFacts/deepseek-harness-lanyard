@@ -151,8 +151,20 @@ describe('isPrivilegedEndpoint', () => {
     }
   })
 
-  it('reads an endpoint with no namespace as no Gateway method at all', () => {
-    // Upstream's stream WebSocket lives at /api/remote.mux.
-    expect(isPrivilegedEndpoint('remote.mux')).toBe(false)
+  it('leaves the exact routes the session views read reachable', () => {
+    // Upstream registers these beside the Gateway, with no namespace: the
+    // stream WebSocket, chat images and previews, export, and the change views.
+    for (const route of ['remote.mux', 'file', 'session.export', 'present.host', 'changes.summary', 'changes.diff']) {
+      expect([route, isPrivilegedEndpoint(route)]).toEqual([route, false])
+    }
+  })
+
+  it('pins every other exact route, the desktop openers and ones no list names alike', () => {
+    // `present.open` and `changes.open` open a file with this machine's own
+    // applications. An exact route is decided by name on the same terms as a
+    // namespace, so one added upstream is pinned rather than reachable.
+    for (const route of ['present.open', 'changes.open', 'someRouteAddedLater', 'remote.mux2']) {
+      expect([route, isPrivilegedEndpoint(route)]).toEqual([route, true])
+    }
   })
 })

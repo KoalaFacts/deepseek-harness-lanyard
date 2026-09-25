@@ -20,6 +20,7 @@
  * @module
  */
 
+import { networkInterfaces } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import qrcodeTerminal from 'qrcode-terminal'
@@ -54,6 +55,8 @@ interface SchemeAwareServer {
   port: number
   /** The port a remote device reaches; `port` is loopback-only under TLS. */
   networkPort?: number
+  /** SHA-256 fingerprint of the certificate the TLS front presents. */
+  certificateFingerprint?: string
 }
 
 /** Stable Cordis plugin name. */
@@ -105,6 +108,78 @@ export function pairingLink(
 ): string | undefined {
   if (lanAddress === undefined) return undefined
   return issuer.authenticatedUrl(`${scheme}://${lanAddress}:${String(port)}/`)
+}
+
+/**
+ * Interfaces a phone can never share: container and virtual-machine bridges,
+ * which exist only inside this machine. Their addresses rank last and are
+ * never offered as an alternative link.
+ */
+const MACHINE_INTERNAL_INTERFACE = /^(docker|br-|veth|virbr|lxc|lxd|podman|cni|flannel|cali|vboxnet|vmnet|vethernet)/i
+
+/**
+ * Overlay networks — VPNs and mesh tunnels. A phone on the same overlay can
+ * reach them, so they are offered, but after the network the machine is
+ * physically on.
+ */
+const OVERLAY_INTERFACE = /^(utun|tun|tap|wg|zt|tailscale|ipsec|ppp)/i
+
+/** How likely an IPv4 literal is to be the home network a phone shares: lower is likelier. */
+function rangeRank(address: string): number {
+  const [first, second] = address.split('.').map(Number) as [number, number]
+  if (first === 192 && second === 168) return 0
+  if (first === 10) return 1
+  if (first === 172 && second >= 16 && second <= 31) return 2
+  // Link-local means no DHCP server answered: the least likely to be shared.
+  if (first === 169 && second === 254) return 4
+  return 3
+}
+
+/** Where an address sits: on the machine's own network, an overlay, or a bridge inside the machine. */
+type InterfaceKind = 'physical' | 'overlay' | 'machine-internal'
+
+function interfaceKind(name: string | undefined): InterfaceKind {
+  if (name !== undefined && MACHINE_INTERNAL_INTERFACE.test(name)) return 'machine-internal'
+  if (name !== undefined && OVERLAY_INTERFACE.test(name)) return 'overlay'
+  return 'physical'
+}
+
+const KIND_RANK: Record<InterfaceKind, number> = { 'physical': 0, 'overlay': 1, 'machine-internal': 2 }
+
+/** The addresses a pairing link could name, the likeliest first, and which of them a phone could use at all. */
+export interface RankedAddresses {
+  /** Every address, the one to pair over first. */
+  ranked: string[]
+  /** The addresses worth offering a phone: everything but machine-internal bridges. */
+  offered: string[]
+}
+
+/**
+ * Order the LAN literals a pairing link could name, most likely reachable from
+ * a phone first: the network the machine is physically on before overlays,
+ * overlays before bridges that exist only inside the machine, home-network
+ * ranges first within each, and interface order last.
+ *
+ * Upstream's snapshot lists every non-internal IPv4 in interface order, so on
+ * a machine running containers or a VPN its first entry can be an address no
+ * phone reaches — and the QR code names exactly one.
+ * @param addresses - the LAN literals the Host fence trusts, from `webRuntime`.
+ * @param interfaces - the machine's interfaces; this machine's by default.
+ */
+export function rankLanAddresses(
+  addresses: readonly string[], interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): RankedAddresses {
+  const nameOf = new Map<string, string>()
+  for (const [name, entries] of Object.entries(interfaces)) {
+    for (const entry of entries ?? []) if (entry.family === 'IPv4') nameOf.set(entry.address, name)
+  }
+  const ranked = addresses
+    .map((address, index) => ({ address, index, kind: interfaceKind(nameOf.get(address)), range: rangeRank(address) }))
+    .sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind] || a.range - b.range || a.index - b.index)
+  return {
+    ranked: ranked.map(candidate => candidate.address),
+    offered: ranked.filter(candidate => candidate.kind !== 'machine-internal').map(candidate => candidate.address),
+  }
 }
 
 /**
@@ -250,7 +325,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   if (!config.printPairingUrl) return
   const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
-  const lanAddress = runtime?.lanAddresses[0]
+  const { ranked, offered } = rankLanAddresses(runtime?.lanAddresses ?? [])
+  const lanAddress = ranked[0]
   // A loopback bind has no network address to pair over. A tunnelled device
   // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
   // `dsh web:` link like any local browser.
@@ -260,16 +336,34 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // inherited plaintext listener — not somewhere a phone can reach. A gated
     // carrier reports the reachable one separately; a shipped carrier has no
     // such member and its single port is both.
-    const { scheme = 'http', port, networkPort } = ctx.webServer as unknown as SchemeAwareServer
+    const { scheme = 'http', port, networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
+    // A LAN address with a plaintext carrier means lanyard's is not the one
+    // serving — say, upstream renamed the row this bundle disables. A link
+    // printed now would carry the launch token across the network in the clear.
+    if (scheme !== 'https') {
+      ctx.logger.error(
+        'lanyard: this machine is serving its network without lanyard\'s TLS carrier, so no pairing link is printed — '
+        + 'it would send the launch token in the clear; the bundle needs updating for this dsh version',
+      )
+      return
+    }
     const reachable = networkPort ?? port
     const link = pairingLink(issuer, scheme, reachable, lanAddress)
     if (link === undefined) return
     // The shipped line pairs the plaintext loopback port with the LAN address,
     // which nothing answers under TLS; say so before a person tries it.
-    if (scheme === 'https') {
-      console.log(`lanyard: serving your network over TLS on port ${String(reachable)} — the LAN address on the dsh web line is not reachable from other devices`)
-    }
+    console.log(`lanyard: serving your network over TLS on port ${String(reachable)} — the LAN address on the dsh web line is not reachable from other devices`)
     console.log(`lanyard: pair a device by opening ${link} once`)
+    // The code names one address; a phone on another of this machine's
+    // networks gets its own link rather than a guess to edit by hand.
+    for (const alternative of offered.filter(address => address !== lanAddress)) {
+      console.log(`lanyard: or, from a device on the ${alternative} network: ${String(pairingLink(issuer, scheme, reachable, alternative))}`)
+    }
+    // The certificate is self-signed, so the phone's warning is the only check
+    // there is; this is what makes it a check rather than a formality.
+    if (certificateFingerprint !== undefined) {
+      console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
+    }
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
     const code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))

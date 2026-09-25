@@ -40,7 +40,7 @@ try {
  * and this gate refuses is a namespace the GUI needs and the classification
  * missed — the failure this suite exists to catch.
  */
-const PINNED_BY_DESIGN = /^\/api\/(settings|credentials|account|llm|pluginManager|pluginRegistryProbe|pluginInventory|dynamicCordisRunner)\/|^\/plugins\/events$|^\/open-in-app\/open$/
+const PINNED_BY_DESIGN = /^\/api\/(settings|credentials|account|llm|pluginManager|pluginRegistryProbe|pluginInventory|dynamicCordisRunner)\/|^\/api\/(present|changes)\.open$|^\/plugins\/events$|^\/open-in-app\/open$/
 
 /** What the page saw when it called the api the way the shell does. */
 interface PageAnswer {
@@ -127,9 +127,11 @@ await withDshDeployment(async ({ port, pairingLink }) => {
     await Promise.all(checks)
 
     check('the link lands on the bare origin, the token gone from the address bar', page.url(), `${origin}/`)
-    const cookies = await paired.cookies(origin)
-    check('upstream set its session cookie, out of reach of the page\'s scripts',
-      cookies.some(cookie => cookie.name.startsWith('dsh-auth-') && cookie.httpOnly), true)
+    const session = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    check('upstream set its session cookie, out of reach of the page\'s scripts', session?.httpOnly, true)
+    // What the browser stored, not what the header said: Secure is what keeps
+    // it off any later plain-http request to this machine's address.
+    check('and the browser holds it as Secure, so it never leaves TLS', session?.secure, true)
     check('the shell\'s own session call succeeds, cookie attached by the browser alone', listed.status(), 200)
     check('the shell holds its stream WebSocket open', muxFrames > 0, true)
     const unexpected = [...refusedOnLoad].filter(path => !PINNED_BY_DESIGN.test(path))
