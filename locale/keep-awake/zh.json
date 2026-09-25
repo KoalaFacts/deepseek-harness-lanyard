@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "保持唤醒",
+    "description": "加上 --keep-awake 时，在 dsh 提供服务期间阻止电脑休眠"
+  }
+}

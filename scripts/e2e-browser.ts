@@ -1,16 +1,14 @@
 /**
  * The pairing flow in a real browser.
  *
- * Everything else proves the bootstrap as *source*: unit tests evaluate the
- * emitted string against fake globals, the build gate evaluates the built
- * artifact, and the HTTP suite finds it in the served index. None of that
- * proves a browser does what the fakes did — that `document.cookie` accepts the
- * attribute string, that `history.replaceState` strips the fragment, that the
- * cookie is actually attached to a same-origin `/api` fetch over a self-signed
- * TLS origin, or that it survives a reload at the bare authority.
- *
- * This drives Chromium through the flow a person performs: open the pairing
- * link once, then use the bare address afterwards.
+ * The HTTP suite proves the exchange as requests; only a browser proves what
+ * a phone actually does with it — that it follows the redirect and keeps the
+ * session cookie for a self-signed TLS origin, that the shell it lands on then
+ * attaches that cookie to its own `/api` calls and WebSocket, and that it
+ * survives a later visit to the bare address. It is also the one place that
+ * sees every call the shipped GUI makes on load, so a namespace the GUI needs
+ * but this gate pins shows up here as a failure rather than as a phone that
+ * quietly cannot do something.
  *
  * Usage:  node scripts/e2e-browser.ts
  *         LANYARD_CHROMIUM=/path/to/chrome node scripts/e2e-browser.ts
@@ -21,8 +19,8 @@
  * so the suite runs there without downloading a second browser.
  */
 
-import type { BrowserType, Page } from 'playwright'
-import { TOKEN, recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
+import type { BrowserType, Page, Response } from 'playwright'
+import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
 import { REFUSAL_BODY } from '../src/webserver.ts'
 
 const lan = requireLan()
@@ -37,6 +35,13 @@ try {
   process.exit(2)
 }
 
+/**
+ * Routes a paired device is refused by design. Anything else the shell calls
+ * and this gate refuses is a namespace the GUI needs and the classification
+ * missed — the failure this suite exists to catch.
+ */
+const PINNED_BY_DESIGN = /^\/api\/(settings|credentials|account|llm|pluginManager|pluginRegistryProbe|pluginInventory|dynamicCordisRunner)\/|^\/api\/(present|changes)\.open$|^\/plugins\/events$|^\/open-in-app\/open$/
+
 /** What the page saw when it called the api the way the shell does. */
 interface PageAnswer {
   status: number
@@ -49,17 +54,28 @@ interface PageAnswer {
  * doing anything.
  */
 const apiAnswer = (page: Page, path: string): Promise<PageAnswer> => page.evaluate(async (target: string) => {
-  const response = await fetch(target)
+  const response = await fetch(target, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: 'e2e', method: target.replace(/^\/api\//, ''), payload: { args: {} } }),
+  })
   return { status: response.status, body: await response.text() }
 }, path)
 
 /** Whether the gate refused the page's own fetch. */
 const pageRefused = (answer: PageAnswer): boolean => answer.status === 403 && answer.body === REFUSAL_BODY
 
-/** Whether the page's fetch passed the gate, so a check reads as its own claim. */
-const pageAdmitted = (answer: PageAnswer): boolean => !pageRefused(answer)
+/** Whether a response is this gate's refusal. */
+async function gateRefused(response: Response): Promise<boolean> {
+  if (response.status() !== 403) return false
+  try {
+    return await response.text() === REFUSAL_BODY
+  } catch {
+    return false
+  }
+}
 
-await withDshDeployment(async ({ port }) => {
+await withDshDeployment(async ({ port, pairingLink }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
@@ -83,49 +99,58 @@ await withDshDeployment(async ({ port }) => {
     // deployment's own PEM and nothing else.
     const cold = await browser.newContext({ ignoreHTTPSErrors: true })
     const coldPage = await cold.newPage()
-    await coldPage.goto(origin, { waitUntil: 'domcontentloaded' })
-    check('an unpaired browser is refused by the gate',
-      pageRefused(await apiAnswer(coldPage, '/api/session.list')), true)
-    check('and stored nothing to present later',
-      await coldPage.evaluate(() => localStorage.getItem('dsh.pairingToken')), null)
+    const coldLanding = await coldPage.goto(origin, { waitUntil: 'domcontentloaded' })
+    check('an unpaired browser meets upstream\'s refusal, not the GUI', coldLanding?.status(), 401)
+    check('and its own api calls are refused at the gate', pageRefused(await apiAnswer(coldPage, '/api/session/list')), true)
     await cold.close()
 
     // ---- opening the pairing link once ----
     const paired = await browser.newContext({ ignoreHTTPSErrors: true })
     const page = await paired.newPage()
-    await page.goto(`${origin}/#auth=${TOKEN}`, { waitUntil: 'domcontentloaded' })
+    const refusedOnLoad = new Set<string>()
+    const checks: Promise<void>[] = []
+    page.on('response', (response) => {
+      checks.push(gateRefused(response).then((refused) => {
+        if (refused) refusedOnLoad.add(new URL(response.url()).pathname)
+      }))
+    })
+    let muxFrames = 0
+    page.on('websocket', (socket) => {
+      if (new URL(socket.url()).pathname === '/api/remote.mux') socket.on('framereceived', () => { muxFrames += 1 })
+    })
+    const sessionList = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
+    await page.goto(pairingLink, { waitUntil: 'domcontentloaded' })
+    const listed = await sessionList
+    // The shell's other load-time calls are in flight alongside session/list;
+    // give them the same moment to land before reading what was refused.
+    await page.waitForLoadState('networkidle').catch(() => {})
+    await Promise.all(checks)
 
-    check('the browser adopted the token from the fragment',
-      await page.evaluate(() => localStorage.getItem('dsh.pairingToken')), TOKEN)
-    check('and republished it as the pairing cookie',
-      await page.evaluate(() => document.cookie.includes(`dsh_auth=${String(localStorage.getItem('dsh.pairingToken'))}`)), true)
-    // The fragment never reaches a server, but it does reach the address bar,
-    // browser history, and anything the user pastes.
-    check('the fragment was stripped from the address bar',
-      await page.evaluate(() => location.hash), '')
-    check('leaving the bare authority',
-      await page.evaluate(() => location.origin + location.pathname), `${origin}/`)
-    check('the paired page reaches the api, cookie attached by the browser alone',
-      pageAdmitted(await apiAnswer(page, '/api/session.list')), true)
+    check('the link lands on the bare origin, the token gone from the address bar', page.url(), `${origin}/`)
+    const session = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    check('upstream set its session cookie, out of reach of the page\'s scripts', session?.httpOnly, true)
+    // What the browser stored, not what the header said: Secure is what keeps
+    // it off any later plain-http request to this machine's address.
+    check('and the browser holds it as Secure, so it never leaves TLS', session?.secure, true)
+    check('the shell\'s own session call succeeds, cookie attached by the browser alone', listed.status(), 200)
+    check('the shell holds its stream WebSocket open', muxFrames > 0, true)
+    const unexpected = [...refusedOnLoad].filter(path => !PINNED_BY_DESIGN.test(path))
+    if (unexpected.length > 0) console.log(`lanyard e2e: refused on load, unexpectedly: ${unexpected.join(', ')}`)
+    check('everything else the shell calls on load reaches it; only the configuration plane is refused', unexpected.length, 0)
 
     // ---- the point of pairing: the bare address works afterwards ----
-    await page.goto(origin, { waitUntil: 'domcontentloaded' })
-    check('a later visit to the bare address needs no link',
-      await page.evaluate(() => document.cookie.includes('dsh_auth=')), true)
-    check('and still reaches the api',
-      pageAdmitted(await apiAnswer(page, '/api/session.list')), true)
+    const later = await page.goto(origin, { waitUntil: 'domcontentloaded' })
+    check('a later visit to the bare address needs no link', later?.status(), 200)
     check('while the configuration plane stays refused, even paired',
-      pageRefused(await apiAnswer(page, '/api/settings.update')), true)
+      pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
     await paired.close()
 
-    // ---- a malformed link must not poison storage ----
+    // ---- a wrong token must not pair ----
     const hostile = await browser.newContext({ ignoreHTTPSErrors: true })
     const hostilePage = await hostile.newPage()
-    await hostilePage.goto(`${origin}/#auth=${encodeURIComponent('evil; Domain=attacker.example')}`, { waitUntil: 'domcontentloaded' })
-    check('a malformed fragment token is not stored',
-      await hostilePage.evaluate(() => localStorage.getItem('dsh.pairingToken')), null)
-    check('and never reaches the cookie it could have extended',
-      await hostilePage.evaluate(() => document.cookie.includes('attacker.example')), false)
+    const forged = await hostilePage.goto(`${origin}/?token=${'A'.repeat(43)}`, { waitUntil: 'domcontentloaded' })
+    check('a link carrying the wrong token is refused', forged?.status(), 401)
+    check('and leaves no session behind', (await hostile.cookies(origin)).some(cookie => cookie.name.startsWith('dsh-auth-')), false)
     await hostile.close()
   } finally {
     await browser.close()

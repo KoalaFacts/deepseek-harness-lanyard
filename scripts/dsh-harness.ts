@@ -18,12 +18,16 @@ import type { Readable } from 'node:stream'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { networkInterfaces, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { request } from 'node:https'
+import { request as plainRequest } from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { REFUSAL_BODY } from '../src/webserver.ts'
-import type { OutgoingHttpHeaders } from 'node:http'
+import { rankLanAddresses } from '../src/pairing.ts'
+import { lanIpv4Addresses } from '../src/tls.ts'
+import type { IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http'
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -50,7 +54,6 @@ function resolveCliSpec(): string {
 }
 
 export const CLI_SPEC: string = resolveCliSpec()
-export const TOKEN = 'e2e-token_0123456789-abcdef'
 
 /**
  * Registry states that mean "this could not be tested", not "this is broken".
@@ -125,21 +128,35 @@ interface Manifest {
 /** One HTTP answer from the deployment. */
 export interface Answer {
   status: number
+  headers: IncomingHttpHeaders
   body: string
+}
+
+/** What one probe sends beyond its target. */
+export interface ProbeInit {
+  method?: string
+  headers?: OutgoingHttpHeaders
+  body?: string
 }
 
 /** The live deployment handed to a suite. */
 export interface Deployment {
   /** Path of the installed `dsh` binary. */
   dsh: string
-  /** Environment carrying `DSH_HOME` and the pairing token. */
+  /** Environment carrying `DSH_HOME`. */
   env: NodeJS.ProcessEnv
   /** Working directory the CLI was installed into. */
   cwd: string
-  /** The port the deployment is serving. */
+  /** The TLS port devices on the network reach. */
   port: number
+  /** This machine's plaintext port, passed as `--port`. */
+  localPort: number
   /** The pairing link the readiness line printed. */
   pairingLink: string
+  /** The certificate fingerprint the pairing line told the person to compare. */
+  fingerprint: string
+  /** The local URL upstream's own `dsh web:` line printed, launch token included. */
+  localUrl: string
   /** PEM of the certificate this deployment generated, for validating probes. */
   ca: string
   /** This plugin's package name. */
@@ -161,14 +178,13 @@ export function run(command: string, args: string[], options: { cwd?: string; en
 }
 
 /**
- * The machine's first non-internal IPv4 literal.
+ * The LAN literal the pairing link names — ranked exactly as the plugin ranks
+ * it, so on a runner with a container bridge or a VPN the suite probes the
+ * address it is about to assert the link names.
  * @returns the address, or undefined on a host with no LAN interface.
  */
 export function lanAddress(): string | undefined {
-  for (const entries of Object.values(networkInterfaces())) {
-    for (const entry of entries ?? []) if (entry.family === 'IPv4' && !entry.internal) return entry.address
-  }
-  return undefined
+  return rankLanAddresses(lanIpv4Addresses()).ranked[0]
 }
 
 /**
@@ -196,19 +212,41 @@ export function freePort(): Promise<number> {
  * was answered by something else entirely, and the certificate the tls row
  * writes — the one a paired phone is asked to accept — would never be
  * exercised at all.
+ *
+ * An upgrade request the server accepts resolves as status 101; one it refuses
+ * resolves with the refusal like any other answer.
  * @param ca - PEM of the deployment's certificate, from {@link Deployment}.
- * @returns the status and body, so the caller can tell a gate refusal from the
- * app answering after admission.
+ * @returns the status, headers and body, so the caller can tell a gate refusal
+ * from upstream's own and from the app answering after admission.
  */
-export function probe(
-  host: string, port: number, path: string, headers: OutgoingHttpHeaders = {}, ca?: string,
-): Promise<Answer> {
+export function probe(host: string, port: number, path: string, init: ProbeInit = {}, ca?: string): Promise<Answer> {
   return new Promise((resolve, reject) => {
-    const rq = request({ host, port, path, method: 'GET', headers, timeout: 15_000, ...ca !== undefined && { ca } }, (res) => {
-      let body = ''
+    const { method = 'GET', headers = {}, body } = init
+    const rq = request({ host, port, path, method, headers, timeout: 15_000, ...ca !== undefined && { ca } }, (res) => {
+      let text = ''
       res.setEncoding('utf8')
-      res.on('data', (chunk: string) => { body += chunk })
-      res.on('end', () => { resolve({ status: res.statusCode ?? 0, body }) })
+      res.on('data', (chunk: string) => { text += chunk })
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }) })
+    })
+    rq.on('upgrade', (res, socket) => {
+      socket.destroy()
+      resolve({ status: res.statusCode ?? 101, headers: res.headers, body: '' })
+    })
+    rq.on('timeout', () => { rq.destroy(new Error('timed out')) })
+    rq.on('error', reject)
+    rq.end(body)
+  })
+}
+
+/**
+ * One plain-HTTP GET, for the loopback listener upstream's own URL line names.
+ * @param url - an `http://` URL.
+ */
+export function plainGet(url: string): Promise<Answer> {
+  return new Promise((resolve, reject) => {
+    const rq = plainRequest(url, { method: 'GET', timeout: 15_000 }, (res) => {
+      res.resume()
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, headers: res.headers, body: '' }) })
     })
     rq.on('timeout', () => { rq.destroy(new Error('timed out')) })
     rq.on('error', reject)
@@ -216,38 +254,105 @@ export function probe(
   })
 }
 
+/** Headers opening a WebSocket, as a browser sends them. */
+export function upgradeHeaders(): OutgoingHttpHeaders {
+  return {
+    'connection': 'Upgrade',
+    'upgrade': 'websocket',
+    'sec-websocket-version': '13',
+    'sec-websocket-key': randomBytes(16).toString('base64'),
+  }
+}
+
 /**
- * Whether THIS GATE refused. `dsh-client-connection`'s own Host fence also
- * answers 403 with the body `forbidden`, so status alone cannot tell admission
- * from the fence behind it; the gate's refusal carries its own marker.
+ * The body the shipped client posts for one Gateway call.
+ * @param method - `namespace/method`.
+ * @param args - the named arguments.
+ */
+export function rpcCall(method: string, args: Record<string, unknown> = {}): ProbeInit {
+  return {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: `e2e-${method}`, method, payload: { args } }),
+  }
+}
+
+/**
+ * Whether upstream answered a Gateway call with success — the claim a paired
+ * device needs, which "the gate did not refuse" is not.
+ */
+export function succeeded(answer: Answer): boolean {
+  if (answer.status !== 200) return false
+  try {
+    return (JSON.parse(answer.body) as { result?: { ok?: unknown } }).result?.ok === true
+  } catch {
+    return false
+  }
+}
+
+/** The whole `Set-Cookie` line of the session cookie an answer set, attributes included. */
+function sessionCookieLine(answer: Answer): string | undefined {
+  return [answer.headers['set-cookie'] ?? []].flat().find(value => value.startsWith('dsh-auth-'))
+}
+
+/** The `name=value` pair of the session cookie an answer set, if it set one. */
+export function sessionCookie(answer: Answer): string | undefined {
+  return sessionCookieLine(answer)?.split(';')[0]
+}
+
+/** Whether an answer set the session cookie with the `Secure` attribute. */
+export function sessionCookieSecure(answer: Answer): boolean | undefined {
+  const line = sessionCookieLine(answer)
+  return line === undefined ? undefined : /;\s*secure\s*(;|$)/i.test(line)
+}
+
+/**
+ * Whether THIS GATE refused. `dsh-client-connection` also answers 403
+ * `forbidden` from its Host fence and 401 `unauthorized` without a session, so
+ * status alone cannot tell this gate from upstream behind it; the gate's
+ * refusal carries its own marker.
  */
 export const refused = (answer: Answer): boolean => answer.status === 403 && answer.body === REFUSAL_BODY
 
 /**
- * Whether the request passed the gate and reached whatever owns the route.
- * Defined against the gate's own marker rather than as the negation of a
- * spelling: a hardcoded copy that drifted would turn every genuine refusal into
- * a reported admission, so the suite would go green while the gate refused
- * everything.
+ * Whether the request passed the gate and reached whatever owns the route —
+ * which may still refuse it. Defined against the gate's own marker rather than
+ * as the negation of a spelling: a hardcoded copy that drifted would turn every
+ * genuine refusal into a reported admission. Never enough on its own for a
+ * claim that something *works*: upstream's 401 satisfies it too, which is how
+ * this suite once passed a paired device that could not reach anything.
  */
 export const admitted = (answer: Answer): boolean => !refused(answer)
 
 /** The spawned CLI: stdin is ignored, both output streams are piped. */
 type DshProcess = ChildProcessByStdio<null, Readable, Readable>
 
-/** Wait for the readiness line, which is also the pairing link under test. */
-function awaitPairingLink(server: DshProcess): Promise<string> {
+/** The readiness lines under test: lanyard's pairing link and fingerprint, and upstream's own URL line. */
+interface ReadinessLines {
+  pairingLink: string
+  fingerprint: string
+  localUrl: string
+}
+
+/**
+ * Wait for every readiness line; lanyard's and upstream's print after the
+ * Loader settles, in either order. The fingerprint line is lanyard's last on a
+ * pipe, where no QR code is drawn, so waiting for it waits for the whole block.
+ */
+function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
   return new Promise((resolve, reject) => {
     let output = ''
     const timer = setTimeout(() => {
-      reject(new Error(`no pairing line within ${String(BOOT_TIMEOUT_MS)}ms:\n${output}`))
+      reject(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${output}`))
     }, BOOT_TIMEOUT_MS)
     const read = (chunk: Buffer | string): void => {
       output += String(chunk)
-      const match = /lanyard: pair a device by opening (\S+) once/.exec(output)
-      if (match?.[1] === undefined) return
+      const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
+      const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
+      const localUrl = /dsh web: (\S+)/.exec(output)?.[1]
+      if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return
       clearTimeout(timer)
-      resolve(match[1])
+      resolve({ pairingLink, fingerprint, localUrl })
     }
     server.stdout.on('data', read)
     server.stderr.on('data', read)
@@ -278,20 +383,21 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
     installCli(workspace, CLI_SPEC)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
-    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home, DSH_E2E_TOKEN: TOKEN }
+    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home }
 
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })
     const profile = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8')) as Manifest
 
-    const port = await freePort()
-    console.log(`lanyard e2e: booting dsh on 0.0.0.0:${String(port)}`)
+    const localPort = await freePort()
+    let port = await freePort()
+    while (port === localPort) port = await freePort()
+    console.log(`lanyard e2e: booting dsh on 127.0.0.1:${String(localPort)}, and the network over TLS on ${String(port)}`)
     server = spawn(dsh, [
-      '--profile', 'web', '--host', '0.0.0.0', '--port', String(port),
-      '--no-open', '--pairing-token-env', 'DSH_E2E_TOKEN',
+      '--profile', 'web', '--host', '0.0.0.0', '--port', String(localPort), '--network-port', String(port), '--no-open',
     ], { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
 
-    const pairingLink = await awaitPairingLink(server)
+    const { pairingLink, fingerprint, localUrl } = await awaitReadiness(server)
 
     // The tls row writes its material to `dshHomePath('lanyard-tls')`, which is
     // this DSH_HOME. Reading it rather than waving certificate validation
@@ -308,7 +414,7 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     const ca = readFileSync(certPath, 'utf8')
 
     return await body({
-      dsh, env, cwd: workspace, port, pairingLink, packageName: name, ca,
+      dsh, env, cwd: workspace, port, localPort, pairingLink, fingerprint, localUrl, packageName: name, ca,
       bundles: profile.dsh?.profile?.bundles ?? [],
     })
   } finally {

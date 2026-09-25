@@ -34,10 +34,11 @@ updates:
     # `dsh` is deliberately unpinned and tracked by the nightly against
     # upstream's own release channels instead, so bumping it here would replace
     # a floating range that is meant to float. Two of these are load-bearing:
-    # dsh-web-app is exact-pinned because tests/webstartup-contract.spec.ts
-    # reads the INSTALLED copy, so a bump silently changes what that test
-    # proves; and the peerDependencies ranges are hand-tuned because no range
-    # can express the supported window while upstream ships prereleases.
+    # dsh-web-app and dsh-client-connection are exact-pinned because
+    # tests/webstartup-contract.spec.ts and tests/upstream-session.spec.ts read
+    # the INSTALLED copies, so a bump silently changes what those tests prove;
+    # and the peerDependencies ranges are the supported window itself, which
+    # dsh enforces from 0.1.7, so a bump would change which dsh admits this.
     ignore:
       - dependency-name: "@deepseek-ai/*"
     labels:

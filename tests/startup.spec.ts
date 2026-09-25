@@ -1,10 +1,12 @@
 /**
  * The command-line provider: the flag family it accepts, and the usage errors
- * that keep an unauthenticated network bind from ever happening.
+ * it still raises. Whether an all-interfaces bind may proceed is the carrier's
+ * decision, not this provider's — see `gated-webserver.spec.ts`.
  */
 import { describe, expect, it } from 'vitest'
 import type { Command } from 'commander'
 import { resolveStartupValues, webCommand, type WebStartupValues } from '../src/startup.ts'
+import { DEFAULT_NETWORK_PORT } from '../src/webserver.ts'
 
 /**
  * Parse one invocation the way `parseCmdline` does, without a launcher.
@@ -41,40 +43,32 @@ describe('the lanyard web command line', () => {
     expect(parse(['--no-open'])).toEqual({ trustedHosts: [], openBrowser: false })
   })
 
-  it('accepts the all-interfaces bind upstream refuses, given a pairing token', () => {
+  it('accepts the all-interfaces bind upstream refuses', () => {
     // This is the whole point of replacing the stock provider: upstream calls
-    // program.error() here, because without authentication the bind hands
-    // remote code execution to the network.
-    expect(parse(['--host', '0.0.0.0', '--pairing-token-env', 'DSH_PAIRING_TOKEN'])).toEqual({
-      host: '0.0.0.0', trustedHosts: [], openBrowser: true, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
-    })
+    // program.error() here. What makes the bind safe — upstream's session on
+    // every request, and TLS, which the carrier insists on — is not a flag.
+    expect(parse(['--host', '0.0.0.0'])).toEqual({ host: '0.0.0.0', trustedHosts: [], openBrowser: true })
   })
 
-  it('still refuses an all-interfaces bind with no pairing token', () => {
-    expect(parse(['--host', '0.0.0.0'])).toBeInstanceOf(Error)
-    expect(String(parse(['--host', '0.0.0.0']))).toMatch(/requires --pairing-token-env/)
-  })
-
-  it('accepts --trusted-host without a pairing token, as the row it replaces does', () => {
+  it('accepts --trusted-host, in argument order, as the row it replaces does', () => {
     // The flag declares an authority for dsh-client-connection's Host fence,
     // which is what a loopback bind behind a tunnel or reverse proxy needs.
-    // That peer reads as loopback here and is admitted either way, so demanding
-    // a token refused a working stock invocation and protected nothing.
-    expect(parse(['--trusted-host', 'app.internal']))
-      .toEqual({ trustedHosts: ['app.internal'], openBrowser: true })
-  })
-
-  it('accepts --trusted-host alongside a token, in argument order', () => {
-    expect(parse([
-      '--pairing-token-env', 'DSH_PAIRING_TOKEN',
-      '--trusted-host', 'app.internal', 'app2.internal',
-    ])).toEqual({
-      trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true, pairingTokenEnv: 'DSH_PAIRING_TOKEN',
-    })
+    expect(parse(['--trusted-host', 'app.internal', 'app2.internal']))
+      .toEqual({ trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true })
   })
 
   it('refuses a non-numeric port', () => {
     expect(String(parse(['--port', '80a']))).toMatch(/--port must be a number/)
+  })
+
+  it('carries --network-port through, and refuses a non-numeric one', () => {
+    // The port devices on the network reach over TLS; `--port` stays this
+    // machine's plaintext listener, exactly as the stock provider means it.
+    expect(parse(['--host', '0.0.0.0', '--port', '3080', '--network-port', '8443'])).toEqual({
+      host: '0.0.0.0', port: 3080, networkPort: 8443, trustedHosts: [], openBrowser: true,
+    })
+    expect(parse([])).not.toHaveProperty('networkPort')
+    expect(String(parse(['--network-port', '84a']))).toMatch(/--network-port must be a number/)
   })
 
   it('carries --keep-awake through, and omits it when absent', () => {
@@ -82,10 +76,13 @@ describe('the lanyard web command line', () => {
     expect(parse([])).not.toHaveProperty('keepAwake')
   })
 
-  it('documents the pairing flags in its help text', () => {
-    const help = webCommand().helpInformation()
-    expect(help).toContain('--pairing-token-env')
+  it('documents the network bind, its port, and --keep-awake in its help text', () => {
+    // Commander wraps at the terminal width, so a phrase may span lines.
+    const help = webCommand().helpInformation().replace(/\s+/g, ' ')
     expect(help).toContain('--keep-awake')
-    expect(help).toContain('at least 16 characters of A-Za-z0-9_-')
+    expect(help).toContain('--network-port')
+    expect(help).toContain('0.0.0.0 also serves your network over TLS')
+    // The default the help names is the one the carrier applies.
+    expect(help).toContain(`(default ${String(DEFAULT_NETWORK_PORT)})`)
   })
 })

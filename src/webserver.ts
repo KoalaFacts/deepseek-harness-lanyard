@@ -1,107 +1,189 @@
 /**
- * The gated carrier: a `WebServer` subclass adding pairing-token admission and
- * TLS without any change to the harness.
+ * The gated carrier: a `WebServer` subclass that terminates TLS and puts
+ * upstream's own browser session in front of every request from the network,
+ * without any change to the harness.
  *
- * Consumers contribute routes through three seats — `ctx.webServer.register`,
- * `registerUpgrade`, and the single-owner `registerFallback` that answers
- * everything no named route matched. Wrapping all three puts admission in
- * front of every request the composition serves, including `/api`, which
- * `dsh-client-connection` registers verbatim and which therefore needs no
- * modification. {@link assertRegistrarsWrapped} fails the load if a future
- * harness grows a fourth, because an unwrapped seat serves the network with no
- * gate at all and nothing else would notice.
+ * Upstream authenticates: since 0.1.2 `dsh-client-connection` exchanges the
+ * launch token `dsh web` prints for a signed, host-bound session cookie, checks
+ * it on `/api`, and offers the same check to other route owners as
+ * `ctx.connection.requestRejection`. What upstream does not do is serve the
+ * network at all — its command-line provider still refuses `--host 0.0.0.0` —
+ * and it treats every authenticated browser as the operator at the keyboard.
+ * This class supplies the rest of what makes a network bind safe:
+ *
+ * - **TLS**, so the launch token and the session cookie never cross the
+ *   network in plaintext. An all-interfaces bind without TLS material fails the
+ *   load.
+ * - **The session check at every seat.** Consumers contribute routes through
+ *   three seats — `register`, `registerUpgrade`, and the single-owner
+ *   `registerFallback` that answers everything no named route matched.
+ *   Wrapping all three puts the check in front of every request the
+ *   composition serves to a network peer, including routes whose owners
+ *   authenticate nothing themselves. {@link assertRegistrarsWrapped} fails the
+ *   load if a future harness grows a fourth.
+ * - **The configuration plane stays at the machine.** A session proves a
+ *   device was paired, not that someone is at the keyboard, so settings,
+ *   credentials, plugin installation and anything acting on the host's desktop
+ *   stay pinned to a loopback peer.
+ *
+ * Two listeners, so enabling this plugin changes nothing on the machine itself:
+ * the inherited plaintext server keeps `127.0.0.1:<port>` exactly as the stock
+ * carrier would, and devices on the network reach a TLS front on its own
+ * `networkPort`. A desktop tab, its session cookie and the URL `dsh web`
+ * prints all stay valid when the bundle is switched on live.
  *
  * TLS is terminated here and the decrypted socket is handed to the inherited
  * HTTP server, which preserves `req.socket.remoteAddress` as the real client
- * address. That is the property admission depends on: a TCP-forwarding proxy
- * would make every request read as a loopback peer and silently disable the
- * token gate entirely.
+ * address. That is the property the loopback exemption depends on: a
+ * TCP-forwarding proxy would make every request read as a loopback peer and
+ * silently lift both the session requirement and the configuration pin.
  * @module
  */
 
 import { createServer as createTlsServer } from 'node:tls'
 import { readFile } from 'node:fs/promises'
-import type { IncomingMessage, Server } from 'node:http'
+import { X509Certificate } from 'node:crypto'
+import { posix } from 'node:path'
+import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { Server as TlsServer } from 'node:tls'
+import type { Server as TlsServer, TLSSocket } from 'node:tls'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
-import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { admit, assertPairingToken, isLoopbackAddress } from './admission.ts'
-import { GENERATE_TOKEN_HINT, resolvePairingToken } from './credentials.ts'
+import type { Config as WebServerConfig, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import { admit, isLoopbackAddress } from './admission.ts'
 
 /**
  * Every route path this gate keys on is owned by a *client-side* package —
  * `API_PATH` in `dsh-client-connection`, `EVENTS_ENDPOINT` in
- * `dsh-client-hmr`, the bundle prefix in `dsh-client-modules` — so none of them
+ * `dsh-client-hmr`, the open route in `dsh-host-open-in-app` — so none of them
  * is this plugin's to hardcode. They are schema defaults a deployment can
  * restate, per the harness rule that anything two deployments may set
  * differently is a configuration field.
  *
- * Two of them fail OPEN when they drift: an `/api` prefix that no longer
- * matches makes every endpoint read as unprivileged, and a reload endpoint that
- * moved is no longer pinned. {@link GatedWebServer} therefore warns about any
- * configured path that no row ever claimed, so a rename surfaces as a
+ * All of them fail OPEN when they drift: an `/api` prefix that no longer
+ * matches makes every endpoint read as unprivileged, and a pinned route that
+ * moved is merely session-gated. {@link GatedWebServer} therefore warns about
+ * any configured path that no row ever claimed, so a rename surfaces as a
  * diagnostic instead of as a quietly widened surface.
  */
 
 /** Route prefix owning every api request; `dsh-client-connection`'s `API_PATH`. */
 export const DEFAULT_API_PATH_PREFIX = '/api'
 
-/** Endpoints pinned to a loopback peer even for an authenticated caller. */
+/**
+ * Endpoints pinned to a loopback peer even inside a namespace a paired device
+ * may otherwise reach. Each acts on this machine's desktop or reads a
+ * configuration document:
+ *
+ * - `session/openWorkspacePath` opens or reveals a path with the host's own
+ *   applications, and `directoryPicker/pick` opens the host's native chooser —
+ *   both on a screen the device holding the session cannot see. The in-app
+ *   browser (`directoryPicker/list`) stays reachable.
+ * - `agentPresets/read`, `/copy` and `/deletePreset` read and edit preset
+ *   documents, which configure the agent; listing and selecting one does not.
+ *
+ * The list covers both of upstream's release channels, so a method only one of
+ * them exposes is listed anyway.
+ */
 export const DEFAULT_PRIVILEGED_METHODS: readonly string[] = [
-  'agentPreset.read', 'agentPreset.copy', 'agentPreset.openDocument', 'agentPreset.remove',
-  'host.pickDirectory', 'host.openPath',
-  'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
-  'credentials.describe', 'credentials.set', 'credentials.unset',
-  'llm.discoverModels',
+  'session/openWorkspacePath',
+  'directoryPicker/pick',
+  'agentPresets/read', 'agentPresets/copy', 'agentPresets/deletePreset',
 ]
 
 /**
- * Typert Gateway namespaces a paired device may reach. The Gateway claims every
- * `namespace/method` a live remote service exposes, so this space grows with the
- * composition; anything unlisted is loopback-only, which keeps a service this
- * build has never seen from becoming LAN-reachable merely by appearing. A
+ * Typert Gateway namespaces a paired device may reach — everything the shipped
+ * GUI needs to hold a session from a phone. The Gateway claims every
+ * `namespace/method` a live remote service exposes, so this space grows with
+ * the composition; anything unlisted is loopback-only, which keeps a service
+ * this build has never seen from becoming LAN-reachable merely by appearing. A
  * deployment adds its own namespace deliberately — the default denies.
+ *
+ * Deliberately absent, so pinned: `settings`, `credentials`, `account`, `llm`
+ * (the configuration plane); `pluginManager`, `pluginRegistryProbe`,
+ * `pluginInventory` (installing code, and the inventory that echoes the
+ * composed configuration); `dynamicCordisRunner` (runs plugin code from the
+ * panel); and `speech`, which only an experimental bundle mounts.
  */
-export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = ['commands', 'goals', 'messageFeedback']
+export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
+  // Sessions and the conversation in them.
+  'session', 'subagents', 'skills', 'commands', 'goals', 'fileReferences', 'fileUploads',
+  'sessionReferenceResolver', 'messageFeedback', 'sessionFeedback', 'agentPresets', 'permissionPresets',
+  // Host-forwarded requests the device answers — tool approvals and the
+  // agent's questions arrive as `$events` and are answered at `$events/result`,
+  // so pinning it leaves the agent waiting on a prompt the phone can see.
+  '$events',
+  // Workspaces and the files in them.
+  'workspace', 'workspaceFiles', 'directoryPicker', 'officeToPdf',
+  // Work running on this machine on the session's behalf. A terminal adds no
+  // capability a paired device lacks: it already drives an agent that runs
+  // commands, and it answers that agent's approvals itself.
+  'job', 'terminal', 'schedule',
+]
+
+/**
+ * Exact `/api/<name>` routes, with no namespace, that a paired device may
+ * reach. Upstream registers these beside the Gateway — the stream WebSocket
+ * with `registerUpgrade`, the rest with `connection.fetch.register` — so no
+ * namespace rule covers them, and like a namespace an unlisted one is
+ * loopback-only — which pins `present.open` and `changes.open`, the
+ * deliverables' twins of `session/openWorkspacePath`.
+ *
+ * - `remote.mux` is the WebSocket every stream rides.
+ * - `file` serves chat images and document previews. It reads whatever this
+ *   user can read — as a paired device already can through the agent or the
+ *   terminal — so pinning it would cost the phone its previews and buy nothing.
+ * - `session.export`, `present.host`, `changes.summary` and `changes.diff` are
+ *   reads the session views make.
+ */
+export const DEFAULT_PAIRED_ROUTES: readonly string[] = [
+  'remote.mux', 'file', 'session.export', 'present.host', 'changes.summary', 'changes.diff',
+]
 
 /**
  * Body of a refusal this gate issued.
  *
- * Deliberately not the bare `forbidden` that `dsh-client-connection`'s own Host
- * fence answers with: an operator reading a 403, and the end-to-end suite
- * deciding whether admission or the Host fence refused, cannot tell two
+ * Deliberately not the bare `forbidden` / `unauthorized` that
+ * `dsh-client-connection` answers with itself: an operator reading a refusal,
+ * and the end-to-end suite deciding which layer refused, cannot tell two
  * identical bodies apart.
  */
 export const REFUSAL_BODY = 'lanyard: forbidden'
 
-/** Routes served without admission: the browser must load the shell before it holds a token. */
-export const DEFAULT_PUBLIC_PATHS: readonly string[] = ['/plugins']
+/**
+ * Named routes served to a network peer without a session.
+ *
+ * None by default. A route used to be exempted when the browser had to load it
+ * before it could hold a credential; upstream's exchange sets the session
+ * cookie on the redirect that precedes the first page load, so every request
+ * the loaded page makes already carries it.
+ */
+export const DEFAULT_PUBLIC_PATHS: readonly string[] = []
 
 /**
- * Suffixes excluded from every public path. `/plugins` must stay anonymous so
- * the shell can boot before a token exists, but the client bundles it serves
- * carry source maps, and handing a LAN peer the full client source for free is
- * not part of "load the shell".
+ * Suffixes excluded from every public seat. The built frontend on the fallback
+ * seat carries source maps, and handing an anonymous peer the full client
+ * source is not part of loading the pairing page.
  */
 export const DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES: readonly string[] = ['.map']
 
 /**
  * Routes a paired device may not reach at all, whatever it presents.
  *
- * `/plugins/events` is the dev reload channel: it has no admission of its own,
- * its connections are uncapped and live until their client closes, and the
- * rebuild watcher feeding it runs on this machine anyway. On a network bind
- * that combination is a socket sink, and pairing buys a remote device nothing
- * it could use.
+ * - `/plugins/events` is the dev reload channel: it has no admission of its
+ *   own, its connections are uncapped and live until their client closes, and
+ *   the rebuild watcher feeding it runs on this machine anyway. On a network
+ *   bind that combination is a socket sink, and pairing buys a remote device
+ *   nothing it could use.
+ * - `/open-in-app/open` launches a desktop application on this machine, the
+ *   route-level twin of the pinned `session/openWorkspacePath`.
  */
-export const DEFAULT_LOOPBACK_ONLY_PATHS: readonly string[] = ['/plugins/events']
+export const DEFAULT_LOOPBACK_ONLY_PATHS: readonly string[] = ['/plugins/events', '/open-in-app/open']
 
 /**
- * Admission posture for one seat: served to anyone, gated on the pairing token,
- * or pinned to a peer on this machine.
+ * Admission posture for one seat: served to anyone, requiring upstream's
+ * session, or pinned to a peer on this machine.
  */
 export type Admission = 'public' | 'gated' | 'loopback-only'
 
@@ -109,96 +191,107 @@ export type Admission = 'public' | 'gated' | 'loopback-only'
  * Posture of the fallback seat, which in the shipped Web composition is
  * `dsh-host-frontend-static` serving the built SPA.
  *
- * Public by default, and deliberately so: the pairing token reaches the browser
- * through the bootstrap injected into the index, and the index's own asset tags
- * are discovered by the preload scanner before that inline script has run. A
- * gated posture therefore refuses the first load of a freshly paired device —
- * intermittently, and only the first time, which is the worst way for this to
- * fail. The exempted surface is the built frontend, which carries no secret;
- * {@link Config.publicPathExcludedSuffixes} still applies, so source maps never
- * ride the exemption. A deployment serving something else from this seat can
- * pin it with {@link Config.fallbackAdmission}.
+ * Public by default, because pairing itself arrives here: a device holding no
+ * session yet opens `/?token=…`, and upstream's own `authorizeIndex` on this
+ * seat exchanges the token for the session cookie. Upstream also authenticates
+ * the index there without help, answering 401 to a peer with no session, so
+ * what the exemption actually leaves anonymous is the built frontend's static
+ * files, which carry no secret; {@link Config.publicPathExcludedSuffixes} still
+ * applies, so source maps never ride it. `gated` closes pairing to new devices
+ * while ones already holding a session keep working.
  */
 export const DEFAULT_FALLBACK_ADMISSION: Admission = 'public'
 
+/**
+ * Port devices on the network reach over TLS, when a deployment names none.
+ * Deliberately not the carrier's own port: that one stays the loopback
+ * listener every local URL is built from, so switching this plugin on never
+ * moves a desktop tab.
+ */
+export const DEFAULT_NETWORK_PORT = 3443
+
 /** How an `/api` endpoint's reachability is decided, as one deployment classified it. */
 export interface EndpointAuthority {
-  /** Dot-form methods pinned to a loopback peer. */
+  /** Endpoints pinned to a loopback peer even inside a paired namespace. */
   privilegedMethods: ReadonlySet<string>
   /** Gateway namespaces a paired device may reach; anything else is pinned. */
   pairedNamespaces: ReadonlySet<string>
+  /** Namespace-less `/api/<name>` routes a paired device may reach; anything else is pinned. */
+  pairedRoutes: ReadonlySet<string>
 }
 
 /** The shipped classification, used when a caller names none. */
 export const DEFAULT_ENDPOINT_AUTHORITY: EndpointAuthority = {
   privilegedMethods: new Set(DEFAULT_PRIVILEGED_METHODS),
   pairedNamespaces: new Set(DEFAULT_PAIRED_NAMESPACES),
+  pairedRoutes: new Set(DEFAULT_PAIRED_ROUTES),
 }
 
-/** Gated carrier config: the upstream listen fields plus this plugin's own. */
-export interface Config {
-  /** Listen host; the two supported values are loopback and all-interfaces. */
-  host: '127.0.0.1' | '0.0.0.0'
-  /** Listen port; zero requests an OS-assigned port. */
-  port: number
+/**
+ * Gated carrier config: every field of the inherited carrier's, plus this
+ * plugin's own. The constructor hands `super` the whole object, so a field
+ * upstream adds — `compression` was one — reaches the inherited carrier
+ * without this plugin naming it; and the schema composes upstream's own, so
+ * that field is validated and defaulted exactly as the stock row would.
+ */
+export interface Config extends WebServerConfig {
   /**
-   * Credential reference holding the pairing token — the form a deployment
-   * configures, so no config surface ever carries the secret itself.
+   * Port the TLS front listens on for devices on the network; `port` stays the
+   * loopback listener. Zero requests an OS-assigned port.
    */
-  pairingTokenEnv?: string
-  /**
-   * A literal pairing token, for a composition with no credentials seam (tests,
-   * embedding hosts). Mutually exclusive with {@link Config.pairingTokenEnv};
-   * prefer the reference in anything a person configures.
-   */
-  pairingToken?: string
+  networkPort?: number
   /** PEM certificate path; set with {@link tlsKeyPath} to serve HTTPS. */
   tlsCertPath?: string
   /** PEM private-key path — a path, never inline material, so config surfaces cannot carry the key. */
   tlsKeyPath?: string
-  /** Route paths served without admission; defaults to the client-bundle prefix. */
+  /** Named route paths served to a network peer without a session; none by default. */
   publicPaths?: string[]
-  /** Suffixes a public path does not cover; defaults to source maps. */
+  /** Suffixes a public seat does not cover; defaults to source maps. */
   publicPathExcludedSuffixes?: string[]
-  /** Route paths no paired device may reach; defaults to the dev reload channel. */
+  /** Route paths no paired device may reach; defaults to the dev reload channel and the desktop opener. */
   loopbackOnlyPaths?: string[]
   /**
    * Posture of the fallback seat — the handler answering every request no named
-   * route matched. See {@link DEFAULT_FALLBACK_ADMISSION} for why the built
-   * frontend is served publicly and when to pin it.
+   * route matched. See {@link DEFAULT_FALLBACK_ADMISSION} for why it is public
+   * and what `gated` costs.
    */
   fallbackAdmission?: Admission
   /** Route prefix owning api requests; defaults to `dsh-client-connection`'s. */
   apiPathPrefix?: string
-  /** Dot-form api methods pinned to a loopback peer. */
+  /** Endpoints pinned to a loopback peer even inside a paired namespace. */
   privilegedMethods?: string[]
   /** Gateway namespaces a paired device may reach; anything else is pinned. */
   pairedNamespaces?: string[]
+  /** Namespace-less `/api/<name>` routes a paired device may reach; anything else is pinned. */
+  pairedRoutes?: string[]
 }
 
-export const Config: z<Config> = z.object({
-  host: z.union([z.const('127.0.0.1'), z.const('0.0.0.0')]).required(),
-  port: z.natural().max(65535).required(),
-  pairingTokenEnv: z.string(),
-  pairingToken: z.string(),
-  tlsCertPath: z.string(),
-  tlsKeyPath: z.string(),
-  publicPaths: z.array(String).default([...DEFAULT_PUBLIC_PATHS]),
-  publicPathExcludedSuffixes: z.array(String).default([...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]),
-  loopbackOnlyPaths: z.array(String).default([...DEFAULT_LOOPBACK_ONLY_PATHS]),
-  fallbackAdmission: z.union([z.const('public'), z.const('gated'), z.const('loopback-only')])
-    .default(DEFAULT_FALLBACK_ADMISSION),
-  apiPathPrefix: z.string().default(DEFAULT_API_PATH_PREFIX),
-  privilegedMethods: z.array(String).default([...DEFAULT_PRIVILEGED_METHODS]),
-  pairedNamespaces: z.array(String).default([...DEFAULT_PAIRED_NAMESPACES]),
-})
+export const Config: z<Config> = z.intersect([
+  WebServer.Config,
+  z.object({
+    networkPort: z.natural().max(65535).default(DEFAULT_NETWORK_PORT),
+    tlsCertPath: z.string(),
+    tlsKeyPath: z.string(),
+    publicPaths: z.array(String).default([...DEFAULT_PUBLIC_PATHS]),
+    publicPathExcludedSuffixes: z.array(String).default([...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]),
+    loopbackOnlyPaths: z.array(String).default([...DEFAULT_LOOPBACK_ONLY_PATHS]),
+    fallbackAdmission: z.union([z.const('public'), z.const('gated'), z.const('loopback-only')])
+      .default(DEFAULT_FALLBACK_ADMISSION),
+    apiPathPrefix: z.string().default(DEFAULT_API_PATH_PREFIX),
+    privilegedMethods: z.array(String).default([...DEFAULT_PRIVILEGED_METHODS]),
+    pairedNamespaces: z.array(String).default([...DEFAULT_PAIRED_NAMESPACES]),
+    pairedRoutes: z.array(String).default([...DEFAULT_PAIRED_ROUTES]),
+  }),
+])
 
 /**
- * Whether an `/api` endpoint stays pinned to a loopback peer. Dot-form API
- * Proxy methods are named individually; the Gateway's slash form is decided by
- * namespace, so a method added to an unlisted namespace inherits the pin rather
- * than defaulting to reachable.
- * @param endpoint - endpoint identity, either `method` or `namespace/method`.
+ * Whether an `/api` endpoint stays pinned to a loopback peer. An endpoint named
+ * in the privileged set is pinned outright; otherwise the Gateway's
+ * `namespace/method` form is decided by namespace, so a method added to an
+ * unlisted namespace inherits the pin rather than defaulting to reachable, and
+ * a namespace-less route — upstream's exact Fetch routes and `remote.mux` — is
+ * decided by name, on the same deny-by-default terms.
+ * @param endpoint - endpoint identity, either `name` or `namespace/method`.
  * @param authority - this deployment's classification; defaults to the shipped one.
  * @returns true when only a loopback peer may reach it.
  */
@@ -207,7 +300,71 @@ export function isPrivilegedEndpoint(
 ): boolean {
   if (authority.privilegedMethods.has(endpoint)) return true
   const separator = endpoint.indexOf('/')
-  return separator !== -1 && !authority.pairedNamespaces.has(endpoint.slice(0, separator))
+  if (separator === -1) return !authority.pairedRoutes.has(endpoint)
+  return !authority.pairedNamespaces.has(endpoint.slice(0, separator))
+}
+
+/** Whether a response header name is `Set-Cookie`, however it is cased. */
+function isSetCookie(name: string): boolean {
+  return name.toLowerCase() === 'set-cookie'
+}
+
+/** A header value as node's response setters accept it. */
+type HeaderValue = string | number | readonly string[]
+
+/** One cookie string, or each of several, marked `Secure` unless already so. */
+function secured<T extends HeaderValue | undefined>(value: T): T {
+  const mark = (cookie: string): string => /;\s*secure\s*(;|$)/i.test(cookie) ? cookie : `${cookie}; Secure`
+  if (typeof value === 'string') return mark(value) as T
+  if (Array.isArray(value)) return (value as readonly string[]).map(cookie => mark(String(cookie))) as unknown as T
+  return value
+}
+
+/**
+ * Mark every cookie a response sets over this carrier's TLS front `Secure`.
+ *
+ * Upstream's session cookie is `HttpOnly; SameSite=Strict` but not `Secure`,
+ * and a browser scopes cookies by host, not by port or scheme: a phone that
+ * later opened any `http://` address on this machine's IP — typed without the
+ * scheme, another service on the host, another device handed the same address
+ * — would send it in the clear, and one sniffed cookie is a month-long session.
+ * Marked here, it only ever travels inside TLS. A plaintext response, from the
+ * loopback listener, is left alone: a browser drops a `Secure` cookie set over
+ * http, which would sign the local tab out.
+ *
+ * Every header setter a route handler reaches goes through one of these three:
+ * `setHeaders` and a first `appendHeader` call `setHeader`, and implicit
+ * headers call `writeHead`. What this does not see is an upgrade handler's raw
+ * socket writes and `writeEarlyHints`; upstream sets its one cookie through
+ * `writeHead` on the fallback seat, and none on an upgrade.
+ * @param res - the response about to be handed to the route's owner.
+ */
+function secureCookiesOf(res: ServerResponse): void {
+  const setHeader = res.setHeader.bind(res)
+  res.setHeader = (name, value) => setHeader(name, isSetCookie(name) ? secured(value) : value)
+  const appendHeader = res.appendHeader.bind(res)
+  res.appendHeader = (name, value) => appendHeader(name, isSetCookie(name) ? secured(value) : value)
+  const writeHead = res.writeHead.bind(res) as (status: number, ...rest: unknown[]) => ServerResponse
+  res.writeHead = ((status: number, ...rest: unknown[]) => writeHead(status, ...rest.map((argument) => {
+    if (Array.isArray(argument)) {
+      // Node's raw forms, told apart the way node tells them apart: a list of
+      // [name, value] pairs, or one flat list of name, value, name, value…
+      if (Array.isArray(argument[0])) {
+        return (argument as unknown[][]).map(pair =>
+          pair.map((part, index) => index === 1 && isSetCookie(String(pair[0])) ? secured(part as HeaderValue) : part))
+      }
+      return argument.map((entry, index) =>
+        index % 2 === 1 && isSetCookie(String(argument[index - 1])) ? secured(entry as HeaderValue) : entry)
+    }
+    if (typeof argument !== 'object' || argument === null) return argument
+    return Object.fromEntries(Object.entries(argument as OutgoingHttpHeaders)
+      .map(([name, value]) => [name, isSetCookie(name) ? secured(value) : value]))
+  }))) as ServerResponse['writeHead']
+}
+
+/** Whether a request arrived through this carrier's TLS front. */
+function overTls(req: IncomingMessage): boolean {
+  return (req.socket as Partial<TLSSocket>).encrypted === true
 }
 
 /**
@@ -253,7 +410,7 @@ const WRAPPED_REGISTRARS: readonly string[] = ['register', 'registerUpgrade', 'r
  * frontend to the network ungated for a whole release: overriding some of the
  * seats looks identical, from inside, to overriding all of them. A seat added
  * upstream must therefore break the load rather than quietly widen what is
- * reachable without a token.
+ * reachable without a session.
  *
  * The search covers the whole prototype chain, because a seat moved down into a
  * shared base class is still a seat; inspecting one level would have called
@@ -303,6 +460,25 @@ function decodedPathname(pathname: string): string | undefined {
   }
 }
 
+/**
+ * The name a file owner behind the gate actually opens for a decoded pathname,
+ * for matching {@link Config.publicPathExcludedSuffixes}, or undefined when it
+ * cannot be pinned down.
+ *
+ * `dsh-host-frontend-static` resolves `join(distRoot, decoded)`, and
+ * `path.resolve` drops a trailing separator and collapses `.` segments, so
+ * `index.js.map/` opens the map a bare suffix test calls something else. The
+ * filesystems add their own aliases: case, and on Windows trailing dots and
+ * spaces, a backslash separator, and an NTFS stream (`index.js.map::$DATA`).
+ * A colon has no business in a static asset's path, so one is refused rather
+ * than enumerated.
+ * @param decoded - the decoded pathname.
+ */
+function openedName(decoded: string): string | undefined {
+  if (decoded.includes(':')) return undefined
+  return posix.normalize(decoded.replaceAll('\\', '/')).replace(/[/. ]+$/, '').toLowerCase()
+}
+
 export class GatedWebServer extends WebServer {
   static override Config: z<Config> = Config
 
@@ -315,31 +491,37 @@ export class GatedWebServer extends WebServer {
   private readonly authority: EndpointAuthority
   /** Route paths some row actually claimed, for the drift warning below. */
   private readonly claimedPaths = new Set<string>()
-  /** Resolved before the socket binds, so no request can arrive while it is still undefined. */
-  private token: string | undefined
+  private readonly networkPortConfigured: number
   private tls: TlsServer | undefined
   private tlsPort: number | undefined
+  private fingerprint: string | undefined
 
   constructor(ctx: Context, config: Config) {
     assertRegistrarsWrapped()
-    // With TLS the inherited server must not own the public port: this class
-    // binds it and forwards decrypted sockets, so the parent gets an ephemeral
-    // loopback socket whose only role is to route what TLS hands it.
+    // The inherited server is always the loopback listener on the configured
+    // port — the one every local URL names — and never sees the network: under
+    // TLS this class binds the network port itself and forwards decrypted
+    // sockets to it. Every other inherited field, compression among them,
+    // passes through.
+    super(ctx, { ...config, host: '127.0.0.1' })
     const servesTls = config.tlsCertPath !== undefined && config.tlsKeyPath !== undefined
-    super(ctx, servesTls ? { host: '127.0.0.1', port: 0 } : { host: config.host, port: config.port })
-    if (config.pairingToken !== undefined) {
-      if (config.pairingTokenEnv !== undefined) {
-        throw new Error('lanyard: configure either pairingTokenEnv or pairingToken, not both')
-      }
-      assertPairingToken(config.pairingToken)
-    }
     if ((config.tlsCertPath === undefined) !== (config.tlsKeyPath === undefined)) {
       throw new Error('lanyard: tlsCertPath and tlsKeyPath must be configured together')
     }
-    if (config.host === '0.0.0.0' && config.pairingToken === undefined && config.pairingTokenEnv === undefined) {
+    if (config.host === '0.0.0.0' && !servesTls) {
       throw new Error(
-        'lanyard: an all-interfaces bind requires a pairing token, because the /api surface runs commands as this process; '
-        + GENERATE_TOKEN_HINT,
+        'lanyard: an all-interfaces bind requires TLS material (tlsCertPath and tlsKeyPath), because the launch token '
+        + 'and the session cookie that authenticate a device would otherwise cross the network in plaintext',
+      )
+    }
+    this.networkPortConfigured = config.networkPort ?? DEFAULT_NETWORK_PORT
+    // Loopback on one port and every interface on the same one collide on
+    // Linux, and a port shared by plaintext and TLS is neither; zero asks the
+    // OS for two different ports, so only an explicit clash is refused.
+    if (servesTls && config.port !== 0 && config.port === this.networkPortConfigured) {
+      throw new Error(
+        `lanyard: port and networkPort are both ${String(config.port)}; this machine's plaintext listener and the `
+        + 'TLS front devices reach need a port each',
       )
     }
     this.gate = config
@@ -351,6 +533,7 @@ export class GatedWebServer extends WebServer {
     this.authority = {
       privilegedMethods: new Set(config.privilegedMethods ?? DEFAULT_PRIVILEGED_METHODS),
       pairedNamespaces: new Set(config.pairedNamespaces ?? DEFAULT_PAIRED_NAMESPACES),
+      pairedRoutes: new Set(config.pairedRoutes ?? DEFAULT_PAIRED_ROUTES),
     }
   }
 
@@ -364,7 +547,7 @@ export class GatedWebServer extends WebServer {
       // A prefix that matches nothing makes every endpoint read as
       // unprivileged, so the configuration plane stops being pinned.
       { path: this.apiPathPrefix, failsOpen: true },
-      // A pin that matches nothing leaves the route merely token-gated.
+      // A pin that matches nothing leaves the route merely session-gated.
       ...this.loopbackOnlyPaths.map(path => ({ path, failsOpen: true })),
       // A public path that matches nothing only refuses more than intended.
       ...this.publicPaths.map(path => ({ path, failsOpen: false })),
@@ -391,12 +574,11 @@ export class GatedWebServer extends WebServer {
    * `http://127.0.0.1:${port}` for the browser handoff, the `DSH_WEB_URL` shell
    * variable, and the URL it tells the model it is serving.
    *
-   * Under TLS that is the inherited server, which binds an ephemeral loopback
-   * port in plaintext while this class terminates TLS in front of it. Reporting
-   * the TLS port here instead pointed all three at an https listener over http,
-   * so the handoff opened a browser on a connection error. Nothing is newly
-   * reachable: the inherited listener is loopback-only, and a loopback peer is
-   * exempt from admission anyway.
+   * That is always the inherited plaintext server on the configured port,
+   * bound to loopback. Reporting the TLS port here instead pointed all three at
+   * an https listener over http, so the handoff opened a browser on a
+   * connection error; and because the port is the configured one rather than
+   * one the OS picked, a bookmark survives a restart.
    */
   override get port(): number {
     return super.port
@@ -426,11 +608,18 @@ export class GatedWebServer extends WebServer {
     return this.tls === undefined ? 'http' : 'https'
   }
 
-  /** Resolve the pairing token, listen, and add the TLS frontend when material is configured. */
+  /**
+   * SHA-256 fingerprint of the certificate the TLS front presents, as a phone
+   * shows it before accepting; undefined while no TLS front listens. The
+   * certificate is self-signed, so this is the one thing a person can compare
+   * to know the warning they are accepting is this machine's.
+   */
+  get certificateFingerprint(): string | undefined {
+    return this.fingerprint
+  }
+
+  /** Listen, and add the TLS frontend when material is configured. */
   override async [Service.init](): Promise<void> {
-    // Before super(): resolution is async and admission is not, so the token
-    // must be in place before the socket that carries requests exists.
-    this.token = this.gate.pairingToken ?? await resolvePairingToken(this.ctx, this.gate.pairingTokenEnv)
     await super[Service.init]()
     // Consumers register during their own activation, so the claim set is only
     // complete once the tree has settled. A hand-built context has no Loader
@@ -443,16 +632,27 @@ export class GatedWebServer extends WebServer {
     if (tlsCertPath === undefined || tlsKeyPath === undefined) return
     const routed = assertServer((this as unknown as { server: unknown }).server)
     const [cert, key] = await Promise.all([readFile(tlsCertPath), readFile(tlsKeyPath)])
+    const fingerprint = new X509Certificate(cert).fingerprint256
     const tls = createTlsServer({ cert, key })
     // The decrypted TLSSocket keeps the underlying connection's remoteAddress,
     // so admission still reads the real peer rather than this process.
     tls.on('secureConnection', socket => { routed.emit('connection', socket) })
     tls.on('error', error => { this.ctx.logger.warn(error) })
     await new Promise<void>((resolve, reject) => {
-      tls.once('error', reject)
-      tls.listen(this.gate.port, this.gate.host, () => {
-        tls.off('error', reject)
+      const failed = (error: NodeJS.ErrnoException): void => {
+        reject(error.code === 'EADDRINUSE'
+          ? new Error(
+            `lanyard: port ${String(this.networkPortConfigured)} is already in use, so devices on your network cannot `
+            + 'reach this machine on it; pass --network-port to choose another, or --host 127.0.0.1 to serve this machine only',
+            { cause: error },
+          )
+          : error)
+      }
+      tls.once('error', failed)
+      tls.listen(this.networkPortConfigured, this.gate.host, () => {
+        tls.off('error', failed)
         this.tlsPort = (tls.address() as AddressInfo).port
+        this.fingerprint = fingerprint
         this.tls = tls
         resolve()
       })
@@ -461,12 +661,13 @@ export class GatedWebServer extends WebServer {
       await new Promise<void>((resolve) => { tls.close(() => { resolve() }) })
       this.tls = undefined
       this.tlsPort = undefined
+      this.fingerprint = undefined
     }, 'lanyard: TLS listener')
   }
 
   /**
-   * Posture configured for one named route path. Anything not named is gated,
-   * so a route added upstream is admitted no more freely than `/api` is.
+   * Posture configured for one named route path. Anything not named requires a
+   * session, so a route added upstream is admitted no more freely than `/api` is.
    * @param routePath - the path the owning row registered.
    */
   private posture(routePath: string): Admission {
@@ -477,7 +678,7 @@ export class GatedWebServer extends WebServer {
 
   /**
    * Whether a request may reach the handler occupying one seat.
-   * @param req - the inbound request, read for its token and its socket peer.
+   * @param req - the inbound request, read for its session and its socket peer.
    * @param admission - the seat's configured posture.
    */
   private permits(req: IncomingMessage, admission: Admission): boolean {
@@ -485,21 +686,27 @@ export class GatedWebServer extends WebServer {
     const raw = new URL(req.url ?? '/', 'http://x').pathname
     if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
     const decoded = decodedPathname(raw)
-    // A pathname whose escapes do not decode cannot be checked against the
-    // exclusions, so it never rides the public exemption.
-    const excluded = decoded === undefined
-      || this.publicPathExcludedSuffixes.some(suffix => decoded.endsWith(suffix))
+    // A pathname whose escapes do not decode, or whose opened name cannot be
+    // pinned down, cannot be checked against the exclusions, so it never
+    // rides the public exemption.
+    const opened = decoded === undefined ? undefined : openedName(decoded)
+    const excluded = opened === undefined
+      || this.publicPathExcludedSuffixes.some(suffix => opened.endsWith(suffix.toLowerCase()))
     if (admission === 'public' && !excluded) return true
-    if (!admit(req, this.token)) return false
+    // Looked up per request: Connection mounts after this carrier, since it
+    // registers its own routes here, and may be replaced while the carrier
+    // lives. Whatever the lookup finds, a network peer it cannot vouch for is
+    // refused.
+    if (!admit(req, this.ctx.get('connection'))) return false
     // Both readings are classified: upstream resolves the endpoint from the raw
     // pathname and rejects a `%` outright, but a version that starts decoding
-    // would otherwise turn `%2E` into a way to spell a pinned method unpinned.
+    // would otherwise turn `%2F` into a way to spell a pinned method unpinned.
     const readings = decoded === undefined || decoded === raw ? [raw] : [raw, decoded]
     const named = readings
       .map(reading => endpointOf(reading, this.apiPathPrefix))
       .filter(endpoint => endpoint !== undefined)
     if (named.length === 0) return true
-    // Pairing authenticates a device; the configuration plane additionally
+    // A session authenticates a device; the configuration plane additionally
     // requires being at the machine, so it never travels to a paired device.
     if (!named.some(endpoint => isPrivilegedEndpoint(endpoint, this.authority))) return true
     return isLoopbackAddress(req.socket.remoteAddress)
@@ -521,6 +728,7 @@ export class GatedWebServer extends WebServer {
           res.end(REFUSAL_BODY)
           return
         }
+        if (overTls(req)) secureCookiesOf(res)
         await inner(req, res)
       },
     })
@@ -542,7 +750,7 @@ export class GatedWebServer extends WebServer {
           // `end` rather than `write` + `destroy`: writes are queued, and
           // destroying discards whatever has not reached the kernel, so a
           // refused handshake could arrive as a bare connection reset. The
-          // marker distinguishing this gate from the Host fence behind it is
+          // marker distinguishing this gate from upstream's own refusal is
           // exactly what went missing.
           socket.end(`HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: ${String(REFUSAL_BODY.length)}\r\n\r\n${REFUSAL_BODY}`)
           return
@@ -567,6 +775,7 @@ export class GatedWebServer extends WebServer {
         res.end(REFUSAL_BODY)
         return
       }
+      if (overTls(req)) secureCookiesOf(res)
       await handler(req, res)
     })
   }

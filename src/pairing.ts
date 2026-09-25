@@ -1,28 +1,30 @@
 /**
- * The pairing surface: the browser half of the token exchange, and the line
- * that tells a person how to pair a device.
+ * The pairing line: the link, and its QR code, that a person opens once on the
+ * phone.
  *
- * The browser half is injected into the index document as an inline script (see
- * `./browser-auth.ts` for why that beats a client-plugin bundle here). The
- * pairing line is printed after the Loader settles, for the same reason the
- * shipped URL line is: it is a readiness signal, and a link to a server whose
- * `/api` owner has not mounted yet would be a lie.
+ * Pairing is upstream's own exchange. `dsh-client-connection` (0.1.2 and
+ * later) mints a launch token per process, and a browser that opens the root
+ * URL carrying it is redirected with a signed session cookie bound to the
+ * authority it used — so a device keeps its session across restarts until
+ * the cookie expires. What upstream cannot print is a link a phone can use:
+ * its own `dsh web:` line names the plaintext loopback listener, and under TLS
+ * its LAN address pairs that port with the machine's network address, which
+ * nothing answers. This row asks the same connection for the link at the port
+ * and scheme a device actually reaches.
  *
- * This row prints alongside the shipped `dsh web:` line rather than replacing
- * it — that line belongs to `@deepseek-ai/dsh-web-app`, which this plugin
- * deliberately leaves unmodified. The shipped line hardcodes `http://` and
- * omits the pairing fragment, so on a TLS deployment this row also names the
- * scheme actually being served.
+ * It prints alongside the shipped `dsh web:` line rather than replacing it —
+ * that line belongs to `@deepseek-ai/dsh-web-app`, which this plugin
+ * deliberately leaves unmodified — and after the Loader settles, for the same
+ * reason that line does: it is a readiness signal, and a link to a server
+ * whose `/api` owner has not mounted yet would be a lie.
  * @module
  */
 
+import { networkInterfaces } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import qrcodeTerminal from 'qrcode-terminal'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import { injectPairingBootstrap } from './browser-auth.ts'
-import { resolvePairingToken } from './credentials.ts'
-import { AUTH_FRAGMENT_PARAM } from './admission.ts'
 
 /**
  * The bind-dependent LAN snapshot `@deepseek-ai/dsh-web-app` provides. Read
@@ -35,49 +37,169 @@ interface WebRuntimeValues {
   lanAddresses: string[]
 }
 
+/**
+ * The part of upstream's `ctx.connection` that issues pairing links, read
+ * structurally for the same reason as {@link WebRuntimeValues}.
+ */
+export interface LaunchLinkIssuer {
+  /**
+   * @param baseUrl - the clean origin a device will open.
+   * @returns the same origin's root, carrying this process's launch token.
+   */
+  authenticatedUrl: (baseUrl: string) => string
+}
+
 /** The scheme a gated carrier answers; the shipped carrier has no such member. */
 interface SchemeAwareServer {
   scheme?: 'http' | 'https'
   port: number
-  /** The port a remote device reaches; `port` is loopback-only under TLS. */
+  /** The port a remote device reaches; `port` is this machine's loopback listener. */
   networkPort?: number
+  /** SHA-256 fingerprint of the certificate the TLS front presents. */
+  certificateFingerprint?: string
 }
 
 /** Stable Cordis plugin name. */
 export const name = 'lanyard-pairing'
 
-/** The carrier this row taps, and the bind-dependent LAN snapshot it reuses. */
-export const inject = ['webServer', 'webRuntime']
+/**
+ * The carrier this row reads the reachable port from, the bind-dependent LAN
+ * snapshot it announces, and the connection that issues the link.
+ */
+export const inject = ['webServer', 'webRuntime', 'connection']
 
-/** Plugin config: which token to publish, and whether to announce it. */
+/** Plugin config: whether to announce the pairing link, and how. */
 export interface Config {
-  /** Credential reference holding the pairing token; absent leaves the deployment loopback-only. */
-  pairingTokenEnv?: string
-  /** A literal pairing token, for a composition with no credentials seam. */
-  pairingToken?: string
   /** Print the pairing line once the tree has settled. */
   printPairingUrl: boolean
   /**
-   * Draw the pairing link as a QR code beneath it. The link carries a 24-byte
-   * token in its fragment, which is miserable to type on a phone keyboard;
-   * scanning is the point of this plugin's whole workflow.
+   * Draw the pairing link as a QR code beneath it. The link carries a 43-character
+   * launch token, which is miserable to type on a phone keyboard; scanning is
+   * the point of this plugin's whole workflow.
    */
   printPairingQr: boolean
 }
 
 export const Config: z<Config> = z.object({
-  pairingTokenEnv: z.string(),
-  pairingToken: z.string(),
   printPairingUrl: z.boolean().default(true),
   printPairingQr: z.boolean().default(true),
 })
 
-/** What the pairing line says for one bind, or undefined when there is nothing to pair. */
-export interface PairingAnnouncement {
-  /** Corrected local URL, present only when the shipped `dsh web:` line would name the wrong scheme. */
-  local?: string
-  /** The pairing link to open once on the other device. */
-  pair?: string
+/**
+ * Whether a service can issue pairing links. A connection that predates
+ * upstream's browser authentication cannot, and neither can whatever a rename
+ * upstream leaves behind.
+ * @param candidate - `ctx.connection`, whatever it holds.
+ */
+export function isLaunchLinkIssuer(candidate: unknown): candidate is LaunchLinkIssuer {
+  return typeof (candidate as Partial<LaunchLinkIssuer> | undefined)?.authenticatedUrl === 'function'
+}
+
+/**
+ * The pairing link for one bind.
+ * @param issuer - upstream's connection, which owns the launch token.
+ * @param scheme - the scheme the carrier actually answers.
+ * @param port - the port a device on the network reaches.
+ * @param lanAddress - the LAN literal to advertise, or undefined on a loopback bind.
+ * @returns the link, or undefined when there is no network address to pair over.
+ */
+export function pairingLink(
+  issuer: LaunchLinkIssuer, scheme: 'http' | 'https', port: number, lanAddress: string | undefined,
+): string | undefined {
+  if (lanAddress === undefined) return undefined
+  return issuer.authenticatedUrl(`${scheme}://${lanAddress}:${String(port)}/`)
+}
+
+/**
+ * Interfaces a phone can never share: container and virtual-machine bridges,
+ * which exist only inside this machine. Their addresses rank last, are never
+ * offered as an alternative link, and never become the pairing address.
+ *
+ * Linux names them by lowercase prefix, and macOS puts its virtual-machine NAT
+ * on `bridge100` and up (`bridge0` is Thunderbolt Bridge, a real link, and
+ * stays physical). Matched case-sensitively, so `veth` does not swallow
+ * Windows's `vEthernet`.
+ */
+const MACHINE_INTERNAL_INTERFACE = /^(?:docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge1\d\d)/
+
+/**
+ * Windows's friendly names for the same thing. Only the NAT switches are
+ * named: an external Hyper-V switch is also a `vEthernet (…)` adapter, but it
+ * carries the machine's real LAN address, so a name this pattern does not know
+ * stays physical rather than hiding the one network a phone can join.
+ */
+const MACHINE_INTERNAL_ADAPTER = /virtualbox|vmware|^vEthernet \((?:WSL|Default Switch|DockerNAT)/i
+
+/**
+ * Overlay networks — VPNs and mesh tunnels. A phone on the same overlay can
+ * reach them, so they are offered, but after the network the machine is
+ * physically on. The unanchored names are Windows adapters ("ZeroTier One
+ * [8056c2e21c000001]", "OpenVPN Wintun").
+ */
+const OVERLAY_INTERFACE = /^(utun|tun|tap|wg|zt|tailscale|ipsec|ppp)|zerotier|openvpn|wireguard|wintun|nordlynx/i
+
+/** How likely an IPv4 literal is to be the home network a phone shares: lower is likelier. */
+function rangeRank(address: string): number {
+  const [first, second] = address.split('.').map(Number) as [number, number]
+  if (first === 192 && second === 168) return 0
+  if (first === 10) return 1
+  if (first === 172 && second >= 16 && second <= 31) return 2
+  // Link-local means no DHCP server answered: the least likely to be shared.
+  if (first === 169 && second === 254) return 4
+  return 3
+}
+
+/** Where an address sits: on the machine's own network, an overlay, or a bridge inside the machine. */
+type InterfaceKind = 'physical' | 'overlay' | 'machine-internal'
+
+function interfaceKind(name: string | undefined): InterfaceKind {
+  if (name !== undefined && (MACHINE_INTERNAL_INTERFACE.test(name) || MACHINE_INTERNAL_ADAPTER.test(name))) return 'machine-internal'
+  if (name !== undefined && OVERLAY_INTERFACE.test(name)) return 'overlay'
+  return 'physical'
+}
+
+const KIND_RANK: Record<InterfaceKind, number> = { 'physical': 0, 'overlay': 1, 'machine-internal': 2 }
+
+/**
+ * Test hooks for the machine's interfaces; production never mutates them. The
+ * unit suite must not depend on which adapters the machine running it has.
+ */
+export const internals = { networkInterfaces }
+
+/** The addresses a pairing link could name, the likeliest first, and which of them a phone could use at all. */
+export interface RankedAddresses {
+  /** Every address, the one to pair over first. */
+  ranked: string[]
+  /** The addresses worth offering a phone: everything but machine-internal bridges. */
+  offered: string[]
+}
+
+/**
+ * Order the LAN literals a pairing link could name, most likely reachable from
+ * a phone first: the network the machine is physically on before overlays,
+ * overlays before bridges that exist only inside the machine, home-network
+ * ranges first within each, and interface order last.
+ *
+ * Upstream's snapshot lists every non-internal IPv4 in interface order, so on
+ * a machine running containers or a VPN its first entry can be an address no
+ * phone reaches — and the QR code names exactly one.
+ * @param addresses - the LAN literals the Host fence trusts, from `webRuntime`.
+ * @param interfaces - the machine's interfaces; this machine's by default.
+ */
+export function rankLanAddresses(
+  addresses: readonly string[], interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): RankedAddresses {
+  const nameOf = new Map<string, string>()
+  for (const [name, entries] of Object.entries(interfaces)) {
+    for (const entry of entries ?? []) if (entry.family === 'IPv4') nameOf.set(entry.address, name)
+  }
+  const ranked = addresses
+    .map((address, index) => ({ address, index, kind: interfaceKind(nameOf.get(address)), range: rangeRank(address) }))
+    .sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind] || a.range - b.range || a.index - b.index)
+  return {
+    ranked: ranked.map(candidate => candidate.address),
+    offered: ranked.filter(candidate => candidate.kind !== 'machine-internal').map(candidate => candidate.address),
+  }
 }
 
 /**
@@ -163,7 +285,7 @@ export function fitsTerminal(rendered: string, columns: number): boolean {
 
 /**
  * Render a pairing link as a QR code for the terminal.
- * @param link - the pairing URL to encode, token fragment included.
+ * @param link - the pairing URL to encode, launch token included.
  * @param colour - emit ANSI colours; false honours `NO_COLOR`.
  * @returns the rendered block, drawn with half-height characters.
  */
@@ -179,14 +301,6 @@ export function renderPairingQr(link: string, colour = true): Promise<string> {
 }
 
 /**
- * Whether to draw the QR code: asked for, and somewhere it can be read.
- *
- * Block characters piped into a log file are noise, and nobody scans a log
- * file, so a non-terminal stdout skips it while the link itself still prints.
- * @param wanted - the configured `printPairingQr`.
- * @param isTerminal - whether stdout is a TTY.
- */
-/**
  * Whether to emit ANSI colour, honouring `NO_COLOR`.
  *
  * https://no-color.org counts the variable as set only "when present and not an
@@ -201,57 +315,88 @@ export function wantsColour(value: string | undefined): boolean {
   return value === undefined || value === ''
 }
 
+/**
+ * Whether to draw the QR code: asked for, and somewhere it can be read.
+ *
+ * Block characters piped into a log file are noise, and nobody scans a log
+ * file, so a non-terminal stdout skips it while the link itself still prints.
+ * @param wanted - the configured `printPairingQr`.
+ * @param isTerminal - whether stdout is a TTY.
+ */
 export function shouldDrawQr(wanted: boolean, isTerminal: boolean): boolean {
   return wanted && isTerminal
 }
 
 /**
- * Compose the pairing announcement for one bind.
- * @param scheme - the scheme the carrier actually answers.
- * @param port - the port clients reach.
- * @param lanAddress - the LAN literal to advertise, or undefined on a loopback bind.
- * @param token - the resolved pairing token, or undefined on a tokenless deployment.
- * @returns the lines worth printing; every field is absent when there is nothing to add.
- */
-export function pairingAnnouncement(
-  scheme: 'http' | 'https', port: number, lanAddress: string | undefined, token: string | undefined,
-): PairingAnnouncement {
-  return {
-    // The shipped line hardcodes http://; naming the real scheme only helps
-    // when it is not the one already printed.
-    ...scheme === 'https' && { local: `${scheme}://127.0.0.1:${String(port)}` },
-    ...lanAddress !== undefined && token !== undefined
-      && { pair: `${scheme}://${lanAddress}:${String(port)}/#${AUTH_FRAGMENT_PARAM}=${token}` },
-  }
-}
-
-/**
- * Publish the browser half and announce the pairing link.
- * @param ctx - plugin context carrying the webServer and webRuntime services.
+ * Announce the pairing link once the tree has settled.
+ * @param ctx - plugin context carrying the webServer, webRuntime and connection services.
  * @param config - validated {@link Config}.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const token = config.pairingToken ?? await resolvePairingToken(ctx, config.pairingTokenEnv)
-  // Without a token there is nothing for the browser half to adopt, and no
-  // link to announce: the deployment serves loopback only.
-  if (token === undefined) return
-  ctx.effect(() => ctx.webServer.tapIndex(injectPairingBootstrap), 'lanyard: pairing bootstrap')
+  const issuer: unknown = ctx.get('connection')
+  // Without upstream's browser authentication there is no session for a device
+  // to hold, and the gate refuses every network peer it cannot vouch for. Fail
+  // the load now rather than print a link that could never work.
+  if (!isLaunchLinkIssuer(issuer)) {
+    throw new Error(
+      'lanyard: this dsh has no browser authentication to pair a device with; lanyard needs '
+      + 'dsh 0.1.5-rc.3 or later, whose ctx.connection issues launch-token links',
+    )
+  }
   if (!config.printPairingUrl) return
   const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
-  const lanAddress = runtime?.lanAddresses[0]
+  const { ranked, offered } = rankLanAddresses(runtime?.lanAddresses ?? [], internals.networkInterfaces())
+  // A loopback bind has no network address to pair over. A tunnelled device
+  // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
+  // `dsh web:` link like any local browser.
+  if (ranked.length === 0) return
+  // Only an address a phone could be on is worth a link and a code.
+  const lanAddress = offered[0]
   const announce = async (): Promise<void> => {
-    // `port` is what a loopback http client uses, which under TLS is the
-    // inherited plaintext listener — not somewhere a phone can reach. A gated
-    // carrier reports the reachable one separately; a shipped carrier has no
-    // such member and its single port is both.
-    const { scheme, port, networkPort } = ctx.webServer as unknown as SchemeAwareServer
-    const lines = pairingAnnouncement(scheme ?? 'http', networkPort ?? port, lanAddress, token)
-    if (lines.local !== undefined) console.log(`lanyard: serving TLS — the local URL is ${lines.local}`)
-    if (lines.pair === undefined) return
-    console.log(`lanyard: pair a device by opening ${lines.pair} once`)
+    // `port` is this machine's plaintext listener, bound to loopback — not
+    // somewhere a phone can reach; the gated carrier reports the TLS port as
+    // `networkPort`. A shipped carrier has neither that nor a scheme, and is
+    // refused just below.
+    const { scheme = 'http', port, networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
+    // A LAN address with a plaintext carrier means lanyard's is not the one
+    // serving — say, upstream renamed the row this bundle disables — so the
+    // network is meeting a carrier without this gate, over plaintext. A link
+    // printed now would carry the launch token across it in the clear.
+    if (scheme !== 'https') {
+      ctx.logger.error(
+        'lanyard: stop dsh now — it is serving your network without lanyard\'s TLS carrier or its gate. No pairing '
+        + 'link is printed, since it would carry the launch token in the clear; the bundle needs updating for this dsh version',
+      )
+      return
+    }
+    // Every address is a bridge inside this machine — Wi-Fi off, say, with
+    // Docker running. A code naming one would send the phone nowhere.
+    if (lanAddress === undefined) {
+      console.log(`lanyard: no network a phone can join — ${ranked.join(', ')} ${ranked.length === 1 ? 'is a container or virtual-machine bridge' : 'are container or virtual-machine bridges'} inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh`)
+      return
+    }
+    const reachable = networkPort ?? port
+    const link = pairingLink(issuer, scheme, reachable, lanAddress)
+    if (link === undefined) return
+    // The shipped line's `(LAN: …)` link pairs the plaintext loopback port with
+    // the LAN address and carries the launch token. Nothing answers it, so a
+    // passive listener learns nothing — but whoever impersonated this machine
+    // on the network would receive the token, so say not to open it.
+    console.log(`lanyard: serving your network over TLS on port ${String(reachable)} — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token`)
+    console.log(`lanyard: pair a device by opening ${link} once`)
+    // The code names one address; a phone on another of this machine's
+    // networks gets its own link rather than a guess to edit by hand.
+    for (const alternative of offered.filter(address => address !== lanAddress)) {
+      console.log(`lanyard: or, from a device on the ${alternative} network: ${String(pairingLink(issuer, scheme, reachable, alternative))}`)
+    }
+    // The certificate is self-signed, so the phone's warning is the only check
+    // there is; this is what makes it a check rather than a formality.
+    if (certificateFingerprint !== undefined) {
+      console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
+    }
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
-    const code = await renderPairingQr(lines.pair, wantsColour(process.env.NO_COLOR))
+    const code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))
     const columns = terminalColumns(process.stdout.columns)
     if (!fitsTerminal(code, columns)) {
       console.log(`lanyard: the code needs ${String(renderedWidth(code))} columns and this terminal has ${String(columns)}, so open the link above instead`)

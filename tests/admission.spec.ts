@@ -1,14 +1,19 @@
-/** Admission: peer classification, token presentation, and the privileged pin. */
+/** Admission: peer classification, deferring to upstream's session, and the privileged pin. */
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
-import { admit, assertPairingToken, isLoopbackAddress } from '../src/admission.ts'
+import { admit, isLoopbackAddress, isSessionAuthority } from '../src/admission.ts'
 import { isPrivilegedEndpoint } from '../src/webserver.ts'
 
-const TOKEN = 'pairing-token_0123456789-ab'
+const SESSION = 'dsh-auth-test=v1.valid'
 
 /** A request whose socket peer the kernel would have filled in. */
 function req(headers: Record<string, string>, remoteAddress?: string): IncomingMessage {
   return { headers, socket: { remoteAddress } } as unknown as IncomingMessage
+}
+
+/** Upstream's check as a stand-in: exactly one cookie is a session. */
+const upstream = {
+  requestRejection: (request: IncomingMessage): 401 | undefined => request.headers.cookie === SESSION ? undefined : 401,
 }
 
 describe('isLoopbackAddress', () => {
@@ -20,7 +25,7 @@ describe('isLoopbackAddress', () => {
 
   it('fails closed on every other spelling', () => {
     // Each denotes loopback to some resolver and none is a form node reports.
-    // Reading any of them as loopback would hand out the tokenless exemption.
+    // Reading any of them as loopback would hand out the session exemption.
     for (const a of [
       undefined, '', '192.168.1.5', '::ffff:192.168.1.5', '0.0.0.0',
       '::FFFF:127.0.0.1', '::ffff:7f00:1', '2130706433', '127.1',
@@ -32,98 +37,134 @@ describe('isLoopbackAddress', () => {
   })
 })
 
-describe('assertPairingToken', () => {
-  it('accepts the URL-, cookie-, and shell-safe alphabet at 16+ characters', () => {
-    expect(() => { assertPairingToken('A-Za-z0-9_-16chr') }).not.toThrow()
+describe('isSessionAuthority', () => {
+  it('recognises a connection that can check a session', () => {
+    expect(isSessionAuthority(upstream)).toBe(true)
   })
 
-  it.each([
-    ['too short', 'only15chars_ab-'],
-    ['cookie-breaking punctuation', 'token;with=bad,chars****'],
-    ['whitespace', 'token with spaces padding'],
-    ['non-ASCII', 'token-ünïcode-0123456789'],
-    ['empty', ''],
-  ])('rejects %s loudly', (_kind, token) => {
-    expect(() => { assertPairingToken(token) }).toThrow(/at least 16 characters/)
+  it('does not mistake anything else for one', () => {
+    // A connection from before upstream's browser authentication has no such
+    // member; neither does whatever a rename leaves behind.
+    for (const candidate of [undefined, null, {}, { requestRejection: 'nope' }, { admit: () => ({}) }]) {
+      expect([candidate, isSessionAuthority(candidate)]).toEqual([candidate, false])
+    }
   })
 })
 
 describe('admit', () => {
-  it('exempts a genuine loopback peer, with or without a configured token', () => {
-    expect(admit(req({}), TOKEN, )).toBe(false) // no peer at all is not loopback
-    expect(admit(req({}, '127.0.0.1'), TOKEN)).toBe(true)
-    expect(admit(req({}, '::1'), undefined)).toBe(true)
+  it('exempts a genuine loopback peer, whether or not a connection is mounted', () => {
+    expect(admit(req({}, '127.0.0.1'), undefined)).toBe(true)
+    expect(admit(req({}, '::1'), upstream)).toBe(true)
+    // No peer at all is not loopback.
+    expect(admit(req({}), undefined)).toBe(false)
+  })
+
+  it('admits a network peer upstream vouches for, and refuses one it does not', () => {
+    expect(admit(req({ cookie: SESSION }, '192.168.1.5'), upstream)).toBe(true)
+    expect(admit(req({}, '192.168.1.5'), upstream)).toBe(false)
+    expect(admit(req({ cookie: 'dsh-auth-test=v1.forged' }, '192.168.1.5'), upstream)).toBe(false)
+  })
+
+  it('refuses whichever status upstream refuses with', () => {
+    // 401 is a missing session, 403 the Host/Origin fence; either is a refusal.
+    for (const status of [401, 403] as const) {
+      expect([status, admit(req({ cookie: SESSION }, '192.168.1.5'), { requestRejection: () => status })])
+        .toEqual([status, false])
+    }
+  })
+
+  it('refuses every network peer while no connection can vouch for it', () => {
+    // Before Connection mounts, after it is disposed, and on a connection that
+    // predates browser authentication: fail closed, never open.
+    for (const authority of [undefined, {}, { requestRejection: undefined }]) {
+      expect(admit(req({ cookie: SESSION }, '192.168.1.5'), authority)).toBe(false)
+    }
   })
 
   it('refuses a non-loopback peer forging a loopback Host', () => {
     // The peer is what the kernel saw; Host is what the client claims. Deriving
-    // the exemption from the header would be a complete token bypass.
-    expect(admit(req({ host: '127.0.0.1:3080' }, '192.168.1.5'), TOKEN)).toBe(false)
-    expect(admit(req({ host: 'localhost:3080' }, '192.168.1.5'), TOKEN)).toBe(false)
+    // the exemption from the header would be a complete bypass.
+    expect(admit(req({ host: '127.0.0.1:3080' }, '192.168.1.5'), upstream)).toBe(false)
+    expect(admit(req({ host: 'localhost:3080' }, '192.168.1.5'), upstream)).toBe(false)
   })
 
-  it('admits either presentation form from a non-loopback peer', () => {
-    expect(admit(req({ cookie: `dsh_auth=${TOKEN}` }, '192.168.1.5'), TOKEN)).toBe(true)
-    expect(admit(req({ authorization: `Bearer ${TOKEN}` }, '192.168.1.5'), TOKEN)).toBe(true)
-    expect(admit(req({ cookie: `theme=dark; dsh_auth=${TOKEN} ; sid=1` }, '192.168.1.5'), TOKEN)).toBe(true)
-  })
-
-  it('refuses a non-loopback peer when no token is configured at all', () => {
-    expect(admit(req({ cookie: `dsh_auth=${TOKEN}` }, '192.168.1.5'), undefined)).toBe(false)
-  })
-
-  it.each([
-    ['a name the cookie name prefixes', `dsh_auth_extra=${TOKEN}`],
-    ['a name ending in the cookie name', `xdsh_auth=${TOKEN}`],
-    ['the token as another cookie value', `session=${TOKEN}`],
-    ['the token as a cookie name', `${TOKEN}=1`],
-    ['an empty pairing cookie', 'dsh_auth='],
-    ['a malformed pair', 'no-separator; other=1'],
-  ])('refuses %s', (_kind, cookie) => {
-    // The cookie name is compared whole: the parser bug that turns a substring
-    // test into an authentication bypass.
-    expect(admit(req({ cookie }, '192.168.1.5'), TOKEN)).toBe(false)
-  })
-
-  it('admits a valid pairing cookie sent alongside a stale one', () => {
-    expect(admit(req({ cookie: `dsh_auth=stale-token-0123456789; dsh_auth=${TOKEN}` }, '192.168.1.5'), TOKEN)).toBe(true)
-  })
-
-  it('refuses a wrong token and a different authorization scheme', () => {
-    expect(admit(req({ cookie: 'dsh_auth=wrong-token-0123456789' }, '192.168.1.5'), TOKEN)).toBe(false)
-    expect(admit(req({ authorization: `Basic ${TOKEN}` }, '192.168.1.5'), TOKEN)).toBe(false)
+  it('asks upstream as a method call, so a connection reading its own state still works', () => {
+    // HostConnectionService reads its trusted hosts and signing secret off
+    // `this`; a detached call would throw instead of deciding.
+    class Connection {
+      readonly #session = SESSION
+      requestRejection(request: IncomingMessage): 401 | undefined {
+        return request.headers.cookie === this.#session ? undefined : 401
+      }
+    }
+    expect(admit(req({ cookie: SESSION }, '192.168.1.5'), new Connection())).toBe(true)
   })
 })
 
 describe('isPrivilegedEndpoint', () => {
-  it('pins the configuration and native-desktop plane', () => {
-    for (const m of ['settings.describe', 'credentials.set', 'host.openPath', 'agentPreset.read', 'llm.discoverModels']) {
+  it('pins every namespace of the configuration plane', () => {
+    for (const m of [
+      'settings/describe', 'settings/update', 'credentials/describe', 'credentials/set',
+      'account/startSignIn', 'account/signOut', 'llm/discoverModels', 'llm/listProviders',
+      'pluginManager/installBundle', 'pluginRegistryProbe/fastest', 'pluginInventory/list',
+    ]) {
       expect([m, isPrivilegedEndpoint(m)]).toEqual([m, true])
     }
   })
 
-  it('leaves the session plane reachable for a paired device', () => {
-    for (const m of ['session.list', 'session.create', 'llm.providers', 'agentPreset.list', 'agentPreset.select']) {
+  it('pins what acts on this machine\'s desktop or reads an agent preset, inside namespaces a device may use', () => {
+    for (const m of [
+      'session/openWorkspacePath', 'directoryPicker/pick',
+      'agentPresets/read', 'agentPresets/copy', 'agentPresets/deletePreset',
+    ]) {
+      expect([m, isPrivilegedEndpoint(m)]).toEqual([m, true])
+    }
+  })
+
+  it('leaves everything the GUI needs to hold a session reachable for a paired device', () => {
+    for (const m of [
+      'session/list', 'session/create', 'session/prompt', 'session/follow', 'session/modelCatalog',
+      'session/uploadFileBinary', 'workspace/create', 'workspace/follow', 'workspaceFiles/read',
+      'directoryPicker/list', 'agentPresets/list', 'agentPresets/select', 'permissionPresets/catalog',
+      'commands/execute', 'goals/create', 'messageFeedback/put', 'sessionFeedback/record',
+      'job/kill', 'terminal/create', 'subagents/prompt', 'fileUploads/upload', 'skills/list',
+    ]) {
       expect([m, isPrivilegedEndpoint(m)]).toEqual([m, false])
     }
+  })
+
+  it('lets a paired device answer what the host asks it', () => {
+    // Tool approvals and the agent's questions arrive over `$events` and are
+    // answered here; pinning it strands the agent on a prompt the phone sees.
+    expect(isPrivilegedEndpoint('$events/result')).toBe(false)
   })
 
   it('pins every method of an unlisted Gateway namespace, including ones no list names', () => {
     // The Gateway claims any namespace/method a live remote service exposes, so
     // a per-method list would default each new endpoint to LAN-reachable.
     for (const m of [
-      'pluginInventory/list',
       'dynamicCordisRunner/inventory', 'dynamicCordisRunner/invoke',
       'dynamicCordisRunner/runHostHalf', 'dynamicCordisRunner/aMethodAddedLater',
-      'somethingUnclassified/read',
+      'speech/transcribe', 'somethingUnclassified/read',
     ]) {
       expect([m, isPrivilegedEndpoint(m)]).toEqual([m, true])
     }
   })
 
-  it('lets the session-content namespaces through', () => {
-    for (const m of ['commands/execute', 'goals/create', 'messageFeedback/put']) {
-      expect([m, isPrivilegedEndpoint(m)]).toEqual([m, false])
+  it('leaves the exact routes the session views read reachable', () => {
+    // Upstream registers these beside the Gateway, with no namespace: the
+    // stream WebSocket, chat images and previews, export, and the change views.
+    for (const route of ['remote.mux', 'file', 'session.export', 'present.host', 'changes.summary', 'changes.diff']) {
+      expect([route, isPrivilegedEndpoint(route)]).toEqual([route, false])
+    }
+  })
+
+  it('pins every other exact route, the desktop openers and ones no list names alike', () => {
+    // `present.open` and `changes.open` open a file with this machine's own
+    // applications. An exact route is decided by name on the same terms as a
+    // namespace, so one added upstream is pinned rather than reachable.
+    for (const route of ['present.open', 'changes.open', 'someRouteAddedLater', 'remote.mux2']) {
+      expect([route, isPrivilegedEndpoint(route)]).toEqual([route, true])
     }
   })
 })

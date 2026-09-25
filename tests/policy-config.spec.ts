@@ -3,7 +3,7 @@
  *
  * Every route path this plugin keys on belongs to a client-side package —
  * `API_PATH` (`dsh-client-connection`), `EVENTS_ENDPOINT` (`dsh-client-hmr`),
- * the bundle prefix (`dsh-client-modules`). A deployment must be able to
+ * the open route (`dsh-host-open-in-app`). A deployment must be able to
  * restate them, and a stale value must be visible rather than silently
  * widening what the LAN can reach.
  */
@@ -13,14 +13,23 @@ import { Context } from '@deepseek-ai/cordis'
 import WebServer, { type WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import {
   GatedWebServer, isPrivilegedEndpoint,
-  DEFAULT_ENDPOINT_AUTHORITY, DEFAULT_LOOPBACK_ONLY_PATHS, DEFAULT_PAIRED_NAMESPACES,
+  DEFAULT_ENDPOINT_AUTHORITY, DEFAULT_LOOPBACK_ONLY_PATHS, DEFAULT_PAIRED_NAMESPACES, DEFAULT_PUBLIC_PATHS,
   type Config as GateConfig,
 } from '../src/webserver.ts'
 
-const TOKEN = 'pairing-token_0123456789-ab'
+const SESSION = 'dsh-auth-test=v1.valid'
 const LAN = '192.168.1.5'
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
+
+/** A context whose stand-in connection admits exactly one cookie. */
+function withSession(): Context {
+  const context = new Context()
+  context.provide('connection', {
+    requestRejection: (request: IncomingMessage) => request.headers.cookie === SESSION ? undefined : 401,
+  })
+  return context
+}
 
 /** The response facts a wrapped handler wrote. */
 function response(): ServerResponse & { status: number } {
@@ -45,8 +54,8 @@ Promise<WebRoute['handler']> {
     captured.push(entry)
     return () => {}
   })
-  ctx = new Context()
-  await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN, ...config } as GateConfig).await()
+  ctx = withSession()
+  await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, ...config } as GateConfig).await()
   const server = ctx.get('webServer') as GatedWebServer
   server.register({ kind: route.kind ?? 'prefix', path: route.path, handler: (_q, res) => { res.writeHead(200); res.end() } })
   spy.mockRestore()
@@ -55,10 +64,10 @@ Promise<WebRoute['handler']> {
   return entry.handler
 }
 
-/** Status a paired (token-presenting) LAN device gets for one request. */
+/** Status a paired (session-holding) LAN device gets for one request. */
 async function pairedStatus(handler: WebRoute['handler'], url: string): Promise<number> {
   const res = response()
-  await handler(req(url, LAN, { cookie: `dsh_auth=${TOKEN}` }), res)
+  await handler(req(url, LAN, { cookie: SESSION }), res)
   return res.status
 }
 
@@ -67,20 +76,21 @@ describe('the api prefix is configuration, not a constant', () => {
     // Hardcoding '/api' would make every endpoint under a moved prefix read as
     // unprivileged — the pin would fail open, silently.
     const handler = await gatedHandler({ apiPathPrefix: '/rpc' }, { path: '/rpc' })
-    expect(await pairedStatus(handler, '/rpc/settings.update')).toBe(403)
-    expect(await pairedStatus(handler, '/rpc/session.list')).toBe(200)
+    expect(await pairedStatus(handler, '/rpc/settings/update')).toBe(403)
+    expect(await pairedStatus(handler, '/rpc/session/list')).toBe(200)
   })
 
   it('defaults to the prefix dsh-client-connection registers', async () => {
     const handler = await gatedHandler({}, { path: '/api' })
-    expect(await pairedStatus(handler, '/api/settings.update')).toBe(403)
+    expect(await pairedStatus(handler, '/api/settings/update')).toBe(403)
+    expect(await pairedStatus(handler, '/api/session/list')).toBe(200)
   })
 })
 
 describe('endpoint authority is per deployment, and denies by default', () => {
   it('reaches a namespace this deployment classified as pairable', () => {
     const authority = {
-      privilegedMethods: DEFAULT_ENDPOINT_AUTHORITY.privilegedMethods,
+      ...DEFAULT_ENDPOINT_AUTHORITY,
       pairedNamespaces: new Set([...DEFAULT_PAIRED_NAMESPACES, 'myPlugin']),
     }
     expect(isPrivilegedEndpoint('myPlugin/read', authority)).toBe(false)
@@ -89,16 +99,29 @@ describe('endpoint authority is per deployment, and denies by default', () => {
   })
 
   it('pins a method this deployment added to the privileged set', async () => {
-    const handler = await gatedHandler(
-      { privilegedMethods: ['session.create'] }, { path: '/api' },
-    )
-    expect(await pairedStatus(handler, '/api/session.create')).toBe(403)
+    const handler = await gatedHandler({ privilegedMethods: ['session/create'] }, { path: '/api' })
+    expect(await pairedStatus(handler, '/api/session/create')).toBe(403)
+    expect(await pairedStatus(handler, '/api/session/list')).toBe(200)
   })
 
   it('still denies an unclassified namespace when a deployment names its own list', async () => {
     const handler = await gatedHandler({ pairedNamespaces: ['commands'] }, { path: '/api' })
     expect(await pairedStatus(handler, '/api/commands/execute')).toBe(200)
     expect(await pairedStatus(handler, '/api/goals/create')).toBe(403)
+  })
+
+  it('decides exact routes by name, reaching the previews and pinning the desktop openers', async () => {
+    const handler = await gatedHandler({}, { path: '/api' })
+    expect(await pairedStatus(handler, '/api/file')).toBe(200)
+    expect(await pairedStatus(handler, '/api/present.open')).toBe(403)
+  })
+
+  it('takes a deployment\'s own list of exact routes in place of the shipped one', async () => {
+    // What it names is reachable; everything it left out, the shipped entries
+    // included, is pinned.
+    const handler = await gatedHandler({ pairedRoutes: ['present.open'] }, { path: '/api' })
+    expect(await pairedStatus(handler, '/api/present.open')).toBe(200)
+    expect(await pairedStatus(handler, '/api/file')).toBe(403)
   })
 })
 
@@ -111,8 +134,14 @@ describe('pinned and public paths are configuration', () => {
     expect(local.status).toBe(200)
   })
 
-  it('defaults to the endpoint dsh-client-hmr registers', () => {
-    expect(DEFAULT_LOOPBACK_ONLY_PATHS).toEqual(['/plugins/events'])
+  it('defaults to the routes dsh-client-hmr and dsh-host-open-in-app register', () => {
+    expect(DEFAULT_LOOPBACK_ONLY_PATHS).toEqual(['/plugins/events', '/open-in-app/open'])
+  })
+
+  it('exempts no named route by default', () => {
+    // The session exists before the first page load, so nothing the page
+    // fetches afterwards has a reason to be anonymous.
+    expect(DEFAULT_PUBLIC_PATHS).toEqual([])
   })
 
   it('excludes the suffixes this deployment names from its public paths', async () => {
@@ -137,11 +166,11 @@ describe('a configured path nothing claimed', () => {
     settle: () => Promise<void>
     warnings: string[]
   }> {
-    ctx = new Context()
+    ctx = withSession()
     let release = (): void => {}
     const settled = new Promise<void>((resolve) => { release = resolve })
     ctx.provide('loader', { await: () => settled })
-    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN, ...config } as GateConfig).await()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, ...config } as GateConfig).await()
     const server = ctx.get('webServer') as GatedWebServer
     const warnings: string[] = []
     vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => {
@@ -151,30 +180,32 @@ describe('a configured path nothing claimed', () => {
   }
 
   it('is reported once the tree settles, naming the ones that fail open', async () => {
-    const { settle, warnings } = await mountWithLoader({})
+    const { settle, warnings } = await mountWithLoader({ publicPaths: ['/bundles'] })
     await settle()
     // Nothing registered at all, so every configured path is unclaimed.
-    expect(warnings.some(line => line.includes('"/api"') && line.includes('less guarded than intended'))).toBe(true)
-    expect(warnings.some(line => line.includes('"/plugins/events"') && line.includes('less guarded than intended'))).toBe(true)
+    for (const path of ['/api', '/plugins/events', '/open-in-app/open']) {
+      expect([path, warnings.some(line => line.includes(`"${path}"`) && line.includes('less guarded than intended'))])
+        .toEqual([path, true])
+    }
     // A public path that matches nothing only refuses more than intended.
-    expect(warnings.some(line => line.includes('"/plugins"') && !line.includes('less guarded'))).toBe(true)
+    expect(warnings.some(line => line.includes('"/bundles"') && !line.includes('less guarded'))).toBe(true)
   })
 
   it('stays quiet when every configured path was claimed', async () => {
     const { server, settle, warnings } = await mountWithLoader({})
-    for (const path of ['/api', '/plugins']) {
-      server.register({ kind: 'prefix', path, handler: (_q, res) => { res.writeHead(200); res.end() } })
+    server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => { res.writeHead(200); res.end() } })
+    for (const path of ['/plugins/events', '/open-in-app/open']) {
+      server.register({ kind: 'exact', path, handler: (_q, res) => { res.writeHead(200); res.end() } })
     }
-    server.register({ kind: 'exact', path: '/plugins/events', handler: (_q, res) => { res.writeHead(200); res.end() } })
     await settle()
     expect(warnings).toEqual([])
   })
 
   it('says nothing in a hand-built context, which has no settle point', async () => {
-    ctx = new Context()
+    ctx = withSession()
     const warnings: string[] = []
     vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
-    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, pairingToken: TOKEN }).await()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0 }).await()
     await Promise.resolve()
     expect(warnings).toEqual([])
   })

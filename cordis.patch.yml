@@ -1,20 +1,21 @@
-# lanyard — secure LAN access for the dsh web GUI.
+# lanyard — your own network for the dsh web GUI, over TLS.
 #
 # This layer changes no harness source. It replaces two rows and adds three:
 # the command-line provider (which upstream uses to refuse `--host 0.0.0.0`)
-# and the HTTP carrier (which becomes a subclass that wraps every route
-# registration with pairing-token admission and terminates TLS in front of the
-# inherited server). Every other row — dsh-client-connection above all — keeps
-# running unmodified, because each registers its routes through ctx.webServer
-# and therefore passes through the gate.
+# and the HTTP carrier (which becomes a subclass that terminates TLS in front
+# of the inherited server and puts upstream's own browser session in front of
+# every route a network peer reaches). Every other row — dsh-client-connection
+# above all — keeps running unmodified: it still authenticates its own routes,
+# and each registers them through ctx.webServer and so passes the gate too.
 #
 # A patch replaces the targeted row's whole `config`, so each row below
 # restates every key it owns.
 
-# The stock command-line provider refuses --host 0.0.0.0 outright, because
-# without authentication that bind hands remote code execution to the network.
-# lanyard supplies the authentication, so its provider takes the seat and
-# replaces the refusal with the condition that makes the bind safe.
+# The stock command-line provider refuses --host 0.0.0.0 outright. Upstream now
+# authenticates every browser itself; what a network bind still lacks is TLS
+# and a configuration plane that stays at the machine, which the carrier below
+# supplies — so this provider takes the seat and lifts the refusal, and the
+# carrier refuses an all-interfaces bind that has no TLS material.
 - id: web-startup
   disabled: true
 
@@ -39,14 +40,21 @@
         dir: !!js dshHomePath('lanyard-tls')
 
     # The gated carrier. It provides `webServer`, so every consumer that injects
-    # that service reaches this one instead of the disabled row above.
+    # that service reaches this one instead of the disabled row above. `port`
+    # stays this machine's plaintext listener, exactly as the stock row binds
+    # it; devices on the network reach the TLS front on `networkPort`. The
+    # compression keys restate the disabled row's own, which a replacement
+    # would otherwise silently drop.
     - id: lanyard-webserver
       name: '@koalafacts/deepseek-harness-lanyard/webserver'
-      inject: [webStartup, lanyardTls, credentials]
+      inject: [webStartup, lanyardTls]
       config:
         host: !!js ctx.webStartup.host ?? '127.0.0.1'
         port: !!js ctx.webStartup.port ?? 3080
-        pairingTokenEnv: !!js ctx.webStartup.pairingTokenEnv
+        networkPort: !!js ctx.webStartup.networkPort ?? 3443
+        compression: gzip
+        compressionLevel: 1
+        compressionThresholdBytes: 1024
         tlsCertPath: !!js ctx.lanyardTls.paths?.certPath
         tlsKeyPath: !!js ctx.lanyardTls.paths?.keyPath
 
@@ -60,12 +68,12 @@
       config:
         enabled: !!js ctx.webStartup.keepAwake === true
 
-    # The browser half of the pairing exchange plus the pairing line. It injects
-    # webRuntime, so it activates after the bind-dependent LAN snapshot the
-    # shipped URL line uses — and announces the same one.
+    # The pairing line: upstream's launch-token link at the address and port a
+    # device actually reaches, plus its QR code. It injects webRuntime, so it
+    # activates after the bind-dependent LAN snapshot the shipped URL line uses
+    # — and announces the same one — and connection, which owns the token.
     - id: lanyard-pairing
       name: '@koalafacts/deepseek-harness-lanyard/pairing'
-      inject: [webServer, webRuntime, webStartup, credentials]
+      inject: [webServer, webRuntime, connection]
       config:
-        pairingTokenEnv: !!js ctx.webStartup.pairingTokenEnv
         printPairingUrl: true

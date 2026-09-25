@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Keep awake",
+    "description": "With --keep-awake, stops the machine from sleeping while dsh serves your phone"
+  }
+}

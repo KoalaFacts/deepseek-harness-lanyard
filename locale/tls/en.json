@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "TLS certificate",
+    "description": "Creates a self-signed certificate and reuses it across restarts, so a paired phone is not asked to trust a new one each time"
+  }
+}

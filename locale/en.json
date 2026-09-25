@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Lanyard — phone access",
+    "description": "Use dsh from your phone on your own network: scan a code once, over TLS, behind dsh's own sign-in"
+  }
+}
