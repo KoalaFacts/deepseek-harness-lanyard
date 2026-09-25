@@ -59,10 +59,12 @@ jobs:
         run: npm run test:e2e:browser
 
   contract:
-    # The unit suite checks the webStartup contract against whatever the
-    # lockfile resolved, which goes stale. Here it runs against upstream's
-    # current prerelease line — for the library packages that is `next`, since
-    # they leave `latest` on an abandoned 0.0.1 build.
+    # The unit suite checks three upstream contracts against whatever the
+    # lockfile resolved, which goes stale: the rows this plugin replaces
+    # (dsh-web-app), the carrier it subclasses (dsh-host-webserver), and the
+    # browser session it defers to (dsh-client-connection). Here it runs against
+    # upstream's current prerelease line — for the library packages that is
+    # `next`, since they leave `latest` on an abandoned 0.0.1 build.
     name: row contract (next bundle)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -77,8 +79,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
-      - name: Install the current web-app bundle over the lockfile pin
-        run: pnpm add -D @deepseek-ai/dsh-web-app@next
+      - name: Install the current contract packages over the lockfile pins
+        run: pnpm add -D @deepseek-ai/dsh-web-app@next @deepseek-ai/dsh-host-webserver@next @deepseek-ai/dsh-client-connection@next
 
       - run: npm run test
 
