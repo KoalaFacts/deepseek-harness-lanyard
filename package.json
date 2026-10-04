@@ -125,13 +125,13 @@
     "@deepseek-ai/dsh-subprocess": "^0.1.5-rc.3",
     "@deepseek-ai/dsh-web-app": "0.1.5-rc.3",
     "@deepseek-ai/schemastery": "^3.18.2",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/semver": "^7.8.0",
     "jsqr": "^1.4.0",
     "playwright": "^1.63.0",
     "semver": "^7.8.5",
     "typescript": "~7.0.2",
-    "vitest": "^5.0.1",
+    "vitest": "^5.0.3",
     "yaml": "^2.9.1"
   },
   "engines": {
