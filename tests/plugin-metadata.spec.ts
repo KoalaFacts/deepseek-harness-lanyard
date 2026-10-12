@@ -116,11 +116,12 @@ describe('whether dsh admits it', () => {
     for (const [name, range] of dshPeers) expect([name, installed, admits(range, installed)]).toEqual([name, installed, true])
   })
 
-  it('does not admit the next minor line\'s prereleases', () => {
-    // Prereleases take part in dsh's matching, so `<0.3.0` would admit
-    // 0.3.0-rc.1 — a line nothing here has been run against.
+  it('sets no upper bound, so an upstream version jump never locks it out', () => {
+    // dsh is pre-1.0 and jumps lines often. A cap would make dsh refuse to
+    // install or load this bundle on every jump; the suites track upstream's
+    // newest release instead, and the load-time guards catch structural drift.
     for (const [name, range] of dshPeers) {
-      expect([name, admits(range, '0.3.0-rc.1'), admits(range, '0.3.0')]).toEqual([name, false, false])
+      expect([name, admits(range, '0.9.0-rc.1'), admits(range, '9.0.0')]).toEqual([name, true, true])
     }
   })
 })
