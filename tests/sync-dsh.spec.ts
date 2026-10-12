@@ -3,12 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { drift, syncedRange } from '../scripts/sync-dsh.ts'
 
 describe('syncing to dsh@latest', () => {
-  it('keeps an exact pin exact, because the contract tests read the installed copy', () => {
-    expect(syncedRange('0.2.0-rc.2', '0.3.0-rc.1')).toBe('0.3.0-rc.1')
-  })
-
-  it('keeps a caret range a caret range', () => {
-    expect(syncedRange('^0.2.0-rc.2', '0.3.0-rc.1')).toBe('^0.3.0-rc.1')
+  it('pins exactly, since a caret range would admit a later prerelease from next', () => {
+    expect(syncedRange('0.3.0-rc.1')).toBe('0.3.0-rc.1')
   })
 
   it('moves every lockstep package, the CLI included, and nothing else', () => {
@@ -22,7 +18,8 @@ describe('syncing to dsh@latest', () => {
     }, '0.3.0-rc.1')).toEqual([
       { name: '@deepseek-ai/dsh', from: '0.2.0-rc.2', to: '0.3.0-rc.1' },
       { name: '@deepseek-ai/dsh-web-app', from: '0.2.0-rc.2', to: '0.3.0-rc.1' },
-      { name: '@deepseek-ai/dsh-cmdline', from: '^0.2.0-rc.2', to: '^0.3.0-rc.1' },
+      { name: '@deepseek-ai/dsh-cmdline', from: '^0.2.0-rc.2', to: '0.3.0-rc.1' },
+      { name: '@deepseek-ai/dsh-subprocess', from: '^0.3.0-rc.1', to: '0.3.0-rc.1' },
     ])
   })
 })

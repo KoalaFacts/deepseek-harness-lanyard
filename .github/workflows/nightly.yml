@@ -82,7 +82,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Install the current contract packages over the lockfile pins
-        run: pnpm add -D @deepseek-ai/dsh@next @deepseek-ai/dsh-web-app@next @deepseek-ai/dsh-host-webserver@next @deepseek-ai/dsh-client-connection@next
+        # Exits 2, SKIPPED, while upstream's publish wave is incomplete.
+        run: node scripts/install-next.ts
 
       - run: npm run test
 

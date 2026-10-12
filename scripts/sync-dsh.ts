@@ -34,15 +34,15 @@ function inLockstep(name: string): boolean {
 }
 
 /**
- * The range a devDependency should name for `version`, keeping its form: an
- * exact pin stays exact (the contract tests read the installed copy, so what
- * they prove must not float), a caret range stays a caret range.
- * @param current - the range package.json names today.
+ * The range a devDependency should name for `version`: always exact. A caret
+ * range would admit a later prerelease — `^0.2.0-rc.2` takes `0.2.0-rc.3` from
+ * `next` while `latest` still names rc.2 — so an install could mix release
+ * lines while the range strings still read as tracking `latest`.
  * @param version - the release to track.
  * @returns the range to write.
  */
-export function syncedRange(current: string, version: string): string {
-  return current.startsWith('^') ? `^${version}` : version
+export function syncedRange(version: string): string {
+  return version
 }
 
 /**
@@ -54,7 +54,7 @@ export function syncedRange(current: string, version: string): string {
 export function drift(devDependencies: Record<string, string>, version: string): Array<{ name: string; from: string; to: string }> {
   return Object.entries(devDependencies)
     .filter(([name]) => inLockstep(name))
-    .map(([name, from]) => ({ name, from, to: syncedRange(from, version) }))
+    .map(([name, from]) => ({ name, from, to: syncedRange(version) }))
     .filter(({ from, to }) => from !== to)
 }
 
