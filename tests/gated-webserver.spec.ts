@@ -47,8 +47,8 @@ function withSession(): Context {
 }
 
 /** A throwaway self-signed pair on disk, as the tls row would have produced. */
-function certificateFiles(): { certPath: string; keyPath: string; ca: string } {
-  const pems = generate([{ name: 'commonName', value: 'dsh' }], {
+async function certificateFiles(): Promise<{ certPath: string; keyPath: string; ca: string }> {
+  const pems = await generate([{ name: 'commonName', value: 'dsh' }], {
     keySize: 2048,
     algorithm: 'sha256',
     extensions: [{
@@ -119,7 +119,7 @@ function req(url: string, remoteAddress: string, headers: Record<string, string>
 
 describe('GatedWebServer', () => {
   it('serves TLS and hands a loopback peer to an unmodified consumer\'s routes', async () => {
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -154,7 +154,7 @@ describe('GatedWebServer', () => {
   it('refuses a network port that is this machine\'s port too', async () => {
     // Loopback on a port and every interface on the same one collide on Linux,
     // and one port cannot be both plaintext and TLS.
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath } = await certificateFiles()
     ctx = new Context()
     const fiber = ctx.plugin(GatedWebServer, {
       host: '0.0.0.0', port: 4080, networkPort: 4080, tlsCertPath: certPath, tlsKeyPath: keyPath,
@@ -163,7 +163,7 @@ describe('GatedWebServer', () => {
   })
 
   it('names the way out when the network port is already taken', async () => {
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath } = await certificateFiles()
     const squatter = createTcpServer()
     await new Promise<void>((resolve) => { squatter.listen(0, '0.0.0.0', resolve) })
     const taken = (squatter.address() as AddressInfo).port
@@ -187,7 +187,7 @@ describe('GatedWebServer', () => {
   it('passes the inherited carrier\'s own fields through, compression included', async () => {
     // The TLS branch rebuilds the config it hands `super`, which is exactly
     // where a field upstream added — gzip for the Web profile — got dropped.
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, {
       host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0, compression: 'gzip',
@@ -375,7 +375,7 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
 describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer', () => {
   it('carries the real peer address through TLS termination', async () => {
     const lan = LAN as string
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -397,7 +397,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     // listener stays on the configured port, bound to loopback, and devices
     // reach TLS on a port of their own.
     const lan = LAN as string
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     const [local, network] = await twoFreePorts()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, {
@@ -415,7 +415,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
   })
 
   it('reports a loopback port that answers plain http, and a network port that answers TLS', async () => {
-    const { certPath, keyPath } = certificateFiles()
+    const { certPath, keyPath } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -435,7 +435,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
 
   it('answers the same port over TLS only', async () => {
     const lan = LAN as string
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -503,7 +503,7 @@ describe('cookies set through the TLS front', () => {
 
   /** A TLS carrier with every setter on a named route and one on the fallback seat. */
   async function cookieCarrier(): Promise<{ server: GatedWebServer; ca: string }> {
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -533,7 +533,7 @@ describe('cookies set through the TLS front', () => {
 
 describe('the certificate fingerprint', () => {
   it('is the one a device is shown for the certificate the TLS front presents', async () => {
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer

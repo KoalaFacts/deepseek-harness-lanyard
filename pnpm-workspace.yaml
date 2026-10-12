@@ -1,0 +1,6 @@
+# Read by pnpm 10 and 11 alike. pnpm 11 ignores the `pnpm` field in
+# package.json, so an override kept there is dropped from the lockfile by any
+# pnpm 11 install (Dependabot's included), and pnpm 10's frozen install in CI
+# then refuses the mismatch.
+overrides:
+  js-yaml@>=4.0.0 <4.3.2: ^4.3.2

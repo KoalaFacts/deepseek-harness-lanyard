@@ -46,8 +46,8 @@ function memoryCredentials(): unknown {
 }
 
 /** A self-signed pair naming this machine's addresses, as the tls row would write it. */
-function certificateFiles(): { certPath: string; keyPath: string; ca: string } {
-  const pems = generate([{ name: 'commonName', value: 'dsh' }], {
+async function certificateFiles(): Promise<{ certPath: string; keyPath: string; ca: string }> {
+  const pems = await generate([{ name: 'commonName', value: 'dsh' }], {
     keySize: 2048,
     algorithm: 'sha256',
     extensions: [{
@@ -74,7 +74,7 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     port: number
   }> {
     const lan = LAN as string
-    const { certPath, keyPath, ca } = certificateFiles()
+    const { certPath, keyPath, ca } = await certificateFiles()
     ctx = new Context()
     ctx.provide('credentials', memoryCredentials())
     await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()

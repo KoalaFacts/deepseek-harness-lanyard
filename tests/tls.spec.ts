@@ -39,6 +39,17 @@ describe('the tls row', () => {
     expect(existsSync(join(dir, 'key.pem'))).toBe(true)
   })
 
+  it('issues a certificate valid for ten years, so an accepted exception outlives the install', async () => {
+    // selfsigned defaults to one year and renamed its validity option across
+    // majors; a dropped option is silent, so the span itself is checked.
+    const dir = unusedDir()
+    await provide({ enabled: true, dir })
+    const cert = new X509Certificate(readFileSync(join(dir, 'cert.pem')))
+    const days = (Date.parse(cert.validTo) - Date.parse(cert.validFrom)) / 86_400_000
+    expect(days).toBeGreaterThan(3649)
+    expect(days).toBeLessThan(3651)
+  })
+
   it('keeps the key owner-only, inside an owner-only directory', async () => {
     const dir = unusedDir()
     await provide({ enabled: true, dir })
@@ -93,8 +104,8 @@ describe('lanIpv4Addresses', () => {
 // still names what the pairing link points at.
 describe('certificateCovers', () => {
   /** A certificate naming exactly these IPv4 literals. */
-  function certFor(ips: string[]): string {
-    const pems = generate([{ name: 'commonName', value: 'dsh' }], {
+  async function certFor(ips: string[]): Promise<string> {
+    const pems = await generate([{ name: 'commonName', value: 'dsh' }], {
       keySize: 2048,
       algorithm: 'sha256',
       extensions: [{
@@ -107,31 +118,31 @@ describe('certificateCovers', () => {
     return path
   }
 
-  it('accepts a certificate naming every address asked for', () => {
-    expect(certificateCovers(certFor(['192.168.1.5', '10.0.0.7']), ['10.0.0.7', '192.168.1.5'])).toBe(true)
+  it('accepts a certificate naming every address asked for', async () => {
+    expect(certificateCovers(await certFor(['192.168.1.5', '10.0.0.7']), ['10.0.0.7', '192.168.1.5'])).toBe(true)
   })
 
-  it('refuses one that misses an address, which is what moving networks does', () => {
-    expect(certificateCovers(certFor(['192.168.1.5']), ['10.0.0.7'])).toBe(false)
+  it('refuses one that misses an address, which is what moving networks does', async () => {
+    expect(certificateCovers(await certFor(['192.168.1.5']), ['10.0.0.7'])).toBe(false)
   })
 
-  it('matches whole entries, so a longer address in the certificate does not satisfy a shorter one', () => {
+  it('matches whole entries, so a longer address in the certificate does not satisfy a shorter one', async () => {
     // The trap runs this way round: the rendered list contains "10.0.0.71", so
     // a substring test answers yes for 10.0.0.7 and reuses a certificate the
     // phone rejects by name. Both orderings are checked because only one of
     // them tells substring matching apart from entry matching.
-    expect(certificateCovers(certFor(['10.0.0.71']), ['10.0.0.7'])).toBe(false)
-    expect(certificateCovers(certFor(['10.0.0.7']), ['10.0.0.71'])).toBe(false)
+    expect(certificateCovers(await certFor(['10.0.0.71']), ['10.0.0.7'])).toBe(false)
+    expect(certificateCovers(await certFor(['10.0.0.7']), ['10.0.0.71'])).toBe(false)
   })
 
-  it('treats an unreadable certificate as covering nothing rather than throwing', () => {
+  it('treats an unreadable certificate as covering nothing rather than throwing', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'lanyard-cov-')), 'cert.pem')
     writeFileSync(path, 'not a certificate')
     expect(certificateCovers(path, ['10.0.0.7'])).toBe(false)
   })
 
-  it('accepts a loopback-only deployment, which asks for no addresses at all', () => {
-    expect(certificateCovers(certFor([]), [])).toBe(true)
+  it('accepts a loopback-only deployment, which asks for no addresses at all', async () => {
+    expect(certificateCovers(await certFor([]), [])).toBe(true)
   })
 })
 
@@ -145,32 +156,32 @@ describe('generateMaterial', () => {
     return { certPath: join(dir, 'cert.pem'), keyPath: join(dir, 'key.pem') }
   }
 
-  it('reuses material that still names the current addresses', () => {
+  it('reuses material that still names the current addresses', async () => {
     const { certPath, keyPath } = paths()
-    generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     const first = readFileSync(certPath, 'utf8')
-    generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     expect(readFileSync(certPath, 'utf8')).toBe(first)
   })
 
-  it('replaces material once the machine is reachable somewhere it does not name', () => {
+  it('replaces material once the machine is reachable somewhere it does not name', async () => {
     const { certPath, keyPath } = paths()
-    generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     const first = readFileSync(certPath, 'utf8')
     // The laptop moved networks. The pairing link now advertises 10.0.0.7, and
     // a certificate naming only 192.168.1.5 gives the phone a name mismatch
     // rather than the untrusted-issuer prompt the README describes.
-    generateMaterial(certPath, keyPath, ['10.0.0.7'])
+    await generateMaterial(certPath, keyPath, ['10.0.0.7'])
     const second = readFileSync(certPath, 'utf8')
     expect(second).not.toBe(first)
     expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
   })
 
-  it('replaces the key alongside the certificate, never pairing a fresh one with a stale one', () => {
+  it('replaces the key alongside the certificate, never pairing a fresh one with a stale one', async () => {
     const { certPath, keyPath } = paths()
-    generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     const firstKey = readFileSync(keyPath, 'utf8')
-    generateMaterial(certPath, keyPath, ['10.0.0.7'])
+    await generateMaterial(certPath, keyPath, ['10.0.0.7'])
     expect(readFileSync(keyPath, 'utf8')).not.toBe(firstKey)
   })
 })

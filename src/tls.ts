@@ -108,10 +108,13 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
  * @param keyPath - destination of the PEM private key.
  * @param addresses - LAN literals to name; this machine's current ones by default.
  */
-export function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): void {
+export async function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): Promise<void> {
   if (existsSync(certPath) && existsSync(keyPath) && certificateCovers(certPath, addresses)) return
-  const pems = generate([{ name: 'commonName', value: 'dsh' }], {
-    days: CERT_VALIDITY_DAYS,
+  const notBeforeDate = new Date()
+  const notAfterDate = new Date(notBeforeDate.getTime() + CERT_VALIDITY_DAYS * 24 * 60 * 60 * 1000)
+  const pems = await generate([{ name: 'commonName', value: 'dsh' }], {
+    notBeforeDate,
+    notAfterDate,
     keySize: CERT_KEY_SIZE,
     algorithm: CERT_ALGORITHM,
     extensions: [{
@@ -144,7 +147,7 @@ function writeAtomic(path: string, content: string, mode: number): void {
  * @param ctx - plugin context.
  * @param config - validated {@link Config}.
  */
-export function apply(ctx: Context, config: Config): void {
+export async function apply(ctx: Context, config: Config): Promise<void> {
   if (!config.enabled) {
     ctx.provide(LANYARD_TLS_SERVICE, {} satisfies LanyardTlsValues)
     return
@@ -154,7 +157,7 @@ export function apply(ctx: Context, config: Config): void {
   // Owner-only: the key's directory must not be world-traversable on a shared host.
   mkdirSync(config.dir, { recursive: true, mode: 0o700 })
   try {
-    generateMaterial(certPath, keyPath)
+    await generateMaterial(certPath, keyPath)
   } catch (error) {
     throw new Error(`lanyard-tls: could not generate TLS material in ${config.dir}`, { cause: error })
   }

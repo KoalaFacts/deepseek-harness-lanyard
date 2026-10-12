@@ -117,10 +117,10 @@ describe('whether dsh admits it', () => {
   })
 
   it('does not admit the next minor line\'s prereleases', () => {
-    // Prereleases take part in dsh's matching, so `<0.2.0` would admit
-    // 0.2.0-rc.1 — a line nothing here has been run against.
+    // Prereleases take part in dsh's matching, so `<0.3.0` would admit
+    // 0.3.0-rc.1 — a line nothing here has been run against.
     for (const [name, range] of dshPeers) {
-      expect([name, admits(range, '0.2.0-rc.1'), admits(range, '0.2.0')]).toEqual([name, false, false])
+      expect([name, admits(range, '0.3.0-rc.1'), admits(range, '0.3.0')]).toEqual([name, false, false])
     }
   })
 })
