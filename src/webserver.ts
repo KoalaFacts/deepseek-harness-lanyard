@@ -113,7 +113,9 @@ export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
   // Host-forwarded requests the device answers — tool approvals and the
   // agent's questions arrive as `$events` and are answered at `$events/result`,
   // so pinning it leaves the agent waiting on a prompt the phone can see.
-  '$events',
+  // From 0.2, a question that outlives its time limit is answered through
+  // `userQuestions/answer` instead, which steers the reply into the agent.
+  '$events', 'userQuestions',
   // Workspaces and the files in them.
   'workspace', 'workspaceFiles', 'directoryPicker', 'officeToPdf',
   // Work running on this machine on the session's behalf. A terminal adds no

@@ -121,12 +121,14 @@ A session proves a device was paired, not that someone is at the keyboard. The p
 | `session`, `subagents`, `skills`, `commands`, `goals`, `fileReferences`, `fileUploads`, `sessionReferenceResolver`, `messageFeedback`, `sessionFeedback`, `permissionPresets` | reachable | the conversation itself |
 | `agentPresets` | reachable, except `read`, `copy`, `deletePreset` | listing and selecting a preset is using it; its documents configure the agent |
 | `$events` | reachable | tool approvals and the agent's questions are answered at `$events/result`; pinned, the agent waits on a prompt the phone can see |
+| `userQuestions` | reachable | from 0.2, an agent's question that outlived its time limit is answered at `userQuestions/answer`, which steers the reply into the conversation |
 | `workspace`, `workspaceFiles`, `officeToPdf` | reachable | workspaces and reading their files |
 | `directoryPicker` | reachable, except `pick` | `list` is the in-app browser; `pick` opens the host's native chooser |
 | `job`, `terminal`, `schedule` | reachable | work on the session's behalf; a paired device already drives an agent that runs commands and answers its approvals |
 | `settings`, `credentials`, `account`, `llm` | loopback only | the configuration plane |
 | `pluginManager`, `pluginRegistryProbe`, `pluginInventory` | loopback only | installing code, and an inventory that echoes the composed configuration |
 | `dynamicCordisRunner` | loopback only | runs plugin code from the panel |
+| `productAnalytics` | loopback only | telemetry, and its row mounts only under the desktop profile |
 | `speech`, anything else | loopback only | unclassified; only an experimental bundle mounts `speech` |
 
 `session/openWorkspacePath` and the `/open-in-app/open` route are pinned too: both launch applications on this machine's desktop. The dot-form API proxy the earlier defaults classified (`settings.update` and kin) no longer exists upstream.
