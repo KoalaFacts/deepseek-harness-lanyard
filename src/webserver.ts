@@ -107,7 +107,8 @@ export const DEFAULT_PRIVILEGED_METHODS: readonly string[] = [
  * (the configuration plane); `pluginManager`, `pluginRegistryProbe`,
  * `pluginInventory` (installing code, and the inventory that echoes the
  * composed configuration); `dynamicCordisRunner` (runs plugin code from the
- * panel); and `speech`, which only an experimental bundle mounts.
+ * panel); `productAnalytics` (telemetry, mounted only under the desktop
+ * profile); and `speech`, which only an experimental bundle mounts.
  */
 export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
   // Sessions and the conversation in them.

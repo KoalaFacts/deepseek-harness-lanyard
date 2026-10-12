@@ -146,6 +146,8 @@ Beside the Gateway, upstream registers exact `/api/<name>` routes — the stream
 
 **None of this pinning is a boundary against a paired device.** A paired device holds the user's account — a terminal, and an agent that runs commands — so it can reach what the pins protect by other means, editing the settings file included. The pins keep the configuration plane out of the phone's interface and away from a stray tap, and keep the desktop's screen the desktop's. Claiming more than that, in code comments or the README, is the overreach this file exists to prevent.
 
+`tests/remote-surface.spec.ts` holds this table to the installed dsh: it walks every `lib/typert.host.js` the `@deepseek-ai/dsh` devDependency reaches, fails when a reachable namespace gains, loses or renames a method, and fails when a pinned method no longer exists — a renamed pin matches nothing and fails open silently. With no upper bound on the window, that test is what stands where dsh's own refusal used to: a new line installs, and the next sync or nightly `next` run says what changed. Classify there before the test goes green again.
+
 A namespace the GUI calls on load that this table misses fails `npm run test:e2e:browser`, which asserts that every refusal the shell meets is a deliberate pin. A namespace it calls later does not — so when upstream grows one, classify it here before it ships, rather than waiting for a phone to find it.
 
 ## What the Plugins page reads

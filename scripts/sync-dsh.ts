@@ -1,6 +1,6 @@
 /**
- * Move the `@deepseek-ai/dsh-*` devDependencies to the release `dsh@latest`
- * ships, so the unit suite runs against what a person installs today.
+ * Move `@deepseek-ai/dsh` and the `@deepseek-ai/dsh-*` devDependencies to the
+ * release `dsh@latest` ships, so the unit suite runs against what a person installs today.
  *
  * Dependabot cannot do this. It follows a prerelease only within its own base
  * version — 0.2.0-rc.2 to 0.2.0-rc.3, never to 0.2.1-rc.1 — and the library
@@ -11,20 +11,27 @@
  *   node scripts/sync-dsh.ts           rewrite package.json, then `pnpm install`
  *   node scripts/sync-dsh.ts --check   exit 1 if package.json lags, change nothing
  *
+ * Either form exits 2, SKIPPED, when the registry cannot be asked.
+ *
  * Only devDependencies move. The peer ranges are the supported window, and
  * with no upper bound a new release already satisfies them.
  */
 
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** The package whose `latest` dist-tag names the release to track. */
 export const CLI_PACKAGE = '@deepseek-ai/dsh'
 
-/** devDependencies released in lockstep with {@link CLI_PACKAGE}. */
+/** devDependencies released in lockstep with {@link CLI_PACKAGE}, besides the CLI itself. */
 export const LOCKSTEP_PREFIX = '@deepseek-ai/dsh-'
+
+/** Whether a devDependency moves with {@link CLI_PACKAGE}. */
+function inLockstep(name: string): boolean {
+  return name === CLI_PACKAGE || name.startsWith(LOCKSTEP_PREFIX)
+}
 
 /**
  * The range a devDependency should name for `version`, keeping its form: an
@@ -46,7 +53,7 @@ export function syncedRange(current: string, version: string): string {
  */
 export function drift(devDependencies: Record<string, string>, version: string): Array<{ name: string; from: string; to: string }> {
   return Object.entries(devDependencies)
-    .filter(([name]) => name.startsWith(LOCKSTEP_PREFIX))
+    .filter(([name]) => inLockstep(name))
     .map(([name, from]) => ({ name, from, to: syncedRange(from, version) }))
     .filter(({ from, to }) => from !== to)
 }
@@ -63,11 +70,19 @@ function latestVersion(): string {
   return version
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+const invoked = process.argv[1]
+if (invoked !== undefined && import.meta.url === pathToFileURL(realpathSync(invoked)).href) {
   const path = join(dirname(dirname(fileURLToPath(import.meta.url))), 'package.json')
   const text = readFileSync(path, 'utf8')
   const manifest = JSON.parse(text) as { devDependencies: Record<string, string> }
-  const version = latestVersion()
+  let version: string
+  try {
+    version = latestVersion()
+  } catch (error) {
+    // Not a lag: nothing was compared. Exit 2, as the e2e suites do when they cannot run.
+    console.error(`lanyard: SKIPPED — could not ask the registry for ${CLI_PACKAGE}@latest`, error)
+    process.exit(2)
+  }
   const moves = drift(manifest.devDependencies, version)
   for (const { name, from, to } of moves) console.log(`  ${name}: ${from} -> ${to}`)
   if (moves.length === 0) {
