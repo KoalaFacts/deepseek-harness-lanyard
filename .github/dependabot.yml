@@ -31,14 +31,13 @@ updates:
       npm:
         patterns:
           - "*"
-    # `dsh` is deliberately unpinned and tracked by the nightly against
-    # upstream's own release channels instead, so bumping it here would replace
-    # a floating range that is meant to float. Two of these are load-bearing:
-    # dsh-web-app and dsh-client-connection are exact-pinned because
-    # tests/webstartup-contract.spec.ts and tests/upstream-session.spec.ts read
-    # the INSTALLED copies, so a bump silently changes what those tests prove;
-    # and the peerDependencies ranges are the supported window itself, which
-    # dsh enforces from 0.1.7, so a bump would change which dsh admits this.
+    # `@deepseek-ai/*` is tracked by scripts/sync-dsh.ts instead, which moves
+    # the dsh-* devDependencies to whatever `dsh@latest` ships; the nightly's
+    # drift job says when they lag. Dependabot cannot do that job: it follows
+    # a prerelease only within its own base version (0.2.0-rc.2 to rc.3, never
+    # to 0.2.1-rc.1), and the library packages' own `latest` tag points at an
+    # abandoned 0.0.1 build. cordis and schemastery move with dsh, which pins
+    # them by tilde.
     ignore:
       - dependency-name: "@deepseek-ai/*"
     labels:

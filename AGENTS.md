@@ -24,6 +24,7 @@ npm run test               # vitest
 npm run build              # tsc to lib/ + lib/types, then scripts/verify-build.ts
 npm run test:e2e           # boot a real dsh and drive the gate over TLS
 npm run test:e2e:browser   # drive the pairing flow in Chromium
+node scripts/sync-dsh.ts   # move the dsh-* devDependencies to dsh@latest, then pnpm install
 ```
 
 One test file or one case:
@@ -119,14 +120,16 @@ A session proves a device was paired, not that someone is at the keyboard. The p
 | Namespace | Paired device | Why |
 |---|---|---|
 | `session`, `subagents`, `skills`, `commands`, `goals`, `fileReferences`, `fileUploads`, `sessionReferenceResolver`, `messageFeedback`, `sessionFeedback`, `permissionPresets` | reachable | the conversation itself |
-| `agentPresets` | reachable, except `read`, `copy`, `deletePreset` | listing and selecting a preset is using it; its documents configure the agent |
+| `agentPresets` | reachable, except `read`, `copy`, `deletePreset` | listing and selecting a preset is using it; its documents configure the agent. `copy` and `deletePreset` exist only up to 0.1.6, inside the window, so their pins are live there |
 | `$events` | reachable | tool approvals and the agent's questions are answered at `$events/result`; pinned, the agent waits on a prompt the phone can see |
+| `userQuestions` | reachable | from 0.2, an agent's question that outlived its time limit is answered at `userQuestions/answer`, which steers the reply into the conversation |
 | `workspace`, `workspaceFiles`, `officeToPdf` | reachable | workspaces and reading their files |
 | `directoryPicker` | reachable, except `pick` | `list` is the in-app browser; `pick` opens the host's native chooser |
 | `job`, `terminal`, `schedule` | reachable | work on the session's behalf; a paired device already drives an agent that runs commands and answers its approvals |
 | `settings`, `credentials`, `account`, `llm` | loopback only | the configuration plane |
 | `pluginManager`, `pluginRegistryProbe`, `pluginInventory` | loopback only | installing code, and an inventory that echoes the composed configuration |
 | `dynamicCordisRunner` | loopback only | runs plugin code from the panel |
+| `productAnalytics` | loopback only | telemetry, and its row mounts only under the desktop profile |
 | `speech`, anything else | loopback only | unclassified; only an experimental bundle mounts `speech` |
 
 `session/openWorkspacePath` and the `/open-in-app/open` route are pinned too: both launch applications on this machine's desktop. The dot-form API proxy the earlier defaults classified (`settings.update` and kin) no longer exists upstream.
@@ -142,6 +145,8 @@ Beside the Gateway, upstream registers exact `/api/<name>` routes — the stream
 | anything else | loopback only | unclassified |
 
 **None of this pinning is a boundary against a paired device.** A paired device holds the user's account — a terminal, and an agent that runs commands — so it can reach what the pins protect by other means, editing the settings file included. The pins keep the configuration plane out of the phone's interface and away from a stray tap, and keep the desktop's screen the desktop's. Claiming more than that, in code comments or the README, is the overreach this file exists to prevent.
+
+`tests/remote-surface.spec.ts` holds this table to the installed dsh: it walks every `lib/typert.host.js` the `@deepseek-ai/dsh` devDependency reaches, fails when a reachable namespace gains, loses or renames a method, and fails when a pinned method no longer exists — a renamed pin matches nothing and fails open silently. With no upper bound on the window, that test is what stands where dsh's own refusal used to: a new line installs, and the next sync or nightly `next` run says what changed. Classify there before the test goes green again.
 
 A namespace the GUI calls on load that this table misses fails `npm run test:e2e:browser`, which asserts that every refusal the shell meets is a deliberate pin. A namespace it calls later does not — so when upstream grows one, classify it here before it ships, rather than waiting for a phone to find it.
 
@@ -167,8 +172,8 @@ Inherited from the harness; follow them so this reads like the code it composes 
 - **`README.md` and `README.zh.md` are a pair.** A user-visible change updates both, following the harness's bilingual docs convention.
 - ESM, `strict: true`, `.ts` extensions on local relative imports. Every module and export carries concise JSDoc for its non-obvious contract; do not restate the code.
 - **Dependency weight is part of the choice.** This runs inside someone's `dsh` install, so a runtime dependency's own tree matters: the terminal QR uses `qrcode-terminal` (zero dependencies) rather than `qrcode`, which pulls `yargs` and `pngjs`.
-- **An override patches this repository's own tree, scoped to the vulnerable range.** `pnpm.overrides` lifts `js-yaml` 4.0.0–4.3.1 ([GHSA-2883-xcg3-v3hh](https://github.com/advisories/GHSA-2883-xcg3-v3hh), reached through `@deepseek-ai/dsh-web-app` → `dsh-agent-presets`) to `^4.3.2`. It reaches no one else: pnpm reads overrides from the root project only, and a person's dsh resolves its own tree, where upstream's `^4.1.0` already admits the fix. Scoped to the range rather than a bare `>=4.3.2`, it can neither drag a 3.x consumer across a major nor pull in a future 5.x; once nothing in the tree is below 4.3.2 it matches nothing, and can be deleted.
-- **Peer dependencies are declared `optional`** because the *installation* provides them, not the profile. From 0.1.7, dsh enforces every DSH peer's range itself, at install and at startup, as `semver.satisfies(runtime, range, { includePrerelease: true })` — so the window is one real range, shared by every DSH peer and by the declarative `engines.dsh`: `>=0.1.5-rc.3 <0.2.0-0`. The `-0` is load-bearing: with prereleases taking part, `<0.2.0` would admit `0.2.0-rc.1`, a line nothing here has run against. Earlier releases check nothing, and a person can grant an exemption for exact versions, so the load-time guards remain what catches structural drift. `tests/plugin-metadata.spec.ts` checks the window by dsh's own rule.
+- **An override patches this repository's own tree, scoped to the vulnerable range.** The `overrides` in `pnpm-workspace.yaml` lift `js-yaml` 4.0.0–4.3.1 ([GHSA-2883-xcg3-v3hh](https://github.com/advisories/GHSA-2883-xcg3-v3hh), reached through `@deepseek-ai/dsh-web-app` → `dsh-agent-presets`) to `^4.3.2`. It reaches no one else: pnpm reads overrides from the root project only, and a person's dsh resolves its own tree, where upstream's `^4.1.0` already admits the fix. Scoped to the range rather than a bare `>=4.3.2`, it can neither drag a 3.x consumer across a major nor pull in a future 5.x; once nothing in the tree is below 4.3.2 it matches nothing, and can be deleted. It lives in `pnpm-workspace.yaml` rather than `package.json`'s `pnpm` field because pnpm 11 no longer reads that field: Dependabot's pnpm 11 regenerated the lockfile without the override, and CI's pnpm 10 then refused every frozen install.
+- **Peer dependencies are declared `optional`** because the *installation* provides them, not the profile. From 0.1.7, dsh enforces every DSH peer's range itself, at install and at startup, as `semver.satisfies(runtime, range, { includePrerelease: true })` — so the window is one real range, shared by every DSH peer and by the declarative `engines.dsh`: `>=0.1.5-rc.3`, with **no upper bound**. dsh is pre-1.0 and jumps lines often, and a cap made dsh refuse to install or load this bundle on every jump — 0.2.0-rc.2 became `latest` while the window still ended at `<0.2.0-0`. The floor stays because the pairing line needs `authenticatedUrl`. Compatibility is held by tracking upstream's newest release instead: `scripts/sync-dsh.ts` moves the `dsh-*` devDependencies to the release `dsh@latest` ships (Dependabot cannot: it follows a prerelease only within its own base version), the nightly's drift job fails when they lag, the e2e installs `latest`, and the nightly adds `next`. Earlier releases check nothing, and a person can grant an exemption for exact versions, so the load-time guards remain what catches structural drift. `tests/plugin-metadata.spec.ts` checks the window by dsh's own rule.
 
 ## Verification
 

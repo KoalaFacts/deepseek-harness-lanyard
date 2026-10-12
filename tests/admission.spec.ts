@@ -137,6 +137,8 @@ describe('isPrivilegedEndpoint', () => {
     // Tool approvals and the agent's questions arrive over `$events` and are
     // answered here; pinning it strands the agent on a prompt the phone sees.
     expect(isPrivilegedEndpoint('$events/result')).toBe(false)
+    // A question that outlived its time limit is answered here instead (0.2+).
+    expect(isPrivilegedEndpoint('userQuestions/answer')).toBe(false)
   })
 
   it('pins every method of an unlisted Gateway namespace, including ones no list names', () => {

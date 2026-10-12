@@ -82,6 +82,9 @@ export const DEFAULT_API_PATH_PREFIX = '/api'
  *   browser (`directoryPicker/list`) stays reachable.
  * - `agentPresets/read`, `/copy` and `/deletePreset` read and edit preset
  *   documents, which configure the agent; listing and selecting one does not.
+ *   `copy` and `deletePreset` exist only up to 0.1.6 (the standalone
+ *   `dsh-agent-presets` package), but the supported window still admits those
+ *   releases, so the pins stay until the floor moves past them.
  *
  * The list covers both of upstream's release channels, so a method only one of
  * them exposes is listed anyway.
@@ -104,7 +107,8 @@ export const DEFAULT_PRIVILEGED_METHODS: readonly string[] = [
  * (the configuration plane); `pluginManager`, `pluginRegistryProbe`,
  * `pluginInventory` (installing code, and the inventory that echoes the
  * composed configuration); `dynamicCordisRunner` (runs plugin code from the
- * panel); and `speech`, which only an experimental bundle mounts.
+ * panel); `productAnalytics` (telemetry, mounted only under the desktop
+ * profile); and `speech`, which only an experimental bundle mounts.
  */
 export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
   // Sessions and the conversation in them.
@@ -113,7 +117,9 @@ export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
   // Host-forwarded requests the device answers — tool approvals and the
   // agent's questions arrive as `$events` and are answered at `$events/result`,
   // so pinning it leaves the agent waiting on a prompt the phone can see.
-  '$events',
+  // From 0.2, a question that outlives its time limit is answered through
+  // `userQuestions/answer` instead, which steers the reply into the agent.
+  '$events', 'userQuestions',
   // Workspaces and the files in them.
   'workspace', 'workspaceFiles', 'directoryPicker', 'officeToPdf',
   // Work running on this machine on the session's behalf. A terminal adds no

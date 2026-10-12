@@ -62,7 +62,9 @@ jobs:
     # The unit suite checks three upstream contracts against whatever the
     # lockfile resolved, which goes stale: the rows this plugin replaces
     # (dsh-web-app), the carrier it subclasses (dsh-host-webserver), and the
-    # browser session it defers to (dsh-client-connection). Here it runs against
+    # browser session it defers to (dsh-client-connection) — plus the whole
+    # Remote surface the CLI (dsh) reaches, which tests/remote-surface.spec.ts
+    # holds to the classification. Here it runs against
     # upstream's current prerelease line — for the library packages that is
     # `next`, since they leave `latest` on an abandoned 0.0.1 build.
     name: row contract (next bundle)
@@ -80,15 +82,30 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Install the current contract packages over the lockfile pins
-        run: pnpm add -D @deepseek-ai/dsh-web-app@next @deepseek-ai/dsh-host-webserver@next @deepseek-ai/dsh-client-connection@next
+        # Exits 2, SKIPPED, while upstream's publish wave is incomplete.
+        run: node scripts/install-next.ts
 
       - run: npm run test
+
+  drift:
+    # The unit suite runs against the lockfile, which goes stale whenever dsh
+    # moves. Dependabot cannot follow it (scripts/sync-dsh.ts says why), so this
+    # says when the devDependencies lag the release `dsh@latest` ships.
+    name: devDependencies track dsh@latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: node scripts/sync-dsh.ts --check
 
   report:
     # A scheduled run that fails silently is decorative. Only for the schedule:
     # a manual run has someone watching it.
     name: report
-    needs: [e2e, contract]
+    needs: [e2e, contract, drift]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -110,6 +127,9 @@ jobs:
               '  only a warning, and a new `webStartup` field falls back to a schema default.',
               '  Both fail quietly, which is what the row-contract test is for.',
               '- **`latest` fails too** — it has reached users. Treat as urgent.',
+              '- **only `devDependencies track dsh@latest` fails** — dsh released; nothing broke yet.',
+              '  (Exit 2 with SKIPPED there means the registry was unreachable; nothing was compared.)',
+              '  Run `node scripts/sync-dsh.ts && pnpm install`, then `npm run check`, and open a PR.',
               '- **a job exited 2 with SKIPPED** — the registry could not serve a complete',
               '  `dsh` graph at that moment. Nothing was tested; no action needed.',
             ].join('\n')
