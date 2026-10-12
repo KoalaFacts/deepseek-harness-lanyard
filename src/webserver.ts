@@ -82,6 +82,9 @@ export const DEFAULT_API_PATH_PREFIX = '/api'
  *   browser (`directoryPicker/list`) stays reachable.
  * - `agentPresets/read`, `/copy` and `/deletePreset` read and edit preset
  *   documents, which configure the agent; listing and selecting one does not.
+ *   `copy` and `deletePreset` exist only up to 0.1.6 (the standalone
+ *   `dsh-agent-presets` package), but the supported window still admits those
+ *   releases, so the pins stay until the floor moves past them.
  *
  * The list covers both of upstream's release channels, so a method only one of
  * them exposes is listed anyway.
