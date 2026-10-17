@@ -1,8 +1,7 @@
 /** The pairing link, its QR code, and the row that announces them. */
 import jsQR from 'jsqr'
-import { describe, expect, it, vi, afterEach } from 'vitest'
+import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
 import {
   fitsTerminal, isLaunchLinkIssuer, pairingLink, rankLanAddresses, renderPairingQr, renderedWidth, shouldDrawQr,
   terminalColumns, type Config as PairingConfig, type LaunchLinkIssuer, wantsColour,
@@ -238,17 +237,20 @@ describe('shouldDrawQr', () => {
 })
 
 describe('the pairing row', () => {
+  // The announcement test supplies its addresses; the real listener and OS
+  // interfaces are covered by upstream-session and e2e, not this row's output.
+  beforeEach(() => { vi.spyOn(Pairing.internals, 'networkInterfaces').mockReturnValue({}) })
   /**
    * Mount the row with the LAN snapshot web-app would have provided and the
    * connection upstream would have provided.
-   * @param server - a real carrier by default; a stand-in reports a gated one's ports.
+   * @param server - a stand-in reporting the carrier's protocol and ports.
    */
   async function mount(
     config: Partial<PairingConfig>,
     { lanAddresses = ['192.168.1.5'], connection = issuer as unknown, server, onError }: {
       lanAddresses?: string[]
       connection?: unknown
-      server?: { scheme: 'https'; port: number; networkPort: number; certificateFingerprint?: string }
+      server?: { scheme: 'http' | 'https'; port: number; networkPort?: number; certificateFingerprint?: string }
       onError?: (line: string) => void
     } = {},
   ): Promise<string[]> {
@@ -258,8 +260,7 @@ describe('the pairing row', () => {
     if (onError !== undefined) vi.spyOn(ctx.logger, 'error').mockImplementation(((line: unknown) => { onError(String(line)) }) as never)
     ctx.provide('webRuntime', { lanAddresses, trustedHosts: lanAddresses })
     ctx.provide('connection', connection)
-    if (server === undefined) await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }).await()
-    else ctx.provide('webServer', server)
+    ctx.provide('webServer', server ?? { scheme: 'http', port: 3080 })
     // Schemastery fills printPairingUrl from its default, as the Loader does.
     await ctx.plugin(Pairing, config as PairingConfig).await()
     return printed
@@ -344,3 +345,4 @@ describe('wantsColour', () => {
     expect([wantsColour('1'), wantsColour('true'), wantsColour('0')]).toEqual([false, false, false])
   })
 })
+

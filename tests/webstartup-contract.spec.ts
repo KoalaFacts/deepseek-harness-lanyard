@@ -66,6 +66,7 @@ function publishedFields(): Set<string> {
   program.parse([
     '--host', '0.0.0.0', '--port', '3080', '--network-port', '3443', '--no-open', '--keep-awake',
     '--trusted-host', 'app.internal',
+    '--tls-cert', 'server.pem', '--tls-key', 'key.pem', '--public-url', 'https://app.internal/',
   ], { from: 'user' })
   return new Set(keys)
 }
@@ -86,7 +87,7 @@ describe('the rows lanyard takes over', () => {
 
   it('still offers every flag the shipped provider offers', () => {
     const ours = webCommand().helpInformation()
-    for (const flag of ['--host', '--port', '--trusted-host', '--no-open']) {
+    for (const flag of ['--host', '--port', '--trusted-host', '--no-open', '--tls-cert', '--tls-key', '--public-url']) {
       expect([flag, ours.includes(flag)]).toEqual([flag, true])
     }
   })
@@ -126,3 +127,4 @@ describe('the rows lanyard takes over', () => {
     }
   })
 })
+

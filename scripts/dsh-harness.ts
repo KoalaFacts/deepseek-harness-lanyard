@@ -20,7 +20,10 @@ import type { AddressInfo } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
+import type { Config as WebServerConfig } from '@deepseek-ai/dsh-host-webserver'
 import { request } from 'node:https'
 import { request as plainRequest } from 'node:http'
 import { randomBytes } from 'node:crypto'
@@ -30,6 +33,26 @@ import { lanIpv4Addresses } from '../src/tls.ts'
 import type { IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http'
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+
+/** Prefer one concrete interface; only older carriers require the legacy wildcard spelling. */
+export function networkBindHost(address: string, schema: typeof WebServer.Config = WebServer.Config): WebServerConfig['host'] {
+  try {
+    schema({ host: address, port: 0 } as never)
+    return address as WebServerConfig['host']
+  } catch {
+    // Validate the fallback too. Never loosen an upstream wildcard rejection.
+    schema({ host: '0.0.0.0', port: 0 })
+    return '0.0.0.0'
+  }
+}
+
+/** Resolve the built-in web carrier from the installed CLI, not the plugin-only profile. */
+export function installedWebCarrier(workspace: string): string {
+  const workspaceRequire = createRequire(join(workspace, 'package.json'))
+  const cliRequire = createRequire(workspaceRequire.resolve('@deepseek-ai/dsh/package.json'))
+  const appRequire = createRequire(cliRequire.resolve('@deepseek-ai/dsh-web-app/package.json'))
+  return appRequire.resolve('@deepseek-ai/dsh-host-webserver')
+}
 
 /**
  * Which `dsh` to test against.
@@ -239,20 +262,26 @@ export function probe(host: string, port: number, path: string, init: ProbeInit 
 }
 
 /**
- * One plain-HTTP GET, for the loopback listener upstream's own URL line names.
+ * One plain-HTTP request, for the loopback listener upstream's own URL line names.
  * @param url - an `http://` URL.
  */
-export function plainGet(url: string): Promise<Answer> {
+export function plainProbe(url: string, init: ProbeInit = {}): Promise<Answer> {
   return new Promise((resolve, reject) => {
-    const rq = plainRequest(url, { method: 'GET', timeout: 15_000 }, (res) => {
-      res.resume()
-      res.on('end', () => { resolve({ status: res.statusCode ?? 0, headers: res.headers, body: '' }) })
+    const { method = 'GET', headers = {}, body } = init
+    const rq = plainRequest(url, { method, headers, timeout: 15_000 }, (res) => {
+      let text = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk: string) => { text += chunk })
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }) })
     })
     rq.on('timeout', () => { rq.destroy(new Error('timed out')) })
     rq.on('error', reject)
-    rq.end()
+    rq.end(body)
   })
 }
+
+/** One GET on the plaintext listener, retaining the same response shape as TLS probes. */
+export const plainGet = (url: string): Promise<Answer> => plainProbe(url)
 
 /** Headers opening a WebSocket, as a browser sends them. */
 export function upgradeHeaders(): OutgoingHttpHeaders {
@@ -334,6 +363,15 @@ interface ReadinessLines {
   localUrl: string
 }
 
+/** Ignore diagnostic lines sharing the runtime prefix; only an actual URL signals readiness. */
+export function readinessLines(output: string): ReadinessLines | undefined {
+  const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
+  const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
+  const localUrl = /^dsh web: (https?:\/\/\S+)(?:[ \t]+[^\r\n]*)?\r?\n/m.exec(output)?.[1]
+  if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return undefined
+  return { pairingLink, fingerprint, localUrl }
+}
+
 /**
  * Wait for every readiness line; lanyard's and upstream's print after the
  * Loader settles, in either order. The fingerprint line is lanyard's last on a
@@ -347,12 +385,10 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
     }, BOOT_TIMEOUT_MS)
     const read = (chunk: Buffer | string): void => {
       output += String(chunk)
-      const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
-      const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
-      const localUrl = /dsh web: (\S+)/.exec(output)?.[1]
-      if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return
+      const lines = readinessLines(output)
+      if (lines === undefined) return
       clearTimeout(timer)
-      resolve({ pairingLink, fingerprint, localUrl })
+      resolve(lines)
     }
     server.stdout.on('data', read)
     server.stderr.on('data', read)
@@ -388,13 +424,15 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })
     const profile = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8')) as Manifest
+    const { default: Carrier } = await import(pathToFileURL(installedWebCarrier(workspace)).href) as { default: typeof WebServer }
+    const bindHost = networkBindHost(requireLan(), Carrier.Config)
 
     const localPort = await freePort()
     let port = await freePort()
     while (port === localPort) port = await freePort()
     console.log(`lanyard e2e: booting dsh on 127.0.0.1:${String(localPort)}, and the network over TLS on ${String(port)}`)
     server = spawn(dsh, [
-      '--profile', 'web', '--host', '0.0.0.0', '--port', String(localPort), '--network-port', String(port), '--no-open',
+      '--profile', 'web', '--host', bindHost, '--port', String(localPort), '--network-port', String(port), '--no-open',
     ], { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
 
     const { pairingLink, fingerprint, localUrl } = await awaitReadiness(server)
@@ -460,3 +498,4 @@ export function requireLan(): string {
   console.error('lanyard e2e: SKIPPED (not passed) — run it somewhere with a LAN interface.')
   process.exit(2)
 }
+

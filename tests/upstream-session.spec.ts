@@ -1,3 +1,4 @@
+import { networkBindHost, plainProbe } from '../scripts/dsh-harness.ts'
 /**
  * The contract this plugin takes on by deferring authentication to upstream.
  *
@@ -72,12 +73,13 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     connection: HostConnectionHandle
     call: (host: string, method: string, path: string, headers?: Record<string, string>, body?: string) => Promise<Answer>
     port: number
+    localPort: number
   }> {
     const lan = LAN as string
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = new Context()
     ctx.provide('credentials', memoryCredentials())
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    await ctx.plugin(GatedWebServer, { host: networkBindHost(lan), port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     // Exactly the trust dsh-web-app derives from an all-interfaces bind.
     await ctx.plugin(ClientConnection, { trustedHosts: [lan] }).await()
     const connection = ctx.get('connection') as HostConnectionHandle
@@ -102,7 +104,7 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
         rq.on('error', reject)
         rq.end(body)
       })
-    return { connection, call, port }
+    return { connection, call, port, localPort: server.port }
   }
 
   /** Open a pairing link the way a phone does, returning the cookie the exchange set. */
@@ -191,10 +193,18 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
   it('refuses a session minted for another address, which is what "host-bound" buys', async () => {
     // Paired over loopback, presented from the LAN: a different authority, so a
     // different cookie as far as upstream is concerned.
-    const { connection, call, port } = await compose()
-    const { cookie } = await pair(call, '127.0.0.1', connection.authenticatedUrl(`https://127.0.0.1:${String(port)}/`))
+    const { connection, call, port, localPort } = await compose()
+    // Connect to the real loopback listener, but hold the Host port equal to
+    // the LAN request below: only the hostname may explain its rejection.
+    const link = new URL(connection.authenticatedUrl(`http://127.0.0.1:${String(port)}/`))
+    const exchange = await plainProbe(`http://127.0.0.1:${String(localPort)}${link.pathname}${link.search}`, {
+      headers: { host: link.host },
+    })
+    expect(exchange.status).toBe(303)
+    const cookie = (exchange.headers['set-cookie'] ?? [])[0]?.split(';')[0] ?? ''
     expect(cookie).not.toBe('')
     const answer = await call(LAN as string, 'POST', '/api/session/list', { ...rpc, cookie }, envelope('session/list'))
     expect([answer.status, answer.body]).toEqual([403, REFUSAL_BODY])
   })
 })
+

@@ -30,13 +30,13 @@
     - id: lanyard-startup
       name: '@koalafacts/deepseek-harness-lanyard/startup'
 
-    # TLS material: generated once on the first all-interfaces boot and reused, so
+    # TLS material: generated once on the first network boot and reused, so
     # a paired device's accept-once certificate exception survives restarts.
     - id: lanyard-tls
       name: '@koalafacts/deepseek-harness-lanyard/tls'
       inject: [webStartup]
       config:
-        enabled: !!js (ctx.webStartup.host ?? '127.0.0.1') === '0.0.0.0'
+        enabled: !!js (ctx.webStartup.host ?? '127.0.0.1') !== '127.0.0.1' && ctx.webStartup.tls === undefined
         dir: !!js dshHomePath('lanyard-tls')
 
     # The gated carrier. It provides `webServer`, so every consumer that injects
@@ -52,6 +52,7 @@
         host: !!js ctx.webStartup.host ?? '127.0.0.1'
         port: !!js ctx.webStartup.port ?? 3080
         networkPort: !!js ctx.webStartup.networkPort ?? 3443
+        tls: !!js ctx.webStartup.tls
         compression: gzip
         compressionLevel: 1
         compressionThresholdBytes: 1024
@@ -69,11 +70,12 @@
         enabled: !!js ctx.webStartup.keepAwake === true
 
     # The pairing line: upstream's launch-token link at the address and port a
-    # device actually reaches, plus its QR code. It injects webRuntime, so it
-    # activates after the bind-dependent LAN snapshot the shipped URL line uses
-    # — and announces the same one — and connection, which owns the token.
+    # device actually reaches, plus its QR code. Connection owns the token and
+    # depends on webRuntime on older releases; newer releases removed that
+    # service and expose one concrete interface through the carrier itself.
     - id: lanyard-pairing
       name: '@koalafacts/deepseek-harness-lanyard/pairing'
-      inject: [webServer, webRuntime, connection]
+      inject: [webServer, connection]
       config:
         printPairingUrl: true
+

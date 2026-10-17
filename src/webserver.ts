@@ -44,6 +44,7 @@ import { createServer as createTlsServer } from 'node:tls'
 import { readFile } from 'node:fs/promises'
 import { X509Certificate } from 'node:crypto'
 import { posix } from 'node:path'
+import { isIP } from 'node:net'
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Server as TlsServer, TLSSocket } from 'node:tls'
@@ -241,6 +242,8 @@ export const DEFAULT_ENDPOINT_AUTHORITY: EndpointAuthority = {
  * that field is validated and defaulted exactly as the stock row would.
  */
 export interface Config extends WebServerConfig {
+  /** Upstream TLS-file contract, terminated on the network front rather than the local listener. */
+  tls?: { certFile: string; keyFile: string }
   /**
    * Port the TLS front listens on for devices on the network; `port` stays the
    * loopback listener. Zero requests an OS-assigned port.
@@ -275,6 +278,9 @@ export interface Config extends WebServerConfig {
 export const Config: z<Config> = z.intersect([
   WebServer.Config,
   z.object({
+    // A union has no implicit {} default, unlike an object; omitted TLS stays
+    // absent while either missing member of an explicit object is rejected.
+    tls: z.union([z.object({ certFile: z.string().required(), keyFile: z.string().required() })]),
     networkPort: z.natural().max(65535).default(DEFAULT_NETWORK_PORT),
     tlsCertPath: z.string(),
     tlsKeyPath: z.string(),
@@ -504,19 +510,32 @@ export class GatedWebServer extends WebServer {
 
   constructor(ctx: Context, config: Config) {
     assertRegistrarsWrapped()
+    // Our generated certificates and device-address selection cover IPv4.
+    // Do not inherit next's wider bind surface until those contracts cover it.
+    if (isIP(config.host) === 6) {
+      throw new Error('lanyard: IPv6 binds are not supported; choose one concrete local IPv4 address')
+    }
     // The inherited server is always the loopback listener on the configured
     // port — the one every local URL names — and never sees the network: under
     // TLS this class binds the network port itself and forwards decrypted
     // sockets to it. Every other inherited field, compression among them,
-    // passes through.
-    super(ctx, { ...config, host: '127.0.0.1' })
+    // passes through, except upstream's new TLS config: its files belong to
+    // our network front, never the inherited plaintext loopback listener.
+    const { tls, ...inherited } = config
+    super(ctx, { ...inherited, host: '127.0.0.1' })
+    if (tls !== undefined) {
+      if (config.tlsCertPath !== undefined || config.tlsKeyPath !== undefined) {
+        throw new Error('lanyard: configure tls or tlsCertPath/tlsKeyPath, not both')
+      }
+      config = { ...config, tlsCertPath: tls.certFile, tlsKeyPath: tls.keyFile }
+    }
     const servesTls = config.tlsCertPath !== undefined && config.tlsKeyPath !== undefined
     if ((config.tlsCertPath === undefined) !== (config.tlsKeyPath === undefined)) {
       throw new Error('lanyard: tlsCertPath and tlsKeyPath must be configured together')
     }
-    if (config.host === '0.0.0.0' && !servesTls) {
+    if (!isLoopbackAddress(config.host) && !servesTls) {
       throw new Error(
-        'lanyard: an all-interfaces bind requires TLS material (tlsCertPath and tlsKeyPath), because the launch token '
+        'lanyard: a network bind requires TLS material (tlsCertPath and tlsKeyPath), because the launch token '
         + 'and the session cookie that authenticate a device would otherwise cross the network in plaintext',
       )
     }
@@ -587,7 +606,9 @@ export class GatedWebServer extends WebServer {
    * one the OS picked, a bookmark survives a restart.
    */
   override get port(): number {
-    return super.port
+    const port = super.port
+    if (port === undefined) throw new Error('lanyard: port read before the local listener bound')
+    return port
   }
 
   /**
@@ -597,7 +618,7 @@ export class GatedWebServer extends WebServer {
    * bound only to the machine's own loopback interface.
    */
   get networkPort(): number {
-    return this.tlsPort ?? super.port
+    return this.tlsPort ?? this.port
   }
 
   /** The configured bind host, which TLS mode does not delegate to the inherited server. */
@@ -788,3 +809,4 @@ export class GatedWebServer extends WebServer {
 }
 
 export default GatedWebServer
+

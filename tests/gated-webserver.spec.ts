@@ -16,7 +16,7 @@ import { generate } from 'selfsigned'
 import { assertRegistrarsWrapped, GatedWebServer, REFUSAL_BODY } from '../src/webserver.ts'
 import type { Config } from '../src/webserver.ts'
 import { lanIpv4Addresses } from '../src/tls.ts'
-import { freePort } from '../scripts/dsh-harness.ts'
+import { freePort, networkBindHost } from '../scripts/dsh-harness.ts'
 
 const SESSION = 'dsh-auth-test=v1.valid'
 const LAN = lanIpv4Addresses()[0]
@@ -29,8 +29,8 @@ const LAN = lanIpv4Addresses()[0]
 const OWN_FIELDS = {
   networkPort: true, tlsCertPath: true, tlsKeyPath: true, publicPaths: true, publicPathExcludedSuffixes: true,
   loopbackOnlyPaths: true, fallbackAdmission: true, apiPathPrefix: true, privilegedMethods: true,
-  pairedNamespaces: true, pairedRoutes: true,
-} satisfies Record<Exclude<keyof Config, keyof WebServerConfig>, true>
+  pairedNamespaces: true, pairedRoutes: true, tls: true,
+} satisfies Record<Exclude<keyof Config, keyof WebServerConfig> | 'tls', true>
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
@@ -132,23 +132,19 @@ describe('GatedWebServer', () => {
     expect((await get('127.0.0.1', server.networkPort, '/api/session/list', {}, ca)).status).toBe(200)
   })
 
-  it('refuses an all-interfaces bind that has no TLS material', async () => {
+  it('refuses a network bind that has no TLS material', async () => {
     // The launch token and the session cookie are what authenticate a device;
     // over plaintext, anyone on the network could read either.
     ctx = new Context()
-    const fiber = ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0 })
-    await expect(fiber.await()).rejects.toThrow(/all-interfaces bind requires TLS material/)
+    const fiber = ctx.plugin(GatedWebServer, { host: networkBindHost('192.168.1.20'), port: 0 })
+    await expect(fiber.await()).rejects.toThrow(/network bind requires TLS material/)
   })
 
   it('refuses a bind host it cannot serve, rather than quietly serving loopback under that name', async () => {
-    // `--host 192.168.1.20` is published as given. The inherited server always
-    // binds loopback and TLS is only turned on for 0.0.0.0, so accepting it
-    // would serve this machine alone while reporting the address. The schema
-    // composes upstream's, whose host is 127.0.0.1 or 0.0.0.0, so it fails the
-    // load instead.
+    // Neither carrier accepts an arbitrary hostname in place of its bind literal.
     ctx = new Context()
-    const fiber = ctx.plugin(GatedWebServer, { host: '192.168.1.20', port: 0 } as never)
-    await expect(fiber.await()).rejects.toThrow(/\$\.host expected/)
+    const fiber = ctx.plugin(GatedWebServer, { host: 'not-a-bind-address', port: 0 } as never)
+    await expect(fiber.await()).rejects.toThrow(/host/)
   })
 
   it('refuses a network port that is this machine\'s port too', async () => {
@@ -157,7 +153,7 @@ describe('GatedWebServer', () => {
     const { certPath, keyPath } = await certificateFiles()
     ctx = new Context()
     const fiber = ctx.plugin(GatedWebServer, {
-      host: '0.0.0.0', port: 4080, networkPort: 4080, tlsCertPath: certPath, tlsKeyPath: keyPath,
+      host: '127.0.0.1', port: 4080, networkPort: 4080, tlsCertPath: certPath, tlsKeyPath: keyPath,
     })
     await expect(fiber.await()).rejects.toThrow(/port and networkPort are both 4080/)
   })
@@ -170,7 +166,7 @@ describe('GatedWebServer', () => {
     try {
       ctx = withSession()
       const fiber = ctx.plugin(GatedWebServer, {
-        host: '0.0.0.0', port: 0, networkPort: taken, tlsCertPath: certPath, tlsKeyPath: keyPath,
+        host: '127.0.0.1', port: 0, networkPort: taken, tlsCertPath: certPath, tlsKeyPath: keyPath,
       })
       await expect(fiber.await()).rejects.toThrow(new RegExp(`port ${String(taken)} is already in use.*--network-port.*--host 127\\.0\\.0\\.1`, 's'))
     } finally {
@@ -209,7 +205,7 @@ describe('GatedWebServer', () => {
     for (const field of Object.keys(OWN_FIELDS)) {
       ctx = new Context()
       const fiber = ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, [field]: { malformed: true } } as never)
-      await expect(fiber.await()).rejects.toThrow(new RegExp(`\\$\\.${field} expected`))
+      await expect(fiber.await()).rejects.toThrow(new RegExp(`\\$\\.${field}(?:\\.| expected)`))
       await ctx.fiber.dispose(); ctx = undefined
     }
   })
@@ -377,7 +373,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     const lan = LAN as string
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    await ctx.plugin(GatedWebServer, { host: networkBindHost(LAN ?? '192.168.1.20'), port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     let seenPeer: string | undefined
     server.register({
@@ -401,7 +397,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     const [local, network] = await twoFreePorts()
     ctx = withSession()
     await ctx.plugin(GatedWebServer, {
-      host: '0.0.0.0', port: local, networkPort: network, tlsCertPath: certPath, tlsKeyPath: keyPath,
+      host: networkBindHost(LAN ?? '192.168.1.20'), port: local, networkPort: network, tlsCertPath: certPath, tlsKeyPath: keyPath,
     }).await()
     const server = ctx.get('webServer') as GatedWebServer
     server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => { res.writeHead(200); res.end('REACHED') } })
@@ -417,7 +413,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
   it('reports a loopback port that answers plain http, and a network port that answers TLS', async () => {
     const { certPath, keyPath } = await certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    await ctx.plugin(GatedWebServer, { host: networkBindHost(LAN ?? '192.168.1.20'), port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     // Distinct listeners: `port` is the inherited plaintext server, which every
     // consumer of that member builds `http://127.0.0.1:${port}` from, and
@@ -437,7 +433,7 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     const lan = LAN as string
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    await ctx.plugin(GatedWebServer, { host: networkBindHost(LAN ?? '192.168.1.20'), port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     const server = ctx.get('webServer') as GatedWebServer
     const negotiated = await new Promise<string | false>((resolve, reject) => {
       const socket = tlsConnect({ host: lan, port: server.networkPort, ca }, () => {
@@ -702,3 +698,4 @@ describe('assertRegistrarsWrapped', () => {
       .toThrow(/"registerStream".*does not put behind admission/s)
   })
 })
+

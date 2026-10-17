@@ -21,9 +21,11 @@
  */
 
 import { networkInterfaces } from 'node:os'
+import { isIP } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import qrcodeTerminal from 'qrcode-terminal'
+import { isLoopbackAddress } from './admission.ts'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
 /**
@@ -51,6 +53,8 @@ export interface LaunchLinkIssuer {
 
 /** The scheme a gated carrier answers; the shipped carrier has no such member. */
 interface SchemeAwareServer {
+  /** Concrete bind address on newer carriers; older releases may bind every interface. */
+  host?: string
   scheme?: 'http' | 'https'
   port: number
   /** The port a remote device reaches; `port` is this machine's loopback listener. */
@@ -66,7 +70,7 @@ export const name = 'lanyard-pairing'
  * The carrier this row reads the reachable port from, the bind-dependent LAN
  * snapshot it announces, and the connection that issues the link.
  */
-export const inject = ['webServer', 'webRuntime', 'connection']
+export const inject = ['webServer', 'connection']
 
 /** Plugin config: whether to announce the pairing link, and how. */
 export interface Config {
@@ -106,7 +110,7 @@ export function isLaunchLinkIssuer(candidate: unknown): candidate is LaunchLinkI
 export function pairingLink(
   issuer: LaunchLinkIssuer, scheme: 'http' | 'https', port: number, lanAddress: string | undefined,
 ): string | undefined {
-  if (lanAddress === undefined) return undefined
+  if (lanAddress === undefined || isIP(lanAddress) !== 4) return undefined
   return issuer.authenticatedUrl(`${scheme}://${lanAddress}:${String(port)}/`)
 }
 
@@ -345,7 +349,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   if (!config.printPairingUrl) return
   const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
-  const { ranked, offered } = rankLanAddresses(runtime?.lanAddresses ?? [], internals.networkInterfaces())
+  const host = (ctx.webServer as unknown as SchemeAwareServer).host
+  // New dsh no longer provides webRuntime and binds one concrete interface.
+  // Never advertise other interfaces that this listener does not serve.
+  const addresses = host !== undefined && host !== '0.0.0.0'
+    ? isLoopbackAddress(host) ? [] : [host]
+    : runtime?.lanAddresses ?? []
+  if (addresses.length === 0) return
+  const { ranked, offered } = rankLanAddresses(addresses, internals.networkInterfaces())
   // A loopback bind has no network address to pair over. A tunnelled device
   // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
   // `dsh web:` link like any local browser.
@@ -382,7 +393,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // the LAN address and carries the launch token. Nothing answers it, so a
     // passive listener learns nothing — but whoever impersonated this machine
     // on the network would receive the token, so say not to open it.
-    console.log(`lanyard: serving your network over TLS on port ${String(reachable)} — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token`)
+    console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`
+      + (host === undefined || host === '0.0.0.0'
+        ? ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token' : ''))
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.
@@ -420,3 +433,4 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // Loader reports a failed boot; this row only stays quiet.
   }, () => {})
 }
+

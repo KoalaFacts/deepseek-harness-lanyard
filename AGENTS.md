@@ -16,6 +16,14 @@ Everything in it — the self-signed TLS, the gate that holds every network requ
 
 ## Commands
 
+### Compatibility with the 0.2.1 prerelease line
+
+The older-release wildcard examples in this document apply to 0.2.0 and earlier. The 0.2.1 carrier accepts concrete interface addresses and rejects wildcards in its schema; this plugin preserves that schema unchanged. Use an assigned IPv4 address on that line. Every non-loopback bind, not just `0.0.0.0`, requires TLS. The e2e harness probes the installed carrier schema, preferring a concrete address and using the legacy wildcard only when that carrier itself validates it.
+
+The replacement startup provider also carries `tls` and `publicUrl`. Explicit TLS paths terminate on lanyard's separate front; they never turn the inherited loopback listener into HTTPS. A public URL grants no trust. Pairing injects `webServer` and `connection`; `webRuntime` exists only on older releases and is no longer a mandatory dependency. A concrete carrier advertises only its bound address, regardless of any older runtime snapshot.
+
+`terminal.attach` on 0.2.1 is a duplex replacement for `follow`, `resize`, and `write`: its input commands still write and resize the same terminal. It remains reachable for an already paired device, as that capability was before. The Remote-surface test accepts exactly the reviewed older or newer complete surface, not their union; every other change must still fail.
+
 ```sh
 pnpm install               # prepare runs tsc, so lib/ exists after install
 npm run check              # typecheck + unit suite + build gate — the default gate
@@ -272,3 +280,4 @@ OIDC cannot perform a package's **first** publish: npm requires the package to e
    **Referencing an environment that does not exist creates it, silently, with no protection rules.** So a `production` that nobody configured looks exactly like a `production` that is doing its job, in the Actions UI and in this file alike. Check it has the branch rule.
 
 After that every release goes through the Actions tab. Two version floors are load-bearing and easy to misread if they drift: trusted publishing needs npm **≥ 11.5.1** and Node **≥ 22.14**. The npm bundled with Node 22 is older than that, so `publish-npm` upgrades npm before publishing; without it the publish fails on authentication with an error that never mentions the version.
+
