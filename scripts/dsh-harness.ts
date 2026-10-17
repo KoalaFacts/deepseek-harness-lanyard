@@ -46,6 +46,14 @@ export function networkBindHost(address: string, schema: typeof WebServer.Config
   }
 }
 
+/** Resolve the built-in web carrier from the installed CLI, not the plugin-only profile. */
+export function installedWebCarrier(workspace: string): string {
+  const workspaceRequire = createRequire(join(workspace, 'package.json'))
+  const cliRequire = createRequire(workspaceRequire.resolve('@deepseek-ai/dsh/package.json'))
+  const appRequire = createRequire(cliRequire.resolve('@deepseek-ai/dsh-web-app/package.json'))
+  return appRequire.resolve('@deepseek-ai/dsh-host-webserver')
+}
+
 /**
  * Which `dsh` to test against.
  *
@@ -254,20 +262,26 @@ export function probe(host: string, port: number, path: string, init: ProbeInit 
 }
 
 /**
- * One plain-HTTP GET, for the loopback listener upstream's own URL line names.
+ * One plain-HTTP request, for the loopback listener upstream's own URL line names.
  * @param url - an `http://` URL.
  */
-export function plainGet(url: string): Promise<Answer> {
+export function plainProbe(url: string, init: ProbeInit = {}): Promise<Answer> {
   return new Promise((resolve, reject) => {
-    const rq = plainRequest(url, { method: 'GET', timeout: 15_000 }, (res) => {
-      res.resume()
-      res.on('end', () => { resolve({ status: res.statusCode ?? 0, headers: res.headers, body: '' }) })
+    const { method = 'GET', headers = {}, body } = init
+    const rq = plainRequest(url, { method, headers, timeout: 15_000 }, (res) => {
+      let text = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk: string) => { text += chunk })
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }) })
     })
     rq.on('timeout', () => { rq.destroy(new Error('timed out')) })
     rq.on('error', reject)
-    rq.end()
+    rq.end(body)
   })
 }
+
+/** One GET on the plaintext listener, retaining the same response shape as TLS probes. */
+export const plainGet = (url: string): Promise<Answer> => plainProbe(url)
 
 /** Headers opening a WebSocket, as a browser sends them. */
 export function upgradeHeaders(): OutgoingHttpHeaders {
@@ -403,9 +417,7 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })
     const profile = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8')) as Manifest
-    const profileRequire = createRequire(join(home, 'profiles', 'web', 'package.json'))
-    const appRequire = createRequire(profileRequire.resolve('@deepseek-ai/dsh-web-app/package.json'))
-    const { default: Carrier } = await import(pathToFileURL(appRequire.resolve('@deepseek-ai/dsh-host-webserver')).href) as { default: typeof WebServer }
+    const { default: Carrier } = await import(pathToFileURL(installedWebCarrier(workspace)).href) as { default: typeof WebServer }
     const bindHost = networkBindHost(requireLan(), Carrier.Config)
 
     const localPort = await freePort()

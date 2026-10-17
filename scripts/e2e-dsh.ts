@@ -19,7 +19,7 @@ import { X509Certificate } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  ROOT, plainGet, probe as probeUnbound, recorder, refused, requireLan, rpcCall, run, sessionCookie, sessionCookieSecure,
+  ROOT, plainGet, plainProbe, probe as probeUnbound, recorder, refused, requireLan, rpcCall, run, sessionCookie, sessionCookieSecure,
   succeeded, upgradeHeaders, withDshDeployment,
 } from './dsh-harness.ts'
 import type { Answer, ProbeInit } from './dsh-harness.ts'
@@ -197,13 +197,13 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
   // answer, which is why the pairing line says not to open it.)
   const lanLine = await plainGet(`http://${lan}:${String(localPort)}/`).then(() => 'answered', () => 'refused')
   check('nothing answers the dsh web line\'s plaintext LAN address, so no request carrying its token completes', lanLine, 'refused')
-  const loopbackExchange = await probe('127.0.0.1', target(pairingLink))
-  const loopback: OutgoingHttpHeaders = { cookie: sessionCookie(loopbackExchange) ?? '' }
+  const loopback: OutgoingHttpHeaders = { cookie: sessionCookie(localExchange) ?? '' }
+  const localProbe = (path: string, init: ProbeInit): Promise<Answer> => plainProbe(new URL(path, localUrl).href, init)
   check('the loopback peer reaches the configuration plane',
-    succeeded(await probe('127.0.0.1', '/api/settings/describe', withHeaders(rpcCall('settings/describe'), loopback))), true)
+    succeeded(await localProbe('/api/settings/describe', withHeaders(rpcCall('settings/describe'), loopback))), true)
 
   // ---- what the Plugins page shows, where this dsh has one
-  const listing = await probe('127.0.0.1', '/api/pluginManager/listBundles', withHeaders(rpcCall('pluginManager/listBundles'), loopback))
+  const listing = await localProbe('/api/pluginManager/listBundles', withHeaders(rpcCall('pluginManager/listBundles'), loopback))
   if (listing.status === 404) {
     console.log('  n/a  this dsh serves no pluginManager/listBundles, so it has no Plugins page to show the bundle on')
   } else {
@@ -223,3 +223,4 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
 })
 
 report('lanyard e2e')
+

@@ -1,11 +1,16 @@
 /** Compatibility contracts that do not need a live listener. */
 import { describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import { resolveStartupValues, webCommand } from '../src/startup.ts'
 import { GatedWebServer } from '../src/webserver.ts'
 import * as Pairing from '../src/pairing.ts'
-import { networkBindHost } from '../scripts/dsh-harness.ts'
+import { installedWebCarrier, networkBindHost, plainProbe } from '../scripts/dsh-harness.ts'
 
 function parse(args: string[]) {
   const command = webCommand().exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} })
@@ -55,11 +60,50 @@ describe('the next web contract', () => {
     expect(host).toBe(concreteAccepted ? '192.168.1.20' : '0.0.0.0')
   })
 
+  it('resolves the deployed carrier through the CLI, without a web app in the plugin profile', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'lanyard-carrier-'))
+    const cli = join(workspace, 'node_modules/@deepseek-ai/dsh')
+    const app = join(cli, 'node_modules/@deepseek-ai/dsh-web-app')
+    const carrier = join(app, 'node_modules/@deepseek-ai/dsh-host-webserver')
+    try {
+      for (const directory of [workspace, cli, app, carrier, join(workspace, 'home/profiles/web')]) {
+        mkdirSync(directory, { recursive: true })
+        writeFileSync(join(directory, 'package.json'), '{}')
+      }
+      writeFileSync(join(carrier, 'index.js'), 'module.exports = {}')
+      expect(installedWebCarrier(workspace)).toBe(join(carrier, 'index.js'))
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it('keeps the inherited listener plaintext when explicit TLS files are supplied', () => {
     const ctx = new Context()
     const server = new GatedWebServer(ctx, { host: '127.0.0.1', port: 0, tls: { certFile: 'server.pem', keyFile: 'key.pem' } })
     // protocol is public on next and absent on the older HTTP-only carrier.
     expect((server as unknown as { protocol?: string }).protocol ?? 'http:').toBe('http:')
+  })
+
+  it('probes the separate plaintext loopback listener with the actual RPC response body', async () => {
+    const server = createServer((req, res) => {
+      let body = ''
+      req.setEncoding('utf8')
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        res.setHeader('x-method', req.method ?? '')
+        res.end(`${req.headers.cookie ?? ''}:${body}`)
+      })
+    })
+    try {
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+      const { port } = server.address() as AddressInfo
+      const answer = await plainProbe(`http://127.0.0.1:${String(port)}/api/settings/describe`, {
+        method: 'POST', headers: { cookie: 'local=session' }, body: 'request',
+      })
+      expect(answer).toMatchObject({ status: 200, headers: { 'x-method': 'POST' }, body: 'local=session:request' })
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 
   it('does not wait forever for the webRuntime service removed by next', () => {
