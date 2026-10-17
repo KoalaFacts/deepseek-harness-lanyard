@@ -1,3 +1,4 @@
+import { networkBindHost } from '../scripts/dsh-harness.ts'
 /**
  * The contract this plugin takes on by deferring authentication to upstream.
  *
@@ -77,7 +78,7 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = new Context()
     ctx.provide('credentials', memoryCredentials())
-    await ctx.plugin(GatedWebServer, { host: '0.0.0.0', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
+    await ctx.plugin(GatedWebServer, { host: networkBindHost(lan), port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0 }).await()
     // Exactly the trust dsh-web-app derives from an all-interfaces bind.
     await ctx.plugin(ClientConnection, { trustedHosts: [lan] }).await()
     const connection = ctx.get('connection') as HostConnectionHandle
@@ -198,3 +199,4 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     expect([answer.status, answer.body]).toEqual([403, REFUSAL_BODY])
   })
 })
+

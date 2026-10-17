@@ -82,7 +82,7 @@ describe('the bundle patch', () => {
     // none has a reason to reach the credential store.
     const inject = (id: string): string[] | undefined => inserted.find(row => row.id === id)?.inject
     expect(inject('lanyard-webserver')).toEqual(['webStartup', 'lanyardTls'])
-    expect(inject('lanyard-pairing')).toEqual(['webServer', 'webRuntime', 'connection'])
+    expect(inject('lanyard-pairing')).toEqual(['webServer', 'connection'])
     for (const row of inserted) {
       expect([row.id, row.inject ?? []]).toEqual([row.id, expect.not.arrayContaining(['credentials'])])
     }
@@ -105,8 +105,9 @@ describe('the bundle patch', () => {
     expect(carrier?.config?.port).toEqual({ expression: 'ctx.webStartup.port ?? 3080' })
   })
 
-  it('turns TLS on exactly when the bind is all-interfaces', () => {
+  it('generates TLS for a network bind unless explicit material was supplied', () => {
     const tls = inserted.find(row => row.id === 'lanyard-tls')
-    expect(tls?.config?.enabled).toEqual({ expression: "(ctx.webStartup.host ?? '127.0.0.1') === '0.0.0.0'" })
+    expect(tls?.config?.enabled).toEqual({ expression: "(ctx.webStartup.host ?? '127.0.0.1') !== '127.0.0.1' && ctx.webStartup.tls === undefined" })
   })
 })
+

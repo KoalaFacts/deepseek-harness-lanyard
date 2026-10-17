@@ -140,6 +140,12 @@ describe('the installed Remote surface', () => {
         .filter(namespace => surface.has(namespace))
         .map(namespace => [namespace, [...(surface.get(namespace) as Set<string>)].sort()]),
     )
-    expect(reachable).toEqual(REVIEWED)
+    // next folds terminal output, input and resize into the duplex attach
+    // stream. It grants the same terminal capability already reviewed here.
+    // Accept complete, known surfaces, never a per-method union that could
+    // hide an unreviewed mixture or a newly added endpoint.
+    const next = { ...REVIEWED, terminal: ['attach', 'close', 'create', 'environment', 'list', 'rename', 'retain', 'shells'] }
+    expect([REVIEWED, next]).toContainEqual(reachable)
   })
 })
+

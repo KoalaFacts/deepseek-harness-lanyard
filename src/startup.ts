@@ -49,6 +49,10 @@ export interface WebStartupValues {
   networkPort?: number
   /** Explicit `--trusted-host` authorities, in argument order. */
   trustedHosts: string[]
+  /** Existing certificate and key paths, as the upstream web provider publishes them. */
+  tls?: { certFile: string; keyFile: string }
+  /** Advertised root only; this does not add an authority to trustedHosts. */
+  publicUrl?: string
   /** `--no-open` inverted: whether to open the Web UI in the default browser. */
   openBrowser: boolean
   /** `--keep-awake`, absent when the invocation did not name it. */
@@ -63,6 +67,9 @@ interface WebOptions {
   port?: string
   networkPort?: string
   trustedHost?: string[]
+  tlsCert?: string
+  tlsKey?: string
+  publicUrl?: string
   keepAwake?: boolean
 }
 
@@ -75,10 +82,13 @@ export function webCommand(): Command {
     .name('dsh --profile web')
     .description('Serve the DeepSeek Harness browser UI (lanyard: and, with --host 0.0.0.0, your phone over your own network).')
     .helpOption('-h, --help', 'show this help')
-    .option('--host <host>', 'bind host; 0.0.0.0 also serves your network over TLS and prints a code to pair a phone')
+    .option('--host <host>', 'bind host; on next use one local IPv4 address; on older releases 0.0.0.0 also serves your network over TLS and prints a code to pair a phone')
     .option('--no-open', 'do not open the Web UI in the default browser')
     .option('--port <port>', 'listen port on this machine; pass 0 to let the OS pick a free one')
     .option('--network-port <port>', 'port devices on your network reach over TLS (default 3443)')
+    .option('--tls-cert <file>', 'PEM certificate for the TLS front; requires --tls-key')
+    .option('--tls-key <file>', 'PEM private-key path for the TLS front; requires --tls-cert')
+    .option('--public-url <url>', 'advertised HTTP(S) root on supported dsh releases; grants no trust')
     .option('--trusted-host <authority...>', 'extra authority the /api browser-trust fence accepts (host or host:port; repeatable)')
     .option('--keep-awake', 'hold the platform sleep inhibitor while dsh serves, so idle sleep cannot cut off sessions or paired devices')
     .addHelpText('after', `
@@ -99,6 +109,18 @@ Examples:
  */
 export function resolveStartupValues(program: Command): WebStartupValues {
   const options = program.opts<WebOptions>()
+  if ((options.tlsCert === undefined) !== (options.tlsKey === undefined)) {
+    program.error('error: --tls-cert and --tls-key must be supplied together')
+  }
+  if (options.publicUrl !== undefined) {
+    const value = options.publicUrl
+    const authority = value.slice(value.indexOf('://') + 3).split(/[/\\]/, 1)[0] ?? ''
+    // Match upstream's public-root contract before any row can advertise it.
+    if (/[\u0000-\u0020\u007f]/u.test(value) || !/^https?:\/\//iu.test(value)
+      || /[?#]/u.test(value) || authority === '' || authority.includes('@') || URL.parse(value) === null) {
+      program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
+    }
+  }
   // `--host 0.0.0.0` passes here on purpose; the carrier is where the bind is
   // refused unless TLS material came with it. Keeping the condition beside the
   // listener, not the flag, means a composition that configures the carrier
@@ -116,6 +138,9 @@ export function resolveStartupValues(program: Command): WebStartupValues {
     ...options.port !== undefined && { port: Number(options.port) },
     ...options.networkPort !== undefined && { networkPort: Number(options.networkPort) },
     trustedHosts: options.trustedHost ?? [],
+    ...options.tlsCert !== undefined && options.tlsKey !== undefined
+      && { tls: { certFile: options.tlsCert, keyFile: options.tlsKey } },
+    ...options.publicUrl !== undefined && { publicUrl: options.publicUrl },
     ...options.keepAwake === true && { keepAwake: true },
   }
 }
@@ -132,3 +157,4 @@ export function apply(ctx: Context): void {
   })
   parseCmdline(ctx, program)
 }
+

@@ -1,7 +1,8 @@
 name: nightly
 
 # Push CI runs the e2e against `latest` — what a person installing dsh today
-# gets. This exists for the other failure mode: this plugin composes against
+# gets. This also runs on pull requests so compatibility fixes prove both
+# channels before review. It covers the other failure mode: this plugin composes against
 # PUBLISHED @deepseek-ai/dsh packages that move on their own schedule, and it
 # replaces two shipped rows, so an upstream release can break it while nothing
 # in this repo changes. That is how the shipped --no-open flag went missing.
@@ -13,6 +14,7 @@ name: nightly
 #            before it reaches anyone
 
 on:
+  pull_request:
   schedule:
     # 03:17 UTC — off the hour, where Actions scheduling is least congested.
     - cron: '17 3 * * *'
@@ -145,3 +147,4 @@ jobs:
                 ...context.repo, issue_number: existing.number, body,
               })
             }
+

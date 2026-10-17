@@ -20,7 +20,10 @@ import type { AddressInfo } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
+import WebServer from '@deepseek-ai/dsh-host-webserver'
+import type { Config as WebServerConfig } from '@deepseek-ai/dsh-host-webserver'
 import { request } from 'node:https'
 import { request as plainRequest } from 'node:http'
 import { randomBytes } from 'node:crypto'
@@ -30,6 +33,18 @@ import { lanIpv4Addresses } from '../src/tls.ts'
 import type { IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http'
 
 export const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+
+/** Prefer one concrete interface; only older carriers require the legacy wildcard spelling. */
+export function networkBindHost(address: string, schema: typeof WebServer.Config = WebServer.Config): WebServerConfig['host'] {
+  try {
+    schema({ host: address, port: 0 } as never)
+    return address as WebServerConfig['host']
+  } catch {
+    // Validate the fallback too. Never loosen an upstream wildcard rejection.
+    schema({ host: '0.0.0.0', port: 0 })
+    return '0.0.0.0'
+  }
+}
 
 /**
  * Which `dsh` to test against.
@@ -388,13 +403,17 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })
     const profile = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8')) as Manifest
+    const profileRequire = createRequire(join(home, 'profiles', 'web', 'package.json'))
+    const appRequire = createRequire(profileRequire.resolve('@deepseek-ai/dsh-web-app/package.json'))
+    const { default: Carrier } = await import(pathToFileURL(appRequire.resolve('@deepseek-ai/dsh-host-webserver')).href) as { default: typeof WebServer }
+    const bindHost = networkBindHost(requireLan(), Carrier.Config)
 
     const localPort = await freePort()
     let port = await freePort()
     while (port === localPort) port = await freePort()
     console.log(`lanyard e2e: booting dsh on 127.0.0.1:${String(localPort)}, and the network over TLS on ${String(port)}`)
     server = spawn(dsh, [
-      '--profile', 'web', '--host', '0.0.0.0', '--port', String(localPort), '--network-port', String(port), '--no-open',
+      '--profile', 'web', '--host', bindHost, '--port', String(localPort), '--network-port', String(port), '--no-open',
     ], { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
 
     const { pairingLink, fingerprint, localUrl } = await awaitReadiness(server)
@@ -460,3 +479,4 @@ export function requireLan(): string {
   console.error('lanyard e2e: SKIPPED (not passed) — run it somewhere with a LAN interface.')
   process.exit(2)
 }
+
