@@ -363,6 +363,15 @@ interface ReadinessLines {
   localUrl: string
 }
 
+/** Ignore diagnostic lines sharing the runtime prefix; only an actual URL signals readiness. */
+export function readinessLines(output: string): ReadinessLines | undefined {
+  const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
+  const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
+  const localUrl = /^dsh web: (https?:\/\/\S+)\r?\n/m.exec(output)?.[1]
+  if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return undefined
+  return { pairingLink, fingerprint, localUrl }
+}
+
 /**
  * Wait for every readiness line; lanyard's and upstream's print after the
  * Loader settles, in either order. The fingerprint line is lanyard's last on a
@@ -376,12 +385,10 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
     }, BOOT_TIMEOUT_MS)
     const read = (chunk: Buffer | string): void => {
       output += String(chunk)
-      const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
-      const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
-      const localUrl = /dsh web: (\S+)/.exec(output)?.[1]
-      if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return
+      const lines = readinessLines(output)
+      if (lines === undefined) return
       clearTimeout(timer)
-      resolve({ pairingLink, fingerprint, localUrl })
+      resolve(lines)
     }
     server.stdout.on('data', read)
     server.stderr.on('data', read)

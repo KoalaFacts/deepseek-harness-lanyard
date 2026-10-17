@@ -10,7 +10,7 @@ import WebServer from '@deepseek-ai/dsh-host-webserver'
 import { resolveStartupValues, webCommand } from '../src/startup.ts'
 import { GatedWebServer } from '../src/webserver.ts'
 import * as Pairing from '../src/pairing.ts'
-import { installedWebCarrier, networkBindHost, plainProbe } from '../scripts/dsh-harness.ts'
+import { installedWebCarrier, networkBindHost, plainProbe, readinessLines } from '../scripts/dsh-harness.ts'
 
 function parse(args: string[]) {
   const command = webCommand().exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} })
@@ -19,6 +19,17 @@ function parse(args: string[]) {
 }
 
 describe('the next web contract', () => {
+  it('waits for the actual local URL after next runtime diagnostics', () => {
+    const output = 'dsh web: listening on 192.168.1.20 over plain HTTP; restrict this port to a trusted proxy or network\n'
+      + 'lanyard: pair a device by opening https://192.168.1.20:3443/?token=test once\n'
+      + 'lanyard: the phone should show certificate SHA-256 AA:BB before you accept\n'
+    expect(readinessLines(output)).toBeUndefined()
+    expect(readinessLines(`${output}dsh web: http://127.0.0.1:3080/?token=loc`)).toBeUndefined()
+    expect(readinessLines(`${output}dsh web: http://127.0.0.1:3080/?token=local\n`)).toEqual({
+      pairingLink: 'https://192.168.1.20:3443/?token=test', fingerprint: 'AA:BB', localUrl: 'http://127.0.0.1:3080/?token=local',
+    })
+  })
+
   it('carries TLS files and the advertised URL without granting that URL trust', () => {
     expect(parse(['--tls-cert', 'server.pem', '--tls-key', 'key.pem', '--public-url', 'https://example.test/ui/']))
       .toMatchObject({ tls: { certFile: 'server.pem', keyFile: 'key.pem' }, publicUrl: 'https://example.test/ui/', trustedHosts: [] })
