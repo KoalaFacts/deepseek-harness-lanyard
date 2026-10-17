@@ -367,7 +367,7 @@ interface ReadinessLines {
 export function readinessLines(output: string): ReadinessLines | undefined {
   const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
   const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
-  const localUrl = /^dsh web: (https?:\/\/\S+)\r?\n/m.exec(output)?.[1]
+  const localUrl = /^dsh web: (https?:\/\/\S+)(?:[ \t]+[^\r\n]*)?\r?\n/m.exec(output)?.[1]
   if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return undefined
   return { pairingLink, fingerprint, localUrl }
 }

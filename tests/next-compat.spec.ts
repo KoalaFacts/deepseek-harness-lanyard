@@ -28,6 +28,10 @@ describe('the next web contract', () => {
     expect(readinessLines(`${output}dsh web: http://127.0.0.1:3080/?token=local\n`)).toEqual({
       pairingLink: 'https://192.168.1.20:3443/?token=test', fingerprint: 'AA:BB', localUrl: 'http://127.0.0.1:3080/?token=local',
     })
+    // Stable appends a LAN annotation; next prints the local URL alone.
+    const stable = `${output}dsh web: http://127.0.0.1:3080/?token=local (LAN: http://192.168.1.20:3080/?token=local)`
+    expect(readinessLines(stable)).toBeUndefined()
+    expect(readinessLines(`${stable}\r\n`)?.localUrl).toBe('http://127.0.0.1:3080/?token=local')
   })
 
   it('carries TLS files and the advertised URL without granting that URL trust', () => {
