@@ -523,7 +523,9 @@ export class GatedWebServer extends WebServer {
     // our network front, never the inherited plaintext loopback listener.
     const { tls, ...inherited } = config
     super(ctx, { ...inherited, host: '127.0.0.1' })
-    if (tls !== undefined) {
+    // Next's schema preserves null as an explicit absence of TLS files.
+    // It must not shadow generated material or bypass the network guard below.
+    if (tls !== undefined && tls !== null) {
       if (config.tlsCertPath !== undefined || config.tlsKeyPath !== undefined) {
         throw new Error('lanyard: configure tls or tlsCertPath/tlsKeyPath, not both')
       }

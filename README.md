@@ -32,6 +32,8 @@ On dsh's 0.2.1 prerelease line, wildcard binds are rejected by the carrier itsel
 
 `--tls-cert <file> --tls-key <file>` supplies an existing PEM pair for the TLS front instead of generating one; both are required. The local listener stays plain HTTP. On dsh releases supporting it, `--public-url <url>` changes the advertised root, but grants no Host trust; use `--trusted-host` separately when needed. It does not change lanyard's direct TLS pairing address.
 
+When composing the carrier directly, `tls: null` means no explicit PEM pair, just like an omitted `tls`. A network bind still requires generated or explicit TLS material.
+
 This machine keeps its usual `http://127.0.0.1:3080`, and devices on the network get TLS on a port of their own, 3443 by default. On startup it prints the pairing link, the certificate's fingerprint, and a QR code of the link:
 
 ```
