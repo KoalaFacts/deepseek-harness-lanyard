@@ -223,6 +223,86 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       check('the mobile browser receives a live frame from its own WebSocket', phoneFrames > 0, true)
       check('mobile pairing does not lift the settings pin',
         pageRefused(await apiAnswer(phonePage, '/api/settings/describe')), true)
+
+      // ---- a paired phone reopens its saved URL after connectivity returns ----
+      // Model a phone browser whose tab is discarded while offline. This proves
+      // saved-origin recovery in Chromium touch emulation, not a hardware Wi-Fi
+      // handoff, background eviction, or survival of an unsent draft.
+      await phone.setOffline(true)
+      check('the phone reports that its network is offline',
+        await phonePage.evaluate(() => navigator.onLine), false)
+      const mobileOfflineRequestFailed = await phonePage.evaluate(async () => {
+        try {
+          await fetch('/api/session/list', {
+            method: 'POST',
+            cache: 'no-store',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              type: 'client-request', rpcId: 'phone-offline-probe',
+              method: 'session/list', payload: { args: {} },
+            }),
+          })
+          return false
+        } catch {
+          return true
+        }
+      })
+      check('the offline phone cannot reach the real session API', mobileOfflineRequestFailed, true)
+      await phonePage.close()
+      await phone.setOffline(false)
+
+      // Reuse the browser profile, not the launch token. A fresh page and
+      // socket must succeed with the original HttpOnly cookie and workspace.
+      const resumedPhone = await phone.newPage()
+      let resumedPhoneFrames = 0
+      let usedTokenOnResume = false
+      resumedPhone.on('request', (request) => {
+        if (request.isNavigationRequest() && new URL(request.url()).searchParams.has('token')) {
+          usedTokenOnResume = true
+        }
+      })
+      resumedPhone.on('websocket', (socket) => {
+        if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+        socket.on('framereceived', () => { resumedPhoneFrames += 1 })
+      })
+      const resumedPhoneSession = resumedPhone.waitForResponse(
+        response => new URL(response.url()).pathname === '/api/session/list')
+      const resumedPhoneLanding = await resumedPhone.goto(origin, { waitUntil: 'domcontentloaded' })
+      const resumedPhoneReply = await resumedPhoneSession
+      const resumedPhoneRpc = await resumedPhoneReply.json() as { result?: { ok?: unknown } }
+      check('the phone reopens its saved TLS origin after network loss', resumedPhoneLanding?.status(), 200)
+      check('the reopened phone authenticates a real session/list RPC',
+        resumedPhoneReply.status() === 200 && resumedPhoneRpc.result?.ok === true, true)
+      const phoneCookieAfterRecovery = (await phone.cookies(origin)).find(
+        cookie => cookie.name.startsWith('dsh-auth-'))
+      check('the reopened phone retains its existing secure HttpOnly session',
+        phoneCookie !== undefined && phoneCookieAfterRecovery !== undefined
+        && phoneCookieAfterRecovery.httpOnly && phoneCookieAfterRecovery.secure
+        && phoneCookieAfterRecovery.value === phoneCookie.value, true)
+      const recoveredComposer = resumedPhone.locator('[data-composer-input][contenteditable="true"]').first()
+      await recoveredComposer.waitFor({ state: 'visible', timeout: 20_000 })
+      const recoveryBounds = await recoveredComposer.boundingBox()
+      check('the existing workspace composer reappears within the phone viewport',
+        recoveryBounds !== null && recoveryBounds.x >= 0 && recoveryBounds.y >= 0
+        && recoveryBounds.x + recoveryBounds.width <= phoneSize.width + 1
+        && recoveryBounds.y + recoveryBounds.height <= 844, true)
+      const recoveredDraft = 'Continue from this workspace after reconnecting.'
+      await recoveredComposer.fill(recoveredDraft)
+      check('the reopened phone can type a fresh task draft',
+        await recoveredComposer.textContent(), recoveredDraft)
+      const resumedPhoneFrameDeadline = Date.now() + 10_000
+      while (resumedPhoneFrames === 0 && Date.now() < resumedPhoneFrameDeadline) {
+        await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+      }
+      check('the reopened phone receives frames on a new WebSocket',
+        resumedPhoneFrames > 0, true)
+      check('mobile network recovery still refuses the configuration API',
+        pageRefused(await apiAnswer(resumedPhone, '/api/settings/describe')), true)
+      // Check after the asynchronous RPC, stream and editor steps: late
+      // navigation to a pairing token must not pass unnoticed.
+      check('mobile recovery never revisits a launch-token URL', usedTokenOnResume, false)
+      check('mobile recovery ends at the saved bare TLS address', resumedPhone.url(), `${origin}/`)
+      await resumedPhone.close()
     } finally {
       await phone.close()
     }
