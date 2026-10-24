@@ -19,6 +19,8 @@
  * so the suite runs there without downloading a second browser.
  */
 
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
 import { REFUSAL_BODY } from '../src/webserver.ts'
@@ -75,7 +77,7 @@ async function gateRefused(response: Response): Promise<boolean> {
   }
 }
 
-await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
+await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
@@ -148,6 +150,82 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
     const unexpected = [...refusedOnLoad].filter(path => !PINNED_BY_DESIGN.test(path))
     if (unexpected.length > 0) console.log(`lanyard e2e: refused on load, unexpectedly: ${unexpected.join(', ')}`)
     check('everything else the shell calls on load reaches it; only the configuration plane is refused', unexpected.length, 0)
+
+    // ---- a paired, phone-sized touch browser can begin a real task draft ----
+    // Chromium mobile emulation is not a real iOS/Android device or soft keyboard.
+    // Keep the desktop pairing checks above: mobile CSS and touch events must not
+    // make the login/stream flow fail on a smaller screen.
+    const phone = await browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+      hasTouch: true,
+      locale: 'en-US',
+    })
+    try {
+      const phonePage = await phone.newPage()
+      let phoneFrames = 0
+      phonePage.on('websocket', (socket) => {
+        if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+        socket.on('framereceived', () => { phoneFrames += 1 })
+      })
+      const phoneSession = phonePage.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
+      const phoneLanding = await phonePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
+      const phoneReply = await phoneSession
+      const phoneRpc = await phoneReply.json() as { result?: { ok?: unknown } }
+      check('the phone-sized touch browser signs in over the TLS pairing link', phoneLanding?.status(), 200)
+      check('the phone-sized browser removes the launch token from its address bar', phonePage.url(), `${origin}/`)
+      check('the phone-sized browser makes a successful authenticated session/list RPC',
+        phoneReply.status() === 200 && phoneRpc.result?.ok === true, true)
+      const phoneSize = await phonePage.evaluate(() => ({
+        width: window.innerWidth,
+        touchPoints: navigator.maxTouchPoints,
+      }))
+      check('the task draft runs in an actual narrow touch-emulated viewport',
+        phoneSize.width <= 390 && phoneSize.touchPoints > 0, true)
+      const phoneCookie = (await phone.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+      check('the phone stores the upstream session as an HttpOnly Secure cookie',
+        phoneCookie?.httpOnly === true && phoneCookie.secure === true, true)
+
+      // An unconfigured DSH Home has no workspace and deliberately no editor.
+      // Take the same on-device Add Workspace → directory-picker route as an
+      // actual first-time user; merely waiting for the composer would timeout.
+      const workspacePath = join(cwd, 'phone-task-workspace')
+      mkdirSync(workspacePath, { recursive: true })
+      await phonePage.getByRole('button', { name: 'Add workspace', exact: true }).click()
+      const picker = phonePage.getByRole('dialog', { name: 'Select Workspace Directory' })
+      await picker.waitFor({ timeout: 15_000 })
+      await picker.getByRole('button', { name: 'Edit path' }).click()
+      const pathInput = picker.getByRole('textbox', { name: 'Edit path' })
+      await pathInput.fill(workspacePath)
+      await pathInput.press('Enter')
+      await picker.getByRole('button', { name: 'Open', exact: true }).click()
+      await picker.waitFor({ state: 'hidden', timeout: 15_000 })
+
+      // An authenticated homepage alone says nothing about entering a task.
+      // Use the real editable composer after mobile workspace onboarding.
+      const composer = phonePage.locator('[data-composer-input][contenteditable="true"]').first()
+      await composer.waitFor({ state: 'visible', timeout: 20_000 })
+      const composerBounds = await composer.boundingBox()
+      check('the task composer is inside the phone viewport',
+        composerBounds !== null && composerBounds.x >= 0 && composerBounds.y >= 0
+        && composerBounds.x + composerBounds.width <= phoneSize.width + 1
+        && composerBounds.y + composerBounds.height <= 844, true)
+      const draft = 'Explain the next step before running any tools.'
+      await composer.fill(draft)
+      check('a phone user can enter a task draft in the genuine composer', await composer.textContent(), draft)
+
+      const phoneFrameDeadline = Date.now() + 10_000
+      while (phoneFrames === 0 && Date.now() < phoneFrameDeadline) {
+        await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+      }
+      check('the mobile browser receives a live frame from its own WebSocket', phoneFrames > 0, true)
+      check('mobile pairing does not lift the settings pin',
+        pageRefused(await apiAnswer(phonePage, '/api/settings/describe')), true)
+    } finally {
+      await phone.close()
+    }
 
     // ---- the point of pairing: the bare address works afterwards ----
     const later = await page.goto(origin, { waitUntil: 'domcontentloaded' })
