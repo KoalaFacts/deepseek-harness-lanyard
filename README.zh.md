@@ -20,6 +20,8 @@
 dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 ```
 
+安装前请先运行 `npm view @koalafacts/deepseek-harness-lanyard version` 核对 npm 仓库里的实际版本。npm 上的 `0.0.0` 只是占位包，**并不能正常使用**；源码仓库中写着较高版本，不等于那个版本已经发布。只有 npm 仓库出现真正的发布版本，才能使用上面的安装命令。
+
 如果 Web 侧边栏里有 **Plugins（插件）** 页面，也可以直接在那里按同样的包名安装，它会显示为 *Lanyard 手机访问*。
 
 光装上什么都不会变：dsh 照旧只服务本机。要不要对局域网提供服务，每次启动时由你自己决定：
