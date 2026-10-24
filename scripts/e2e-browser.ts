@@ -235,6 +235,38 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       session !== undefined && resumedCookie !== undefined && resumedCookie.value === session.value, true)
     check('the configuration plane is still refused after recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
+
+    // ---- reopen the browser tab after a restart, without pairing again ----
+    // This exercises a new document and WebSocket with the browser profile's
+    // existing cookie. It is not an iOS/Android lock-screen, background
+    // eviction, or real Wi-Fi handoff test.
+    await page.close()
+    const reopened = await paired.newPage()
+    let reopenedMuxFrames = 0
+    reopened.on('websocket', (socket) => {
+      if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      socket.on('framereceived', () => { reopenedMuxFrames += 1 })
+    })
+    const reopenedSession = reopened.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
+    const reopenedLanding = await reopened.goto(origin, { waitUntil: 'domcontentloaded' })
+    const reopenedReply = await reopenedSession
+    const reopenedRpc = await reopenedReply.json() as { result?: { ok?: unknown } }
+    check('a newly opened browser tab uses the saved address without another pairing token',
+      reopenedLanding?.status(), 200)
+    check('the new tab authenticates its own real session/list RPC',
+      reopenedReply.status() === 200 && reopenedRpc.result?.ok === true, true)
+    const reopenedFrameDeadline = Date.now() + 10_000
+    while (reopenedMuxFrames === 0 && Date.now() < reopenedFrameDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('the new tab receives a frame on its own stream WebSocket', reopenedMuxFrames > 0, true)
+    const reopenedCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    check('reopening the tab retains the original HttpOnly session cookie',
+      session !== undefined && reopenedCookie !== undefined
+      && reopenedCookie.httpOnly && reopenedCookie.value === session.value, true)
+    check('the new tab still cannot reach the configuration plane',
+      pageRefused(await apiAnswer(reopened, '/api/settings/describe')), true)
+    await reopened.close()
     await paired.close()
 
     // ---- neither the old launch token nor a forged one can pair ----
