@@ -186,6 +186,8 @@ export interface Deployment {
   packageName: string
   /** The profile's composed bundle layer list. */
   bundles: string[]
+  /** Stop and reboot the same installed dsh, retaining its DSH_HOME and listener addresses. */
+  restart: () => Promise<ReadinessLines>
 }
 
 /**
@@ -357,7 +359,7 @@ export const admitted = (answer: Answer): boolean => !refused(answer)
 type DshProcess = ChildProcessByStdio<null, Readable, Readable>
 
 /** The readiness lines under test: lanyard's pairing link and fingerprint, and upstream's own URL line. */
-interface ReadinessLines {
+export interface ReadinessLines {
   pairingLink: string
   fingerprint: string
   localUrl: string
@@ -431,9 +433,9 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     let port = await freePort()
     while (port === localPort) port = await freePort()
     console.log(`lanyard e2e: booting dsh on 127.0.0.1:${String(localPort)}, and the network over TLS on ${String(port)}`)
-    server = spawn(dsh, [
-      '--profile', 'web', '--host', bindHost, '--port', String(localPort), '--network-port', String(port), '--no-open',
-    ], { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const args = ['--profile', 'web', '--host', bindHost, '--port', String(localPort), '--network-port', String(port), '--no-open']
+    const boot = (): DshProcess => spawn(dsh, args, { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    server = boot()
 
     const { pairingLink, fingerprint, localUrl } = await awaitReadiness(server)
 
@@ -451,9 +453,37 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     }
     const ca = readFileSync(certPath, 'utf8')
 
+    const restart = async (): Promise<ReadinessLines> => {
+      const previous = server
+      if (previous === undefined || previous.exitCode !== null || previous.signalCode !== null) {
+        throw new Error('lanyard e2e: cannot restart a dsh process that is no longer running')
+      }
+      // Wait for the old process to release BOTH ports before spawning a new
+      // one. Merely sending SIGTERM would race the new carrier against it.
+      const exited = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          previous.kill('SIGKILL')
+          reject(new Error('lanyard e2e: dsh did not stop within 15 seconds'))
+        }, 15_000)
+        previous.once('exit', () => {
+          clearTimeout(timeout)
+          resolve()
+        })
+        previous.once('error', (error) => {
+          clearTimeout(timeout)
+          reject(error)
+        })
+      })
+      previous.kill('SIGTERM')
+      await exited
+      console.log('lanyard e2e: restarting dsh in the same workspace and on the same ports')
+      server = boot()
+      return await awaitReadiness(server)
+    }
+
     return await body({
       dsh, env, cwd: workspace, port, localPort, pairingLink, fingerprint, localUrl, packageName: name, ca,
-      bundles: profile.dsh?.profile?.bundles ?? [],
+      bundles: profile.dsh?.profile?.bundles ?? [], restart,
     })
   } finally {
     server?.kill('SIGTERM')
