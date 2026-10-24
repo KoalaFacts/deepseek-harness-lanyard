@@ -33,7 +33,7 @@ export function isWaveIncomplete(reported: string, requested: readonly string[])
 }
 
 const invoked = process.argv[1]
-if (invoked !== undefined && import.meta.url === pathToFileURL(realpathSync(invoked)).href) {
+if (invoked !== undefined && invoked !== '-' && import.meta.url === pathToFileURL(realpathSync(invoked)).href) {
   try {
     run('pnpm', ['add', '-D', ...NEXT_PACKAGES.map(name => `${name}@next`)], { cwd: ROOT })
   } catch (error) {
