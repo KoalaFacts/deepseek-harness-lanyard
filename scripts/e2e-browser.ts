@@ -115,8 +115,15 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       }))
     })
     let muxFrames = 0
+    let expectingRecoveredSocket = false
+    let recoveredMuxFrames = 0
     page.on('websocket', (socket) => {
-      if (new URL(socket.url()).pathname === '/api/remote.mux') socket.on('framereceived', () => { muxFrames += 1 })
+      if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      const openedAfterRestart = expectingRecoveredSocket
+      socket.on('framereceived', () => {
+        muxFrames += 1
+        if (openedAfterRestart) recoveredMuxFrames += 1
+      })
     })
     const sessionList = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
     await page.goto(pairingLink, { waitUntil: 'domcontentloaded' })
