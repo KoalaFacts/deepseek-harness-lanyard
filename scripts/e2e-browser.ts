@@ -75,7 +75,7 @@ async function gateRefused(response: Response): Promise<boolean> {
   }
 }
 
-await withDshDeployment(async ({ port, pairingLink }) => {
+await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
@@ -143,11 +143,37 @@ await withDshDeployment(async ({ port, pairingLink }) => {
     check('a later visit to the bare address needs no link', later?.status(), 200)
     check('while the configuration plane stays refused, even paired',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
+
+    // ---- restart dsh: the same phone should resume without scanning again ----
+    const restarted = await restart()
+    check('a restart reuses the certificate the phone trusted', restarted.fingerprint, fingerprint)
+    const oldToken = new URL(pairingLink).searchParams.get('token')
+    const newToken = new URL(restarted.pairingLink).searchParams.get('token')
+    check('the restart rotated its launch token, rather than reusing the old pairing link',
+      oldToken !== null && newToken !== null && oldToken !== newToken, true)
+
+    // A fresh page navigation mimics reopening the bookmarked address after
+    // dsh has restarted. The browser context (and its original session cookie)
+    // is deliberately preserved; a new context would quietly mask a failure.
+    const resumedSession = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
+    const resumedStream = page.waitForEvent('websocket', {
+      predicate: socket => new URL(socket.url()).pathname === '/api/remote.mux',
+    })
+    const resumedPage = await page.goto(origin, { waitUntil: 'domcontentloaded' })
+    const [listedAfterRestart] = await Promise.all([resumedSession, resumedStream])
+    check('the same phone opens its bookmarked URL after dsh restarts, without pairing again', resumedPage?.status(), 200)
+    check('its previous session still works for the shell API', listedAfterRestart.status(), 200)
+    check('the browser retained its existing HttpOnly session rather than getting a new one',
+      (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))?.value, session?.value)
+    check('the configuration plane is still refused after recovery',
+      pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
     await paired.close()
 
-    // ---- a wrong token must not pair ----
+    // ---- neither the old launch token nor a forged one can pair ----
     const hostile = await browser.newContext({ ignoreHTTPSErrors: true })
     const hostilePage = await hostile.newPage()
+    const expired = await hostilePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
+    check('the previous process\'s pairing link is invalid after restart', expired?.status(), 401)
     const forged = await hostilePage.goto(`${origin}/?token=${'A'.repeat(43)}`, { waitUntil: 'domcontentloaded' })
     check('a link carrying the wrong token is refused', forged?.status(), 401)
     check('and leaves no session behind', (await hostile.cookies(origin)).some(cookie => cookie.name.startsWith('dsh-auth-')), false)
