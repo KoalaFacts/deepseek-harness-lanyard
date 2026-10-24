@@ -177,8 +177,10 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       await new Promise<void>(resolve => { setTimeout(resolve, 50) })
     }
     check('the recovered stream delivers a frame on a new WebSocket', recoveredMuxFrames > 0, true)
+    // Never log the cookie value in CI: it is a bearer credential.
+    const resumedCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
     check('the browser retained its existing HttpOnly session rather than getting a new one',
-      (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))?.value, session?.value)
+      session !== undefined && resumedCookie !== undefined && resumedCookie.value === session.value, true)
     check('the configuration plane is still refused after recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
     await paired.close()
