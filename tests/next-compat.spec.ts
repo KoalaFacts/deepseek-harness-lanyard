@@ -99,6 +99,28 @@ describe('the next web contract', () => {
     expect((server as unknown as { protocol?: string }).protocol ?? 'http:').toBe('http:')
   })
 
+  it('treats schema-accepted null TLS as absent on the loopback listener', () => {
+    // Next documents null as disabled, and Schemastery preserves that value.
+    // Read the validated config so this catches a schema/constructor mismatch.
+    const config = GatedWebServer.Config({ host: '127.0.0.1', port: 0, tls: null } as never)
+    expect(config.tls).toBeNull()
+    const server = new GatedWebServer(new Context(), config)
+    expect((server as unknown as { protocol?: string }).protocol ?? 'http:').toBe('http:')
+  })
+
+  it('still requires TLS material for a network bind when explicit TLS is null', () => {
+    const config = GatedWebServer.Config({ host: networkBindHost('192.168.1.20'), port: 0, tls: null } as never)
+    expect(() => new GatedWebServer(new Context(), config)).toThrow(/network bind requires TLS material/)
+  })
+
+  it('retains generated TLS paths when the optional explicit TLS source is null', () => {
+    const config = GatedWebServer.Config({
+      host: networkBindHost('192.168.1.20'), port: 0, tls: null,
+      tlsCertPath: 'server.pem', tlsKeyPath: 'key.pem',
+    } as never)
+    expect(() => new GatedWebServer(new Context(), config)).not.toThrow()
+  })
+
   it('probes the separate plaintext loopback listener with the actual RPC response body', async () => {
     const server = createServer((req, res) => {
       let body = ''

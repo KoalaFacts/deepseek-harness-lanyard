@@ -86,8 +86,10 @@ describe('what the Plugins page shows', () => {
   })
 
   it('publishes the icon and every locale file in the package itself', () => {
+    // npm's startup and package walk can exceed the unit-test default on a
+    // cold next-bundle install. Bound the child as well as the outer test.
     const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
-      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000,
     })) as [{ files: { path: string }[] }]
     const shipped = new Set(packed.files.map(file => file.path))
     const wanted = [
@@ -96,7 +98,7 @@ describe('what the Plugins page shows', () => {
         relative(root, require.resolve(`${specifier}/locale/${language}.json`)).split('\\').join('/'))),
     ]
     expect(wanted.filter(path => !shipped.has(path))).toEqual([])
-  })
+  }, 30_000)
 })
 
 describe('whether dsh admits it', () => {

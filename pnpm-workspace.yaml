@@ -4,3 +4,10 @@
 # then refuses the mismatch.
 overrides:
   js-yaml@>=4.0.0 <4.3.2: ^4.3.2
+  # dsh-app-boot 0.2.1-rc.2 needs ~1.0.5; a reused auto-peer entry
+  # otherwise leaves 1.0.4 in this development tree. Revisit on the next DSH sync.
+  '@deepseek-ai/cordis-plugin-group': 1.0.5
+  # dsh-otel 0.2.1-rc.2 fixes its SDKs at 2.11.0 / 0.222.0, whose API
+  # peers require <1.10.0. 1.9.1 satisfies those and every API consumer here.
+  # This root-only resolution does not change a user's installed DSH tree.
+  '@opentelemetry/api': 1.9.1
