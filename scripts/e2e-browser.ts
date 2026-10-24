@@ -162,14 +162,19 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
     // A fresh page navigation mimics reopening the bookmarked address after
     // dsh has restarted. The browser context (and its original session cookie)
     // is deliberately preserved; a new context would quietly mask a failure.
+    expectingRecoveredSocket = true
     const resumedSession = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
-    const resumedStream = page.waitForEvent('websocket', {
-      predicate: socket => new URL(socket.url()).pathname === '/api/remote.mux',
-    })
     const resumedPage = await page.goto(origin, { waitUntil: 'domcontentloaded' })
-    const [listedAfterRestart] = await Promise.all([resumedSession, resumedStream])
+    const listedAfterRestart = await resumedSession
     check('the same phone opens its bookmarked URL after dsh restarts, without pairing again', resumedPage?.status(), 200)
     check('its previous session still works for the shell API', listedAfterRestart.status(), 200)
+    // Observing a WebSocket object is not a successful handshake. Require a
+    // frame on a socket opened after restart, never the previous socket.
+    const frameDeadline = Date.now() + 10_000
+    while (recoveredMuxFrames === 0 && Date.now() < frameDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('the recovered stream delivers a frame on a new WebSocket', recoveredMuxFrames > 0, true)
     check('the browser retained its existing HttpOnly session rather than getting a new one',
       (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))?.value, session?.value)
     check('the configuration plane is still refused after recovery',
