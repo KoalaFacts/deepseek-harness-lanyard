@@ -260,8 +260,6 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
     const reopenedReply = await reopenedSession
     const reopenedRpc = await reopenedReply.json() as { result?: { ok?: unknown } }
     check('a newly opened browser tab loads the saved address', reopenedLanding?.status(), 200)
-    check('reopening never navigates to a pairing-token URL', reopenedSawPairingToken, false)
-    check('the reopened tab stays on the bookmarked bare TLS origin', reopened.url(), `${origin}/`)
     check('the new tab authenticates its own real session/list RPC',
       reopenedReply.status() === 200 && reopenedRpc.result?.ok === true, true)
     const reopenedFrameDeadline = Date.now() + 10_000
@@ -275,6 +273,10 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       && reopenedCookie.httpOnly && reopenedCookie.value === session.value, true)
     check('the new tab still cannot reach the configuration plane',
       pageRefused(await apiAnswer(reopened, '/api/settings/describe')), true)
+    // Evaluate navigation history and final URL *after* asynchronous RPC,
+    // frame and configuration probes: a late redirect must still fail.
+    check('reopening never navigates to a pairing-token URL', reopenedSawPairingToken, false)
+    check('the reopened tab stays on the bookmarked bare TLS origin', reopened.url(), `${origin}/`)
     await reopened.close()
     await paired.close()
 
