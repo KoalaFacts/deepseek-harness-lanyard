@@ -167,7 +167,9 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
     const resumedPage = await page.goto(origin, { waitUntil: 'domcontentloaded' })
     const listedAfterRestart = await resumedSession
     check('the same phone opens its bookmarked URL after dsh restarts, without pairing again', resumedPage?.status(), 200)
-    check('its previous session still works for the shell API', listedAfterRestart.status(), 200)
+    const resumedRpc = await listedAfterRestart.json() as { result?: { ok?: unknown } }
+    check('its previous session still successfully lists sessions, not just returns HTTP 200',
+      listedAfterRestart.status() === 200 && resumedRpc.result?.ok === true, true)
     // Observing a WebSocket object is not a successful handshake. Require a
     // frame on a socket opened after restart, never the previous socket.
     const frameDeadline = Date.now() + 10_000
