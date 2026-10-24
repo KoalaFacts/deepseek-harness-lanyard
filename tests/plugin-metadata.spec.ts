@@ -47,7 +47,16 @@ const LANGUAGE_ID = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u
 /** dsh's own admission rule: every DSH peer must match, and prereleases take part. */
 const admits = (range: string, version: string): boolean => semver.satisfies(version, range, { includePrerelease: true })
 
+/** Expand all locale placeholders, even if a future manifest accidentally contains more than one. */
+const expandLocaleTarget = (target: string, language: string): string => target.replace(/\*/g, language)
+
 describe('what the Plugins page shows', () => {
+  it('expands zero, one, and multiple locale placeholders', () => {
+    expect(expandLocaleTarget('./lib/index.js', 'zh')).toBe('./lib/index.js')
+    expect(expandLocaleTarget('./locale/*.json', 'zh')).toBe('./locale/zh.json')
+    expect(expandLocaleTarget('./locale/*/*.json', 'en')).toBe('./locale/en/en.json')
+  })
+
   it('declares the manifest format dsh reads', () => {
     expect(manifest.dsh.manifestVersion).toBe(1)
   })
@@ -112,7 +121,7 @@ describe('what the Plugins page shows', () => {
       typeof value === 'string' ? [value] : Object.values(value))) {
       expect(target.match(/\*/g)?.length ?? 0).toBeLessThanOrEqual(1)
       if (target.includes('*')) expect(target).toMatch(/\/\*\.json$/)
-      for (const expanded of target.includes('*') ? LANGUAGES.map(language => target.replace('*', language)) : [target]) {
+      for (const expanded of target.includes('*') ? LANGUAGES.map(language => expandLocaleTarget(target, language)) : [target]) {
         wanted.push(expanded.replace(/^\.\//, ''))
       }
     }
