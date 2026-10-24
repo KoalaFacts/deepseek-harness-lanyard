@@ -115,13 +115,17 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       }))
     })
     let muxFrames = 0
+    let expectingOfflineRecovery = false
+    let offlineRecoveryFrames = 0
     let expectingRecoveredSocket = false
     let recoveredMuxFrames = 0
     page.on('websocket', (socket) => {
       if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      const openedAfterOffline = expectingOfflineRecovery
       const openedAfterRestart = expectingRecoveredSocket
       socket.on('framereceived', () => {
         muxFrames += 1
+        if (openedAfterOffline) offlineRecoveryFrames += 1
         if (openedAfterRestart) recoveredMuxFrames += 1
       })
     })
@@ -149,6 +153,54 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
     const later = await page.goto(origin, { waitUntil: 'domcontentloaded' })
     check('a later visit to the bare address needs no link', later?.status(), 200)
     check('while the configuration plane stays refused, even paired',
+      pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
+
+    // ---- a phone temporarily loses its network, then opens its saved address ----
+    // This is a Chromium-level connectivity interruption, not an iOS/Android
+    // hardware or Wi-Fi handoff test. Keep this browser context and its cookie;
+    // creating a new context or revisiting the token-bearing URL would hide
+    // the very recovery regression this checks.
+    await paired.setOffline(true)
+    check('the paired browser detects loss of network connectivity',
+      await page.evaluate(() => navigator.onLine), false)
+    const unreachableWhileOffline = await page.evaluate(async () => {
+      try {
+        // POST cannot be satisfied by a cached document or service worker
+        // navigation. It must fail at the network boundary while offline.
+        await fetch('/api/session/list', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            type: 'client-request', rpcId: 'offline-probe', method: 'session/list', payload: { args: {} },
+          }),
+        })
+        return false
+      } catch {
+        return true
+      }
+    })
+    check('the browser cannot send an API request while offline', unreachableWhileOffline, true)
+
+    await paired.setOffline(false)
+    expectingOfflineRecovery = true
+    const onlineSession = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
+    const onlinePage = await page.goto(origin, { waitUntil: 'domcontentloaded' })
+    const onlineReply = await onlineSession
+    const onlineRpc = await onlineReply.json() as { result?: { ok?: unknown } }
+    check('the bookmarked TLS address loads again without a new pairing link', onlinePage?.status(), 200)
+    check('the prior session authenticates real RPC after connectivity returns',
+      onlineReply.status() === 200 && onlineRpc.result?.ok === true, true)
+    const onlineFrameDeadline = Date.now() + 10_000
+    while (offlineRecoveryFrames === 0 && Date.now() < onlineFrameDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('a new WebSocket receives a frame after network recovery', offlineRecoveryFrames > 0, true)
+    expectingOfflineRecovery = false
+    const onlineCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    check('network recovery keeps the same HttpOnly session cookie',
+      session !== undefined && onlineCookie !== undefined && onlineCookie.value === session.value, true)
+    check('the configuration plane stays refused after network recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
 
     // ---- restart dsh: the same phone should resume without scanning again ----
