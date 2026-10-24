@@ -19,6 +19,8 @@
  * so the suite runs there without downloading a second browser.
  */
 
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
 import { REFUSAL_BODY } from '../src/webserver.ts'
@@ -75,7 +77,7 @@ async function gateRefused(response: Response): Promise<boolean> {
   }
 }
 
-await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
+await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
@@ -186,9 +188,23 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       check('the phone stores the upstream session as an HttpOnly Secure cookie',
         phoneCookie?.httpOnly === true && phoneCookie.secure === true, true)
 
+      // An unconfigured DSH Home has no workspace and deliberately no editor.
+      // Take the same on-device Add Workspace → directory-picker route as an
+      // actual first-time user; merely waiting for the composer would timeout.
+      const workspacePath = join(cwd, 'phone-task-workspace')
+      mkdirSync(workspacePath, { recursive: true })
+      await phonePage.getByRole('button', { name: 'Add workspace', exact: true }).click()
+      const picker = phonePage.getByRole('dialog', { name: 'Select Workspace Directory' })
+      await picker.waitFor({ timeout: 15_000 })
+      await picker.getByRole('button', { name: 'Edit path' }).click()
+      const pathInput = picker.getByRole('textbox', { name: 'Edit path' })
+      await pathInput.fill(workspacePath)
+      await pathInput.press('Enter')
+      await picker.getByRole('button', { name: 'Open', exact: true }).click()
+      await picker.waitFor({ state: 'hidden', timeout: 15_000 })
+
       // An authenticated homepage alone says nothing about entering a task.
-      // Wait for the actual shipped composer, then make a typed draft using
-      // the same editable surface a handset user touches (no synthetic RPC).
+      // Use the real editable composer after mobile workspace onboarding.
       const composer = phonePage.locator('[data-composer-input][contenteditable="true"]').first()
       await composer.waitFor({ state: 'visible', timeout: 20_000 })
       const composerBounds = await composer.boundingBox()
