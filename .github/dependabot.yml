@@ -18,8 +18,6 @@ updates:
       actions:
         patterns:
           - "*"
-    labels:
-      - "dependencies"
 
   # The plugin's own dependencies: commander, qrcode-terminal, selfsigned, and
   # the toolchain.
@@ -40,5 +38,3 @@ updates:
     # them by tilde.
     ignore:
       - dependency-name: "@deepseek-ai/*"
-    labels:
-      - "dependencies"
