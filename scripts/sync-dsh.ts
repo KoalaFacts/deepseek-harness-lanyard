@@ -71,7 +71,7 @@ function latestVersion(): string {
 }
 
 const invoked = process.argv[1]
-if (invoked !== undefined && import.meta.url === pathToFileURL(realpathSync(invoked)).href) {
+if (invoked !== undefined && invoked !== '-' && import.meta.url === pathToFileURL(realpathSync(invoked)).href) {
   const path = join(dirname(dirname(fileURLToPath(import.meta.url))), 'package.json')
   const text = readFileSync(path, 'utf8')
   const manifest = JSON.parse(text) as { devDependencies: Record<string, string> }
