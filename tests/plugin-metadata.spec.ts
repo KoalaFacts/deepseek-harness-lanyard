@@ -23,6 +23,9 @@ const require = createRequire(join(root, 'package.json'))
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
   name: string
   icon?: string
+  main: string
+  types: string
+  exports: Record<string, string | Record<string, string>>
   engines: Record<string, string>
   peerDependencies: Record<string, string>
   dsh: { manifestVersion?: number }
@@ -44,7 +47,16 @@ const LANGUAGE_ID = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u
 /** dsh's own admission rule: every DSH peer must match, and prereleases take part. */
 const admits = (range: string, version: string): boolean => semver.satisfies(version, range, { includePrerelease: true })
 
+/** Expand all locale placeholders, even if a future manifest accidentally contains more than one. */
+const expandLocaleTarget = (target: string, language: string): string => target.replace(/\*/g, language)
+
 describe('what the Plugins page shows', () => {
+  it('expands zero, one, and multiple locale placeholders', () => {
+    expect(expandLocaleTarget('./lib/index.js', 'zh')).toBe('./lib/index.js')
+    expect(expandLocaleTarget('./locale/*.json', 'zh')).toBe('./locale/zh.json')
+    expect(expandLocaleTarget('./locale/*/*.json', 'en')).toBe('./locale/en/en.json')
+  })
+
   it('declares the manifest format dsh reads', () => {
     expect(manifest.dsh.manifestVersion).toBe(1)
   })
@@ -85,19 +97,52 @@ describe('what the Plugins page shows', () => {
     expect(readFileSync(file, 'utf8').trimStart().startsWith('<svg')).toBe(true)
   })
 
-  it('publishes the icon and every locale file in the package itself', () => {
-    // npm's startup and package walk can exceed the unit-test default on a
-    // cold next-bundle install. Bound the child as well as the outer test.
+  it('packs every declared entry point, its locales, and no development-only files', () => {
+    // Inspect npm's actual publish selection, not what happens to be present
+    // in the checkout. --ignore-scripts stops prepare masking missing lib/ files.
     const [packed] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000,
-    })) as [{ files: { path: string }[] }]
+    })) as [{ files: { path: string }[]; size: number; unpackedSize: number }]
     const shipped = new Set(packed.files.map(file => file.path))
+
     const wanted = [
+      'package.json', 'LICENSE', 'README.md', 'README.zh.md',
       manifest.icon?.replace(/^\.\//, '') ?? '',
+      manifest.main.replace(/^\.\//, ''),
+      manifest.types.replace(/^\.\//, ''),
       ...[manifest.name, ...rowModules].flatMap(specifier => LANGUAGES.map(language =>
         relative(root, require.resolve(`${specifier}/locale/${language}.json`)).split('\\').join('/'))),
     ]
-    expect(wanted.filter(path => !shipped.has(path))).toEqual([])
+
+    // A missing runtime JS or declaration can be masked by a successful build
+    // importing from the checkout. Every literal export and each localized
+    // wildcard destination must actually be part of the npm tarball.
+    for (const target of Object.values(manifest.exports).flatMap(value =>
+      typeof value === 'string' ? [value] : Object.values(value))) {
+      expect(target.match(/\*/g)?.length ?? 0).toBeLessThanOrEqual(1)
+      if (target.includes('*')) expect(target).toMatch(/\/\*\.json$/)
+      for (const expanded of target.includes('*') ? LANGUAGES.map(language => expandLocaleTarget(target, language)) : [target]) {
+        wanted.push(expanded.replace(/^\.\//, ''))
+      }
+    }
+    expect([...new Set(wanted)].sort().filter(path => !shipped.has(path))).toEqual([])
+
+    // Keep private sources, test fixtures, CI configuration, credentials, and
+    // generated source maps out of what a user installs.
+    expect([...shipped].filter(path =>
+      /^(?:src|tests|scripts|\.github)\//.test(path) ||
+      /(?:^|\/)\.env(?:\.|$)/.test(path) ||
+      path === 'pnpm-lock.yaml' ||
+      path.endsWith('.map'),
+    )).toEqual([])
+
+    // A generous first ceiling; record the real compressed/unpacked sizes so
+    // a later optimization can tighten it from measured evidence.
+    expect(packed.size).toBeGreaterThan(0)
+    expect(packed.unpackedSize).toBeGreaterThan(0)
+    expect(packed.size).toBeLessThanOrEqual(1024 * 1024)
+    expect(packed.unpackedSize).toBeLessThanOrEqual(4 * 1024 * 1024)
+    console.info(`lanyard: npm package budget — ${packed.size} packed / ${packed.unpackedSize} unpacked bytes`)
   }, 30_000)
 })
 

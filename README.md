@@ -20,6 +20,8 @@ This lifts the refusal and supplies what a network bind still lacks: TLS, dsh's 
 dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 ```
 
+Before installing, check `npm view @koalafacts/deepseek-harness-lanyard version`. The `0.0.0` npm package is only a placeholder, **not a working plugin**; a newer version in this source repository does not mean it has been published. Install by the command above only once the registry reports a real release.
+
 Or, where the web sidebar has a **Plugins** page, install it there by the same name; it is listed as *Lanyard — phone access*.
 
 Installing changes nothing on its own: dsh goes on serving this machine only. Serving your network is a choice you make each time you start it:
