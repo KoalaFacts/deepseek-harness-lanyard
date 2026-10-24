@@ -247,12 +247,21 @@ await withDshDeployment(async ({ port, pairingLink, fingerprint, restart }) => {
       if (new URL(socket.url()).pathname !== '/api/remote.mux') return
       socket.on('framereceived', () => { reopenedMuxFrames += 1 })
     })
+    // Merely passing goto(origin) does not prove the app did not redirect to
+    // a token-bearing link. Observe all navigation requests on this new page.
+    let reopenedSawPairingToken = false
+    reopened.on('request', (request) => {
+      if (request.isNavigationRequest() && new URL(request.url()).searchParams.has('token')) {
+        reopenedSawPairingToken = true
+      }
+    })
     const reopenedSession = reopened.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
     const reopenedLanding = await reopened.goto(origin, { waitUntil: 'domcontentloaded' })
     const reopenedReply = await reopenedSession
     const reopenedRpc = await reopenedReply.json() as { result?: { ok?: unknown } }
-    check('a newly opened browser tab uses the saved address without another pairing token',
-      reopenedLanding?.status(), 200)
+    check('a newly opened browser tab loads the saved address', reopenedLanding?.status(), 200)
+    check('reopening never navigates to a pairing-token URL', reopenedSawPairingToken, false)
+    check('the reopened tab stays on the bookmarked bare TLS origin', reopened.url(), `${origin}/`)
     check('the new tab authenticates its own real session/list RPC',
       reopenedReply.status() === 200 && reopenedRpc.result?.ok === true, true)
     const reopenedFrameDeadline = Date.now() + 10_000
