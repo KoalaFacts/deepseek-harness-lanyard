@@ -225,18 +225,38 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
         pageRefused(await apiAnswer(phonePage, '/api/settings/describe')), true)
 
       // ---- touch Send -> real Host command -> visible acknowledgement ----
-      // /feedback is a built-in, model-free command: this tests a complete
-      // phone-originated action without external credentials or an LLM fixture.
-      // It is NOT a test of model prompts, tool approval, or agent results.
+      // Generic commands such as /feedback deliberately leave a fresh, blank
+      // Session on its empty hero, hiding their otherwise persisted result row.
+      // A read-only /goal command contributes a visible input node, opening
+      // Chat with no model request; then /feedback can show its result.
+      const goalReply = phonePage.waitForResponse(
+        response => new URL(response.url()).pathname === '/api/commands/execute')
+      await composer.fill('/goal')
+      await phonePage.getByRole('button', { name: 'Send message', exact: true }).tap()
+      const goalResponse = await goalReply
+      const goalRpc = await goalResponse.json() as {
+        result?: { ok?: unknown; value?: { result?: { kind?: unknown } } }
+      }
+      check('a phone tap executes the read-only goal status command',
+        goalResponse.status() === 200 && goalRpc.result?.ok === true
+        && goalRpc.result.value?.result?.kind === 'success', true)
+      await phonePage.getByText(/No goal is currently set/).first()
+        .waitFor({ state: 'visible', timeout: 10_000 })
+
+      // /feedback is a built-in, model-free command: this verifies the real
+      // phone-to-Host path without credentials, an LLM, or a replay fixture.
       const feedback = '/feedback Verify phone LAN command delivery.'
       await composer.fill(feedback)
       const feedbackReply = phonePage.waitForResponse(
         response => new URL(response.url()).pathname === '/api/commands/execute')
       await phonePage.getByRole('button', { name: 'Send message', exact: true }).tap()
       const commandResponse = await feedbackReply
-      const commandRpc = await commandResponse.json() as { result?: { ok?: unknown } }
-      check('tapping Send on the phone reaches and succeeds at the real Host command endpoint',
-        commandResponse.status() === 200 && commandRpc.result?.ok === true, true)
+      const commandRpc = await commandResponse.json() as {
+        result?: { ok?: unknown; value?: { result?: { kind?: unknown } } }
+      }
+      check('tapping Send executes feedback successfully in the real Host',
+        commandResponse.status() === 200 && commandRpc.result?.ok === true
+        && commandRpc.result.value?.result?.kind === 'success', true)
       const receipt = phonePage.getByText(/Feedback recorded for session/)
       await receipt.waitFor({ state: 'visible', timeout: 10_000 })
       check('the phone shows the real Host command acknowledgement', await receipt.isVisible(), true)
