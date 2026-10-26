@@ -722,7 +722,7 @@ try {
     // This is a real DSH Agent/model-adapter/UI round trip. Only the
     // non-deterministic model endpoint is fake, and it listens on loopback.
     // Checking Host acceptance or local chat echo is insufficient.
-    const visibleModelReply = mobileAfterRestart.getByText(MODEL_REPLY, { exact: true })
+    const visibleModelReply = mobileAfterRestart.locator('[data-chat-flow]').getByText(MODEL_REPLY, { exact: true }).first()
     await visibleModelReply.waitFor({ state: 'visible', timeout: 30_000 })
     check('the paired phone displays the actual streamed model response',
       await visibleModelReply.isVisible(), true)
