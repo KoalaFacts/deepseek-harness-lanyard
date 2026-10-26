@@ -22,6 +22,23 @@ dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 
 Before installing, check `npm view @koalafacts/deepseek-harness-lanyard version`. The `0.0.0` npm package is only a placeholder, **not a working plugin**; a newer version in this source repository does not mean it has been published. Install by the command above only once the registry reports a real release.
 
+### Install a local tarball while npm only has the placeholder
+
+If `npm view @koalafacts/deepseek-harness-lanyard version` still says `0.0.0`, install a **locally packed copy of this source** instead of that non-working registry placeholder. Run these commands on the **computer running dsh**, not the phone. You need an already installed `dsh` CLI, Node.js 22.19+ on the 22.x line or 24+, and pnpm 10.
+
+```sh
+git clone https://github.com/KoalaFacts/deepseek-harness-lanyard.git
+cd deepseek-harness-lanyard
+pnpm install --frozen-lockfile
+npm run check
+pnpm pack --pack-destination .
+dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz"
+```
+
+The tarball filename above corresponds to this checkout's current `package.json` version (`0.2.0`); if that version changes, use the `.tgz` filename printed by `pnpm pack`. On Windows PowerShell, give `dsh plugin ... add` the absolute path to the generated `.tgz` instead of the POSIX `$PWD/...` expression. Keep `git rev-parse HEAD` with your test results so the installed source is identifiable.
+
+This **does not publish anything to npm** or open the LAN automatically. The existing real-DSH e2e installs this same kind of local tarball into a clean profile; that is not a substitute for an official npm release or a physical phone test. Once installed, start dsh with an explicit trusted-LAN address as described below, and follow the TLS certificate/fingerprint pairing instructions.
+
 Or, where the web sidebar has a **Plugins** page, install it there by the same name; it is listed as *Lanyard — phone access*.
 
 Installing changes nothing on its own: dsh goes on serving this machine only. Serving your network is a choice you make each time you start it:
