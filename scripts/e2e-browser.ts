@@ -103,6 +103,46 @@ function commandRequestId(response: Response, line: string): string | undefined 
   }
 }
 
+/**
+ * Correlate a normal message from the touch composer with the exact Host
+ * session/prompt request. A generic 200 on this path could belong to another
+ * tab or request and must not count as this phone's submission.
+ */
+function promptRequestId(response: Response, expectedText: string): string | undefined {
+  if (new URL(response.url()).pathname !== '/api/session/prompt') return undefined
+  try {
+    const message = response.request().postDataJSON() as {
+      type?: unknown
+      method?: unknown
+      rpcId?: unknown
+      payload?: { args?: { request?: {
+        requestId?: unknown
+        sessionId?: unknown
+        mode?: unknown
+        content?: unknown
+      } } }
+    } | null
+    const prompt = message?.payload?.args?.request
+    const content = prompt?.content
+    if (message?.type !== 'client-request' || message.method !== 'session/prompt'
+      || typeof message.rpcId !== 'string' || message.rpcId.length === 0
+      || typeof prompt?.requestId !== 'string' || prompt.requestId.length === 0
+      || typeof prompt.sessionId !== 'string' || prompt.sessionId.length === 0
+      || prompt.mode !== 'queue' || !Array.isArray(content) || content.length !== 1) return undefined
+    const part = content[0] as { type?: unknown; text?: unknown } | undefined
+    return part?.type === 'text' && part.text === expectedText ? message.rpcId : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The Host's response to an ordinary session prompt, not an LLM completion. */
+interface PromptRpcReply {
+  type?: unknown
+  rpcId?: unknown
+  result?: { ok?: unknown; value?: { accepted?: unknown } }
+}
+
 /** The Host's response envelope to a built-in slash command. */
 interface CommandRpcReply {
   type?: unknown
@@ -574,6 +614,31 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       pageRefused(await apiAnswer(mobileAfterRestart, '/api/settings/describe')), true)
     check('the resumed mobile tab never requests a new pairing token', mobileRestartSawToken, false)
     check('the resumed mobile tab ends at the saved TLS origin', mobileAfterRestart.url(), `${origin}/`)
+    // ---- first ordinary phone prompt reaches the real Host ----
+    // This clean DSH_HOME has no configured model. Acceptance by session/prompt
+    // is a deliberately smaller milestone than a model response, permission
+    // request, tool execution, or physical-phone test.
+    const normalPrompt = 'Describe the next action before using any tools.'
+    const promptReply = mobileAfterRestart.waitForResponse(
+      response => promptRequestId(response, normalPrompt) !== undefined)
+    await restartMobileComposer.fill(normalPrompt)
+    await mobileAfterRestart.getByRole('button', { name: 'Send message', exact: true }).tap()
+    const promptResponse = await promptReply
+    const promptRpc = await promptResponse.json() as PromptRpcReply
+    const submittedPromptRpcId = promptRequestId(promptResponse, normalPrompt)
+    check('the normal prompt matcher rejects an unrelated message',
+      promptRequestId(promptResponse, 'Different prompt') === undefined, true)
+    check('the ordinary phone prompt response matches its actual Host RPC request',
+      submittedPromptRpcId !== undefined && promptRpc.type === 'server-response'
+      && promptRpc.rpcId === submittedPromptRpcId, true)
+    check('the real Host accepts the normal text prompt from the paired phone',
+      promptResponse.status() === 200 && promptRpc.result?.ok === true
+      && promptRpc.result.value?.accepted === true, true)
+    const submittedPrompt = mobileAfterRestart.getByText(normalPrompt, { exact: true })
+    await submittedPrompt.waitFor({ state: 'visible', timeout: 20_000 })
+    check('the phone displays its submitted normal prompt in the conversation',
+      await submittedPrompt.isVisible(), true)
+
     await mobileAfterRestart.close()
     await phone.close()
 
