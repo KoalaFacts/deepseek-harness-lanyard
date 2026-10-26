@@ -21,6 +21,7 @@
 
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { hasNoPluginEntries } from './tool-result-assertions.ts'
 import { join } from 'node:path'
 import type { BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
@@ -938,7 +939,7 @@ try {
     check('the model receives the genuine rejected Host tool result, not a fixture-created denial',
       rejectionText.includes('the user rejected escalating this plugin management operation'), true)
     check('a refused plugin list operation returns no installed-plugin entries',
-      rejectionText.includes('"entries"'), false)
+      hasNoPluginEntries(rejectedToolResult?.content), true)
     check('the phone displays the model continuation after rejecting the Host tool request',
       await rejectedReply.isVisible(), true)
     check('rejecting a tool does not unpin mobile settings',
