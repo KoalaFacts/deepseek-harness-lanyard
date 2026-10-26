@@ -776,6 +776,43 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     const forged = await hostilePage.goto(`${origin}/?token=${'A'.repeat(43)}`, { waitUntil: 'domcontentloaded' })
     check('a link carrying the wrong token is refused', forged?.status(), 401)
     check('and leaves no session behind', (await hostile.cookies(origin)).some(cookie => cookie.name.startsWith('dsh-auth-')), false)
+
+    // Even if an unpaired device learns a real Session ID, it must neither
+    // execute a task nor read that Session's history. Use fully shaped RPCs:
+    // a malformed request rejected by the Host is NOT proof of LAN gating.
+    // The expected 403 carries this plugin's own refusal marker, not the
+    // upstream error body, so the assertion fails if the gate is bypassed.
+    const hostileRpcs = await hostilePage.evaluate(async (sessionId: string) => {
+      const rpc = async (method: string, request: Record<string, unknown>) => {
+        const response = await fetch(`/api/${method}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            type: 'client-request',
+            rpcId: `unpaired-${method}`,
+            method,
+            payload: { args: { request } },
+          }),
+        })
+        return { status: response.status, body: await response.text() }
+      }
+      const prompt = await rpc('session/prompt', {
+        sessionId,
+        requestId: 'unpaired-should-never-reach-host',
+        mode: 'queue',
+        content: [{ type: 'text', text: 'This unpaired LAN device must not queue a task.' }],
+      })
+      const history = await rpc('session/page', {
+        address: { kind: 'session', sessionId },
+        throughSeq: 1_000_000,
+        maxMessages: 50,
+      })
+      return { prompt, history }
+    }, submittedSessionId)
+    check('an unpaired phone cannot submit a task to a known real Session',
+      pageRefused(hostileRpcs.prompt), true)
+    check('an unpaired phone cannot read a known real Session history',
+      pageRefused(hostileRpcs.history), true)
     await hostile.close()
   } finally {
     await browser.close()
