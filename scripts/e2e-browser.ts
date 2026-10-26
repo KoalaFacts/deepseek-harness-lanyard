@@ -77,6 +77,39 @@ async function gateRefused(response: Response): Promise<boolean> {
   }
 }
 
+/**
+ * Identify the exact Host command request a phone tap submitted. Matching only
+ * the URL can consume an unrelated commands/execute call from the same page,
+ * making a successful result falsely attest to the command under test.
+ * Upstream's leading command-input claim may append trailing whitespace to
+ * a bare slash command, so compare complete trimmed lines, not raw bytes.
+ */
+function commandRequestId(response: Response, line: string): string | undefined {
+  if (new URL(response.url()).pathname !== '/api/commands/execute') return undefined
+  try {
+    const request = response.request().postDataJSON() as {
+      type?: unknown
+      method?: unknown
+      rpcId?: unknown
+      payload?: { args?: { line?: unknown } }
+    } | null
+    const submittedLine = request?.payload?.args?.line
+    if (request?.type !== 'client-request' || request.method !== 'commands/execute'
+      || typeof submittedLine !== 'string' || submittedLine.trim() !== line.trim()
+      || typeof request.rpcId !== 'string' || request.rpcId.length === 0) return undefined
+    return request.rpcId
+  } catch {
+    return undefined
+  }
+}
+
+/** The Host's response envelope to a built-in slash command. */
+interface CommandRpcReply {
+  type?: unknown
+  rpcId?: unknown
+  result?: { ok?: unknown; value?: { result?: { kind?: unknown } } }
+}
+
 await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
@@ -230,13 +263,17 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       // A read-only /goal command contributes a visible input node, opening
       // Chat with no model request; then /feedback can show its result.
       const goalReply = phonePage.waitForResponse(
-        response => new URL(response.url()).pathname === '/api/commands/execute')
+        response => commandRequestId(response, '/goal') !== undefined)
       await composer.fill('/goal')
       await phonePage.getByRole('button', { name: 'Send message', exact: true }).tap()
       const goalResponse = await goalReply
-      const goalRpc = await goalResponse.json() as {
-        result?: { ok?: unknown; value?: { result?: { kind?: unknown } } }
-      }
+      const goalRpc = await goalResponse.json() as CommandRpcReply
+      const goalRequestId = commandRequestId(goalResponse, '/goal')
+      check('the goal command matcher rejects an unrelated line',
+        commandRequestId(goalResponse, '/feedback unrelated') === undefined, true)
+      check('the Host reply belongs to the tapped goal request',
+        goalRequestId !== undefined && goalRpc.type === 'server-response'
+        && goalRpc.rpcId === goalRequestId, true)
       check('a phone tap executes the read-only goal status command',
         goalResponse.status() === 200 && goalRpc.result?.ok === true
         && goalRpc.result.value?.result?.kind === 'success', true)
@@ -248,12 +285,14 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       const feedback = '/feedback Verify phone LAN command delivery.'
       await composer.fill(feedback)
       const feedbackReply = phonePage.waitForResponse(
-        response => new URL(response.url()).pathname === '/api/commands/execute')
+        response => commandRequestId(response, feedback) !== undefined)
       await phonePage.getByRole('button', { name: 'Send message', exact: true }).tap()
       const commandResponse = await feedbackReply
-      const commandRpc = await commandResponse.json() as {
-        result?: { ok?: unknown; value?: { result?: { kind?: unknown } } }
-      }
+      const commandRpc = await commandResponse.json() as CommandRpcReply
+      const feedbackRequestId = commandRequestId(commandResponse, feedback)
+      check('the Host reply belongs to the tapped feedback request',
+        feedbackRequestId !== undefined && commandRpc.type === 'server-response'
+        && commandRpc.rpcId === feedbackRequestId, true)
       check('tapping Send executes feedback successfully in the real Host',
         commandResponse.status() === 200 && commandRpc.result?.ok === true
         && commandRpc.result.value?.result?.kind === 'success', true)
