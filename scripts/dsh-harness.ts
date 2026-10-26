@@ -444,11 +444,11 @@ export async function withDshDeployment<T>(
     console.log(`lanyard e2e: booting dsh on 127.0.0.1:${String(localPort)}, and the network over TLS on ${String(port)}`)
     const args = ['--profile', 'web', '--host', bindHost, '--port', String(localPort), '--network-port', String(port), '--no-open']
     if (options.overlay !== undefined) {
-      // Only the isolated test process receives this patch; neither the
-      // installed plugin nor a real user's DSH profile is changed.
-      const overlayPath = join(workspace, 'e2e-model.patch.yml')
-      writeFileSync(overlayPath, options.overlay)
-      args.push('--patch', overlayPath)
+      // The installed CLI's application argument parser does not universally
+      // accept --patch. Its documented DSH_HOME patch layer is supported on
+      // both channels, is applied after the profile, and changes only this
+      // disposable deployment (never a user's DSH_HOME or installed plugin).
+      writeFileSync(join(home, 'cordis.patch.yml'), options.overlay)
     }
     const boot = (): DshProcess => spawn(dsh, args, { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
     server = boot()
