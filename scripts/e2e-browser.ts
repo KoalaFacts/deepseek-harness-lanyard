@@ -259,6 +259,26 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       // Session on its empty hero, hiding their otherwise persisted result row.
       // A read-only /goal command contributes a visible input node, opening
       // Chat with no model request; then /feedback can show its result.
+      // Temporary, sanitized protocol probe for the real frontend envelope.
+      // Log shape and comparisons only — never workspace paths or RPC contents.
+      const seenCommandRequests: string[] = []
+      phonePage.on('request', (request) => {
+        if (new URL(request.url()).pathname !== '/api/commands/execute') return
+        try {
+          const raw = request.postDataJSON() as Record<string, unknown>
+          const payload = raw.payload as Record<string, unknown> | undefined
+          const args = payload?.args as Record<string, unknown> | undefined
+          const observed = JSON.stringify({
+            type: raw.type, method: raw.method, rpcIdType: typeof raw.rpcId,
+            payloadKeys: Object.keys(payload ?? {}), argsKeys: Object.keys(args ?? {}),
+            lineType: typeof args?.line, matchesGoal: args?.line === '/goal',
+          })
+          seenCommandRequests.push(observed)
+          console.log(`lanyard e2e: redacted command request shape: ${observed}`)
+        } catch (error) {
+          console.log(`lanyard e2e: could not decode command request: ${String(error)}`)
+        }
+      })
       const goalReply = phonePage.waitForResponse(
         response => commandRequestId(response, '/goal') !== undefined)
       await composer.fill('/goal')
