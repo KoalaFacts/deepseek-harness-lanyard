@@ -22,6 +22,23 @@ dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 
 安装前请先运行 `npm view @koalafacts/deepseek-harness-lanyard version` 核对 npm 仓库里的实际版本。npm 上的 `0.0.0` 只是占位包，**并不能正常使用**；源码仓库中写着较高版本，不等于那个版本已经发布。只有 npm 仓库出现真正的发布版本，才能使用上面的安装命令。
 
+### npm 仍只有占位包时，安装本地打包版本
+
+如果 `npm view @koalafacts/deepseek-harness-lanyard version` 仍然只显示 `0.0.0`，可以使用**从本仓库源码生成的本地安装包**，不要安装那个不能工作的占位版本。以下命令在**运行 dsh 的电脑**上执行，而不是在手机上执行。需要事先安装好 `dsh` CLI、Node.js 22.19+（22.x 系列）或 24+，以及 pnpm 10。
+
+```sh
+git clone https://github.com/KoalaFacts/deepseek-harness-lanyard.git
+cd deepseek-harness-lanyard
+pnpm install --frozen-lockfile
+npm run check
+pnpm pack --pack-destination .
+dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz"
+```
+
+上面的 `.tgz` 文件名对应当前 `package.json` 的 `0.2.0` 版本；以后版本号变了，就以 `pnpm pack` 生成的实际文件名为准。在 Windows PowerShell 中，最后一条命令请改用生成的 `.tgz` 文件的绝对路径，不要照抄 POSIX Shell 的 `$PWD/...` 写法。建议同时记录 `git rev-parse HEAD`，方便日后确认自己安装的是哪一个源码提交。
+
+这种方式**不会向 npm 发布任何东西，也不会自动开放局域网**。项目现有的真实 DSH 端到端测试采用同类本地 tarball 在干净环境安装，但这不代表正式 npm 发布或实体手机测试已经完成。安装之后仍要按照下文指定可信局域网地址启动 dsh，并遵循 TLS 证书指纹核对和配对步骤。
+
 如果 Web 侧边栏里有 **Plugins（插件）** 页面，也可以直接在那里按同样的包名安装，它会显示为 *Lanyard 手机访问*。
 
 光装上什么都不会变：dsh 照旧只服务本机。要不要对局域网提供服务，每次启动时由你自己决定：
