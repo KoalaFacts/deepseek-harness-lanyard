@@ -406,7 +406,16 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
  * @param body - receives the live deployment facts.
  * @returns whatever `body` returned.
  */
-export async function withDshDeployment<T>(body: (deployment: Deployment) => Promise<T>): Promise<T> {
+/** Test-only Host configuration. The overlay is applied after the shipped bundles. */
+export interface DeploymentOptions {
+  overlay?: string
+  env?: Readonly<Record<string, string>>
+}
+
+export async function withDshDeployment<T>(
+  body: (deployment: Deployment) => Promise<T>,
+  options: DeploymentOptions = {},
+): Promise<T> {
   const workspace = mkdtempSync(join(tmpdir(), 'lanyard-e2e-'))
   const home = join(workspace, 'home')
   let server: DshProcess | undefined
@@ -421,7 +430,7 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
     installCli(workspace, CLI_SPEC)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
-    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home }
+    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home, ...options.env }
 
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })
@@ -434,6 +443,13 @@ export async function withDshDeployment<T>(body: (deployment: Deployment) => Pro
     while (port === localPort) port = await freePort()
     console.log(`lanyard e2e: booting dsh on 127.0.0.1:${String(localPort)}, and the network over TLS on ${String(port)}`)
     const args = ['--profile', 'web', '--host', bindHost, '--port', String(localPort), '--network-port', String(port), '--no-open']
+    if (options.overlay !== undefined) {
+      // The installed CLI's application argument parser does not universally
+      // accept --patch. Its documented DSH_HOME patch layer is supported on
+      // both channels, is applied after the profile, and changes only this
+      // disposable deployment (never a user's DSH_HOME or installed plugin).
+      writeFileSync(join(home, 'cordis.patch.yml'), options.overlay)
+    }
     const boot = (): DshProcess => spawn(dsh, args, { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] })
     server = boot()
 
