@@ -196,7 +196,9 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       hasTouch: true,
       locale: 'en-US',
     })
-    try {
+    // Preserve the same mobile browser profile and its cookie through the
+    // real DSH process restart below; browser.close() cleans up on failure.
+    {
       const phonePage = await phone.newPage()
       let phoneFrames = 0
       phonePage.on('websocket', (socket) => {
@@ -388,8 +390,6 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       check('mobile recovery never revisits a launch-token URL', usedTokenOnResume, false)
       check('mobile recovery ends at the saved bare TLS address', resumedPhone.url(), `${origin}/`)
       await resumedPhone.close()
-    } finally {
-      await phone.close()
     }
 
     // ---- the point of pairing: the bare address works afterwards ----
@@ -445,6 +445,10 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       session !== undefined && onlineCookie !== undefined && onlineCookie.value === session.value, true)
     check('the configuration plane stays refused after network recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
+
+    // Save the mobile profile's existing cookie before the actual host reboot.
+    const mobileCookieBeforeRestart = (await phone.cookies(origin)).find(
+      cookie => cookie.name.startsWith('dsh-auth-'))
 
     // ---- restart dsh: the same phone should resume without scanning again ----
     const restarted = await restart()
@@ -522,6 +526,56 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     check('the reopened tab stays on the bookmarked bare TLS origin', reopened.url(), `${origin}/`)
     await reopened.close()
     await paired.close()
+
+    // ---- the same paired mobile profile survives a real DSH restart ----
+    // Unlike the earlier offline-only test, this rebooted the installed Host.
+    // Open a fresh touch-browser tab at the bookmarked origin, not a token URL,
+    // and NEVER resubmit /feedback to hide a missing persisted result.
+    const mobileAfterRestart = await phone.newPage()
+    let mobileRestartFrames = 0
+    let mobileRestartSawToken = false
+    mobileAfterRestart.on('request', request => {
+      if (request.isNavigationRequest() && new URL(request.url()).searchParams.has('token')) {
+        mobileRestartSawToken = true
+      }
+    })
+    mobileAfterRestart.on('websocket', socket => {
+      if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      socket.on('framereceived', () => { mobileRestartFrames += 1 })
+    })
+    const mobileRestartSession = mobileAfterRestart.waitForResponse(
+      response => new URL(response.url()).pathname === '/api/session/list')
+    const mobileRestartLanding = await mobileAfterRestart.goto(origin, { waitUntil: 'domcontentloaded' })
+    const mobileRestartReply = await mobileRestartSession
+    const mobileRestartRpc = await mobileRestartReply.json() as { result?: { ok?: unknown } }
+    check('the same paired touch browser reopens the bare TLS origin after DSH restarts',
+      mobileRestartLanding?.status(), 200)
+    check('the reopened phone makes a successful Host session/list RPC after restart',
+      mobileRestartReply.status() === 200 && mobileRestartRpc.result?.ok === true, true)
+    const mobileCookieAfterRestart = (await phone.cookies(origin)).find(
+      cookie => cookie.name.startsWith('dsh-auth-'))
+    check('DSH restart preserves the phone original secure HttpOnly session cookie',
+      mobileCookieBeforeRestart !== undefined && mobileCookieAfterRestart !== undefined
+      && mobileCookieAfterRestart.httpOnly && mobileCookieAfterRestart.secure
+      && mobileCookieAfterRestart.value === mobileCookieBeforeRestart.value, true)
+    const restartMobileComposer = mobileAfterRestart.locator('[data-composer-input][contenteditable="true"]').first()
+    await restartMobileComposer.waitFor({ state: 'visible', timeout: 20_000 })
+    const mobileRestartReceipt = mobileAfterRestart.getByText(/Feedback recorded for session/)
+    await mobileRestartReceipt.waitFor({ state: 'visible', timeout: 20_000 })
+    check('the phone restores its pre-restart Host feedback without resending the command',
+      await mobileRestartReceipt.isVisible(), true)
+    const mobileRestartFrameDeadline = Date.now() + 10_000
+    while (mobileRestartFrames === 0 && Date.now() < mobileRestartFrameDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('restarted DSH delivers a frame to the newly opened mobile WebSocket',
+      mobileRestartFrames > 0, true)
+    check('mobile restart recovery keeps the settings namespace loopback-only',
+      pageRefused(await apiAnswer(mobileAfterRestart, '/api/settings/describe')), true)
+    check('the resumed mobile tab never requests a new pairing token', mobileRestartSawToken, false)
+    check('the resumed mobile tab ends at the saved TLS origin', mobileAfterRestart.url(), `${origin}/`)
+    await mobileAfterRestart.close()
+    await phone.close()
 
     // ---- neither the old launch token nor a forged one can pair ----
     const hostile = await browser.newContext({ ignoreHTTPSErrors: true })
