@@ -21,6 +21,7 @@
 
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { hasNoPluginEntries } from './tool-result-assertions.ts'
 import { join } from 'node:path'
 import type { BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
@@ -157,13 +158,22 @@ interface CommandRpcReply {
 const MODEL_ROUTE = 'lanyard-e2e'
 const MODEL_ID = 'lanyard-e2e-model'
 const MODEL_REPLY = 'The local fixture model replied to your phone task.'
+const APPROVAL_DENY_PROMPT = 'List one installed plugin, but ask first; I may reject permission.'
+const APPROVAL_DENY_CALL_ID = 'call_lanyard_denied_plugin_listing'
+const APPROVAL_DENIED_REPLY = 'The phone rejected permission; no plugin listing was returned.'
+
+interface FixtureModelCall {
+  model?: unknown
+  messages?: Array<{ role?: string; content?: unknown; tool_call_id?: string }>
+  tools?: Array<{ function?: { name?: string } }>
+}
 
 async function startModelFixture(): Promise<{
   url: string
-  requests: unknown[]
+  requests: FixtureModelCall[]
   close(): Promise<void>
 }> {
-  const requests: unknown[] = []
+  const requests: FixtureModelCall[] = []
   const server = createServer((request, response) => {
     if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
       response.writeHead(404)
@@ -177,8 +187,10 @@ async function startModelFixture(): Promise<{
       if (body.length > 1_000_000) request.destroy(new Error('oversized model fixture request'))
     })
     request.on('end', () => {
+      let input: FixtureModelCall
       try {
-        requests.push(JSON.parse(body) as unknown)
+        input = JSON.parse(body) as FixtureModelCall
+        requests.push(input)
       } catch {
         response.writeHead(400)
         response.end('invalid JSON')
@@ -192,13 +204,36 @@ async function startModelFixture(): Promise<{
           model: MODEL_ID,
           choices: [{ index: 0, delta, finish_reason: finishReason }],
         })
-      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
-      for (const frame of [
+      // The fixture supplies inference, never a fabricated Host permission
+      // decision or tool output. plugin_manager/list_plugins is read-only but
+      // requires upstream's real one-shot approval before execution.
+      const messages = Array.isArray(input.messages) ? input.messages : []
+      const approvalTask = JSON.stringify(messages).includes(APPROVAL_DENY_PROMPT)
+      const pluginToolAvailable = input.tools?.some(tool => tool.function?.name === 'plugin_manager') === true
+      const toolResult = messages.find(message =>
+        message.role === 'tool' && message.tool_call_id === APPROVAL_DENY_CALL_ID)
+      const callForApproval = approvalTask && pluginToolAvailable && toolResult === undefined
+      const toolWasRejected = toolResult !== undefined &&
+        JSON.stringify(toolResult.content).includes('the user rejected escalating this plugin management operation')
+      const answer = approvalTask && toolResult !== undefined
+        ? toolWasRejected ? APPROVAL_DENIED_REPLY : 'Unexpected plugin approval outcome.'
+        : MODEL_REPLY
+      const frames = callForApproval ? [
         chunk({ role: 'assistant', content: '' }, null),
-        chunk({ content: MODEL_REPLY }, null),
+        chunk({ tool_calls: [{
+          index: 0, id: APPROVAL_DENY_CALL_ID, type: 'function',
+          function: { name: 'plugin_manager', arguments: JSON.stringify({ action: 'list_plugins', limit: 1 }) },
+        }] }, null),
+        chunk({}, 'tool_calls'),
+        '[DONE]',
+      ] : [
+        chunk({ role: 'assistant', content: '' }, null),
+        chunk({ content: answer }, null),
         chunk({}, 'stop'),
         '[DONE]',
-      ]) response.write(`data: ${frame}\n\n`)
+      ]
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
+      for (const frame of frames) response.write(`data: ${frame}\n\n`)
       response.end()
     })
   })
@@ -861,6 +896,55 @@ try {
       reopenedTaskResubmissions, 0)
     check('reopening a submitted task does not re-use a launch token',
       reopenedTaskSawToken, false)
+    // ---- real model-driven approval; paired phone explicitly rejects ----
+    // The only mock is loopback-only inference. DSH decides permission and
+    // returns the tool result through its actual Agent and Remote waterfall.
+    const permissionPhone = await phone.newPage()
+    const permissionLanding = await permissionPhone.goto(origin, { waitUntil: 'domcontentloaded' })
+    check('approval begins from the existing paired phone TLS address',
+      permissionLanding?.status(), 200)
+    const permissionComposer = permissionPhone.locator('[data-composer-input][contenteditable="true"]').first()
+    await permissionComposer.waitFor({ state: 'visible', timeout: 20_000 })
+    const permissionPromptResponse = permissionPhone.waitForResponse(
+      response => promptRequestId(response, APPROVAL_DENY_PROMPT) !== undefined)
+    await permissionComposer.fill(APPROVAL_DENY_PROMPT)
+    await permissionPhone.getByRole('button', { name: 'Send message', exact: true }).tap()
+    const permissionHostReply = await permissionPromptResponse
+    const permissionHostRpc = await permissionHostReply.json() as PromptRpcReply
+    check('the Host accepts the exact model-driven permission task from the phone',
+      permissionHostReply.status() === 200 && permissionHostRpc.type === 'server-response'
+      && permissionHostRpc.rpcId === promptRequestId(permissionHostReply, APPROVAL_DENY_PROMPT)
+      && permissionHostRpc.result?.ok === true && permissionHostRpc.result.value?.accepted === true, true)
+
+    const approvalCard = permissionPhone.locator('[data-approval-key]').first()
+    await approvalCard.waitFor({ state: 'visible', timeout: 30_000 })
+    check('the genuine phone approval card identifies the privileged tool',
+      (await approvalCard.innerText()).includes('plugin_manager'), true)
+    check('the browser presents a real one-shot permission choice',
+      await approvalCard.getByRole('button', { name: 'Allow once', exact: true }).isVisible(), true)
+    check('the local model was offered the actual plugin_manager tool',
+      modelFixture.requests.some(call => call.model === MODEL_ID
+        && JSON.stringify(call.messages).includes(APPROVAL_DENY_PROMPT)
+        && call.tools?.some(tool => tool.function?.name === 'plugin_manager') === true), true)
+
+    await approvalCard.getByRole('button', { name: 'Reject', exact: true }).tap()
+    const rejectedReply = permissionPhone.locator('[data-chat-flow]')
+      .getByText(APPROVAL_DENIED_REPLY, { exact: true }).first()
+    await rejectedReply.waitFor({ state: 'visible', timeout: 30_000 })
+    const rejectionCalls = modelFixture.requests.filter(call => call.messages?.some(message =>
+      message.role === 'tool' && message.tool_call_id === APPROVAL_DENY_CALL_ID))
+    const rejectedToolResult = rejectionCalls.at(-1)?.messages?.find(message =>
+      message.role === 'tool' && message.tool_call_id === APPROVAL_DENY_CALL_ID)
+    const rejectionText = JSON.stringify(rejectedToolResult?.content ?? null)
+    check('the model receives the genuine rejected Host tool result, not a fixture-created denial',
+      rejectionText.includes('the user rejected escalating this plugin management operation'), true)
+    check('a refused plugin list operation returns no installed-plugin entries',
+      hasNoPluginEntries(rejectedToolResult?.content), true)
+    check('the phone displays the model continuation after rejecting the Host tool request',
+      await rejectedReply.isVisible(), true)
+    check('rejecting a tool does not unpin mobile settings',
+      pageRefused(await apiAnswer(permissionPhone, '/api/settings/describe')), true)
+    await permissionPhone.close()
     await phone.close()
 
     // ---- neither the old launch token nor a forged one can pair ----
@@ -916,6 +1000,11 @@ try {
     // Per-process CLI overlay: the shipped plugin and LAN admission rules are
     // unmodified. No external model key or real model traffic is used.
     overlay: [
+      // The shipped standard preset disables plugin_manager. Select the
+      // shipped cordis preset so this test can reach its real approval path.
+      '- id: agent-preset-registry',
+      '  config:',
+      '    default: cordis',
       '- id: llm-pi-ai',
       '  config:',
       '    providers:',
@@ -933,7 +1022,11 @@ try {
       `    model: ${MODEL_ID}`,
       '',
     ].join('\n'),
-    env: { LANYARD_E2E_MODEL_KEY: 'local-fixture-not-a-secret' },
+    env: {
+      LANYARD_E2E_MODEL_KEY: 'local-fixture-not-a-secret',
+      // Pin the throwaway Host's standing policy even if CI exports another.
+      DSH_PERMISSION_MODE: 'workspace-write',
+    },
   })
 } finally {
   await modelFixture.close()
