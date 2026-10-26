@@ -1196,7 +1196,7 @@ try {
           type?: unknown
           event?: {
             type?: unknown
-            data?: { source?: { rpcId?: unknown }; content?: unknown }
+            data?: { source?: { rpcId?: unknown }; message?: { content?: unknown } }
           }
         }>
       } | undefined)?.records
@@ -1209,9 +1209,19 @@ try {
       const promptPersisted = records.some(record =>
         record.type === 'event' && record.event?.type === 'user/message'
         && record.event.data?.source?.rpcId === requestId)
-      const answerPersisted = records.some(record =>
-        record.type === 'event' && record.event?.type !== 'user/message'
-        && JSON.stringify(record.event?.data?.content ?? null).includes(finalReply))
+      // DSH commits assistant/message under data.message.content, not
+      // data.content (the latter is the user/message shape). Preserve
+      // individual text-block boundaries while comparing the full response.
+      const answerPersisted = records.some(record => {
+        if (record.type !== 'event' || record.event?.type !== 'assistant/message') return false
+        const blocks = record.event.data?.message?.content
+        if (!Array.isArray(blocks)) return false
+        const text = blocks.map((part: unknown) => {
+          const chunk = part as { type?: unknown; text?: unknown } | null
+          return chunk?.type === 'text' && typeof chunk.text === 'string' ? chunk.text : ''
+        }).join('')
+        return text === finalReply
+      })
       return { projectionOk, pageOk, promptPersisted, answerPersisted }
     }, { sessionId: approvedSessionId, requestId: approvedRequestId, finalReply: APPROVAL_ALLOWED_REPLY })
     check('completed task Host history has an authenticated sequenced projection',
