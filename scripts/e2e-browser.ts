@@ -222,17 +222,19 @@ async function startModelFixture(): Promise<{
       const approvalCallId = approvalTask ? APPROVAL_DENY_CALL_ID
         : allowTask ? APPROVAL_ALLOW_CALL_ID : undefined
       const pluginToolAvailable = input.tools?.some(tool => tool.function?.name === 'plugin_manager') === true
-      const toolResult = messages.find(message =>
+      const matchingToolResults = approvalCallId === undefined ? [] : messages.filter(message =>
         message.role === 'tool' && message.tool_call_id === approvalCallId)
+      const toolResult = matchingToolResults.length === 1 ? matchingToolResults[0] : undefined
       const callForApproval = approvalCallId !== undefined
-        && pluginToolAvailable && toolResult === undefined
+        && pluginToolAvailable && matchingToolResults.length === 0
       const toolWasRejected = toolResult !== undefined &&
         JSON.stringify(toolResult.content).includes('the user rejected escalating this plugin management operation')
-      const answer = approvalCallId !== undefined && toolResult !== undefined
-        ? approvalTask
-          ? toolWasRejected ? APPROVAL_DENIED_REPLY : 'Unexpected plugin rejection outcome.'
-          : hasPluginListEntries(toolResult.content)
-            ? APPROVAL_ALLOWED_REPLY : 'Unexpected plugin approval outcome.'
+      const answer = approvalCallId !== undefined && matchingToolResults.length > 0
+        ? toolResult === undefined ? 'Unexpected repeated plugin tool results.'
+          : approvalTask
+            ? toolWasRejected ? APPROVAL_DENIED_REPLY : 'Unexpected plugin rejection outcome.'
+            : hasPluginListEntries(toolResult.content)
+              ? APPROVAL_ALLOWED_REPLY : 'Unexpected plugin approval outcome.'
         : MODEL_REPLY
       const frames = callForApproval ? [
         chunk({ role: 'assistant', content: '' }, null),
@@ -999,10 +1001,16 @@ try {
     await allowedReply.waitFor({ state: 'visible', timeout: 30_000 })
     const successfulCalls = modelFixture.requests.filter(call => call.messages?.some(message =>
       message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID))
-    const allowedToolResult = successfulCalls.at(-1)?.messages?.find(message =>
-      message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID)
-    check('allow-once resumes the Agent with exactly one correlated tool result',
+    // One provider call may carry several messages with the same call ID.
+    // Count actual tool messages, not just requests, or a valid list followed
+    // by a hidden denial would be incorrectly accepted as an approved run.
+    const correlatedResults = successfulCalls.flatMap(call => call.messages?.filter(message =>
+      message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID) ?? [])
+    const allowedToolResult = correlatedResults.length === 1 ? correlatedResults[0] : undefined
+    check('allow-once resumes the Agent in exactly one provider continuation',
       successfulCalls.length, 1)
+    check('that continuation contains exactly one correlated Host tool message',
+      correlatedResults.length, 1)
     check('the model received the Host plugin list, not a denial or an unrelated tool response',
       hasPluginListEntries(allowedToolResult?.content), true)
     check('the phone displays the Agent continuation after the real tool result',
