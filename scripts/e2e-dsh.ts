@@ -110,7 +110,8 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
   const fromProfile = createRequire(join(cwd, 'home', 'profiles', 'web', 'package.json'))
   const installedManifestPath = fromProfile.resolve(`${packageName}/package.json`)
   const installedRoot = realpathSync(dirname(installedManifestPath))
-  const inWorkspace = relative(cwd, installedRoot)
+  // TMPDIR may be a symlink; compare canonical paths on both sides.
+  const inWorkspace = relative(realpathSync(cwd), installedRoot)
   check('the installed package comes from the throwaway consumer workspace',
     inWorkspace !== '..' && !inWorkspace.startsWith(`..${sep}`) && !isAbsolute(inWorkspace), true)
   const installedManifest = JSON.parse(readFileSync(installedManifestPath, 'utf8')) as {
