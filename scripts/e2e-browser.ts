@@ -81,6 +81,8 @@ async function gateRefused(response: Response): Promise<boolean> {
  * Identify the exact Host command request a phone tap submitted. Matching only
  * the URL can consume an unrelated commands/execute call from the same page,
  * making a successful result falsely attest to the command under test.
+ * Upstream's leading command-input claim may append trailing whitespace to
+ * a bare slash command, so compare complete trimmed lines, not raw bytes.
  */
 function commandRequestId(response: Response, line: string): string | undefined {
   if (new URL(response.url()).pathname !== '/api/commands/execute') return undefined
@@ -91,9 +93,10 @@ function commandRequestId(response: Response, line: string): string | undefined 
       rpcId?: unknown
       payload?: { args?: { line?: unknown } }
     } | null
+    const submittedLine = request?.payload?.args?.line
     if (request?.type !== 'client-request' || request.method !== 'commands/execute'
-      || request.payload?.args?.line !== line || typeof request.rpcId !== 'string'
-      || request.rpcId.length === 0) return undefined
+      || typeof submittedLine !== 'string' || submittedLine.trim() !== line.trim()
+      || typeof request.rpcId !== 'string' || request.rpcId.length === 0) return undefined
     return request.rpcId
   } catch {
     return undefined
@@ -259,26 +262,6 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
       // Session on its empty hero, hiding their otherwise persisted result row.
       // A read-only /goal command contributes a visible input node, opening
       // Chat with no model request; then /feedback can show its result.
-      // Temporary, sanitized protocol probe for the real frontend envelope.
-      // Log shape and comparisons only — never workspace paths or RPC contents.
-      const seenCommandRequests: string[] = []
-      phonePage.on('request', (request) => {
-        if (new URL(request.url()).pathname !== '/api/commands/execute') return
-        try {
-          const raw = request.postDataJSON() as Record<string, unknown>
-          const payload = raw.payload as Record<string, unknown> | undefined
-          const args = payload?.args as Record<string, unknown> | undefined
-          const observed = JSON.stringify({
-            type: raw.type, method: raw.method, rpcIdType: typeof raw.rpcId,
-            payloadKeys: Object.keys(payload ?? {}), argsKeys: Object.keys(args ?? {}),
-            lineType: typeof args?.line, matchesGoal: args?.line === '/goal',
-          })
-          seenCommandRequests.push(observed)
-          console.log(`lanyard e2e: redacted command request shape: ${observed}`)
-        } catch (error) {
-          console.log(`lanyard e2e: could not decode command request: ${String(error)}`)
-        }
-      })
       const goalReply = phonePage.waitForResponse(
         response => commandRequestId(response, '/goal') !== undefined)
       await composer.fill('/goal')
