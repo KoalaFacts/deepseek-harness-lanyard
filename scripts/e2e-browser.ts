@@ -626,6 +626,15 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     const promptResponse = await promptReply
     const promptRpc = await promptResponse.json() as PromptRpcReply
     const submittedPromptRpcId = promptRequestId(promptResponse, normalPrompt)
+    const submittedRequest = promptResponse.request().postDataJSON() as {
+      payload?: { args?: { request?: { sessionId?: unknown; requestId?: unknown } } }
+    }
+    const submittedSessionId = submittedRequest.payload?.args?.request?.sessionId
+    const submittedRequestId = submittedRequest.payload?.args?.request?.requestId
+    if (typeof submittedSessionId !== 'string' || submittedSessionId.length === 0
+      || typeof submittedRequestId !== 'string' || submittedRequestId.length === 0) {
+      throw new Error('the accepted phone prompt had no durable session/request identity')
+    }
     check('the normal prompt matcher rejects an unrelated message',
       promptRequestId(promptResponse, 'Different prompt') === undefined, true)
     check('the ordinary phone prompt response matches its actual Host RPC request',
@@ -639,11 +648,10 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     check('the phone displays its submitted normal prompt in the conversation',
       await submittedPrompt.isVisible(), true)
 
-    // ---- reopening a submitted task must restore the message, not send it again ----
-    // A Host "accepted" response alone can hide a task that disappears when
-    // the phone discards its tab. Reopen the saved origin with this phone's
-    // existing profile, not a new launch token, and require the exact prompt
-    // to reappear without any second session/prompt request.
+    // ---- reopening a submitted task must restore its durable Host record ----
+    // The local echo and browser storage cannot attest to persistence.
+    // Read the Host's sequenced projection watermark, then its authoritative
+    // Session history page for the exact submitted Session and request ID.
     await mobileAfterRestart.close()
     const reopenedTask = await phone.newPage()
     let reopenedTaskSawToken = false
@@ -661,20 +669,98 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     const reopenedTaskReply = await reopenedTaskSession
     const reopenedTaskRpc = await reopenedTaskReply.json() as { result?: { ok?: unknown } }
     check('a submitted task reopens at the saved phone TLS address',
-      reopenedTaskLanding?.status() === 200 && reopenedTask.url() === `${origin}/`, true)
+      reopenedTaskLanding?.status() === 200, true)
     check('a reopened task still authenticates its Host session/list RPC',
       reopenedTaskReply.status() === 200 && reopenedTaskRpc.result?.ok === true, true)
-    const restoredPrompt = reopenedTask.getByText(normalPrompt, { exact: true })
-    await restoredPrompt.waitFor({ state: 'visible', timeout: 20_000 })
-    check('the reopened phone displays its previously submitted ordinary prompt',
-      await restoredPrompt.isVisible(), true)
+
+    // Avoid a page-wide text assertion: a retained draft, local optimistic
+    // echo, or a different Session can otherwise masquerade as Host history.
+    const restoredBubble = reopenedTask.locator('[data-chat-flow] [data-message-bubble]')
+      .filter({ hasText: normalPrompt }).first()
+    await restoredBubble.waitFor({ state: 'visible', timeout: 20_000 })
+    check('the reopened phone displays the exact user prompt in a conversation bubble',
+      await restoredBubble.textContent(), normalPrompt)
+    const echoedBubble = reopenedTask.locator('[data-chat-flow] [data-submission-echo] [data-message-bubble]')
+      .filter({ hasText: normalPrompt })
+    check('the restored prompt is not a browser-only submission echo', await echoedBubble.count(), 0)
+
+    const hostHistory = await reopenedTask.evaluate(async (sessionId: string) => {
+      interface Reply {
+        status: number
+        rpcId: string
+        body: { type?: unknown; rpcId?: unknown; result?: { ok?: unknown; value?: unknown } }
+      }
+      const rpc = async (method: string, request: Record<string, unknown>): Promise<Reply> => {
+        const rpcId = `e2e-reopen-${method.replace('/', '-')}`
+        const response = await fetch(`/api/${method}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: { request } } }),
+        })
+        return { status: response.status, rpcId, body: await response.json() as Reply['body'] }
+      }
+      const projections = await rpc('session/projections', { sessionId })
+      const baseline = projections.body.result?.value as { kind?: unknown; asOfSeq?: unknown } | undefined
+      if (projections.status !== 200 || projections.body.type !== 'server-response'
+        || projections.body.rpcId !== projections.rpcId || projections.body.result?.ok !== true
+        || baseline?.kind !== 'sequenced' || typeof baseline.asOfSeq !== 'number'
+        || !Number.isSafeInteger(baseline.asOfSeq) || baseline.asOfSeq < 0) {
+        return { projections, page: null }
+      }
+      const page = await rpc('session/page', {
+        address: { kind: 'session', sessionId },
+        throughSeq: baseline.asOfSeq,
+        maxMessages: 50,
+      })
+      return { projections, page }
+    }, submittedSessionId)
+    const projection = hostHistory.projections
+    const projectionValue = projection.body.result?.value as { kind?: unknown; asOfSeq?: unknown } | undefined
+    check('the Host returned a sequenced snapshot for the submitted Session',
+      projection.status === 200 && projection.body.type === 'server-response'
+      && projection.body.rpcId === projection.rpcId && projection.body.result?.ok === true
+      && projectionValue?.kind === 'sequenced'
+      && typeof projectionValue.asOfSeq === 'number', true)
+    const pageReply = hostHistory.page
+    const pageValue = pageReply?.body.result?.value as {
+      records?: Array<{
+        type?: unknown
+        event?: {
+          type?: unknown
+          data?: { source?: { kind?: unknown; rpcId?: unknown }; content?: unknown }
+        }
+      }>
+    } | undefined
+    check('the Host accepted an authenticated history-page read for that Session',
+      pageReply?.status === 200 && pageReply.body.type === 'server-response'
+      && pageReply.body.rpcId === pageReply.rpcId && pageReply.body.result?.ok === true
+      && Array.isArray(pageValue?.records), true)
+    const durablePrompt = pageValue?.records?.some(record => {
+      if (record.type !== 'event' || record.event?.type !== 'user/message') return false
+      const source = record.event.data?.source
+      if (source?.kind !== 'user' || source.rpcId !== submittedRequestId) return false
+      const content = record.event.data?.content
+      return Array.isArray(content) && content.some((part: unknown) => {
+        const text = part as { type?: unknown; text?: unknown } | null
+        return text?.type === 'text' && text.text === normalPrompt
+      })
+    })
+    check('the Host persisted the exact prompt under its original Session and request identity',
+      durablePrompt, true)
+
+    // The observation window ends only after the asynchronous Host history
+    // and settings probes, then the tab is closed. Late resends or navigation
+    // during those requests must be counted, not hidden by an early snapshot.
+    check('reopening a submitted task keeps the configuration plane pinned',
+      pageRefused(await apiAnswer(reopenedTask, '/api/settings/describe')), true)
+    const finalTaskUrl = reopenedTask.url()
+    await reopenedTask.close()
+    check('reopening a submitted task ends at the saved bare TLS address',
+      finalTaskUrl, `${origin}/`)
     check('reopening a submitted task does not re-send its prompt',
       reopenedTaskResubmissions, 0)
     check('reopening a submitted task does not re-use a launch token',
       reopenedTaskSawToken, false)
-    check('reopening a submitted task keeps the configuration plane pinned',
-      pageRefused(await apiAnswer(reopenedTask, '/api/settings/describe')), true)
-    await reopenedTask.close()
     await phone.close()
 
     // ---- neither the old launch token nor a forged one can pair ----
