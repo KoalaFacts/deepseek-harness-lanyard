@@ -1023,6 +1023,32 @@ try {
       total + (call.messages?.filter(message =>
         message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID).length ?? 0), 0)
     check('the model has received no allowed tool result before consent', priorToolResults(), 0)
+    // Reproduce a browser tab being discarded while the installed Host
+    // still waits for consent. This is an actual document teardown and new
+    // WebSocket on reopening, but not an iOS/Android OS-background test.
+    const savedApprovalPageUrl = allowingPhone.url()
+    check('reopening pending consent never needs the one-time launch token',
+      new URL(savedApprovalPageUrl).searchParams.has('token'), false)
+    const pendingRequestsBeforeReopen = callsForPendingTask()
+    await allowingPhone.goto('about:blank', { waitUntil: 'load' })
+    check('leaving the phone UI destroys the old approval card',
+      await allowingPhone.locator('[data-approval-key]').count(), 0)
+    check('navigating away does not implicitly authorize the pending tool',
+      priorToolResults(), 0)
+    const approvalReturn = await allowingPhone.goto(savedApprovalPageUrl,
+      { waitUntil: 'domcontentloaded' })
+    check('the paired phone reopens the exact saved TLS address after tab discard',
+      approvalReturn?.status(), 200)
+    await allowingCard.waitFor({ state: 'visible', timeout: 30_000 })
+    check('the reopened phone recovers the genuine outstanding Host approval',
+      (await allowingCard.innerText()).includes('plugin_manager'), true)
+    check('the reopened phone still offers an explicit one-shot choice',
+      await allowingCard.getByRole('button', { name: 'Allow once', exact: true }).isVisible(), true)
+    check('reopening the approval page does not repeat the model tool request',
+      callsForPendingTask(), pendingRequestsBeforeReopen)
+    check('reopening cannot approve the Host tool without a user tap',
+      priorToolResults(), 0)
+
     await phone.setOffline(true)
     check('the phone loses connectivity while the Host approval remains unanswered',
       await allowingPhone.evaluate(() => navigator.onLine), false)
