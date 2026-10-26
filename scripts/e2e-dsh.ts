@@ -16,8 +16,9 @@
 import type { OutgoingHttpHeaders } from 'node:http'
 import { connect as tlsConnect } from 'node:tls'
 import { X509Certificate } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import {
   ROOT, plainGet, plainProbe, probe as probeUnbound, recorder, refused, requireLan, rpcCall, run, sessionCookie, sessionCookieSecure,
   succeeded, upgradeHeaders, withDshDeployment,
@@ -101,6 +102,47 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
   const origin = `https://${lan}:${String(port)}`
 
   check('the bundle joined the profile layer stack', bundles.includes(packageName), true)
+
+  // Exercise the actual installed tarball from the clean DSH profile, never the
+  // checkout's devDependencies. The build gate imports from this source tree,
+  // and dsh may only load the rows in its patch: neither proves that every
+  // public export and declaration is present for an installed consumer.
+  const fromProfile = createRequire(join(cwd, 'home', 'profiles', 'web', 'package.json'))
+  const installedManifestPath = fromProfile.resolve(`${packageName}/package.json`)
+  const installedRoot = realpathSync(dirname(installedManifestPath))
+  // TMPDIR may be a symlink; compare canonical paths on both sides.
+  const inWorkspace = relative(realpathSync(cwd), installedRoot)
+  check('the installed package comes from the throwaway consumer workspace',
+    inWorkspace !== '..' && !inWorkspace.startsWith(`..${sep}`) && !isAbsolute(inWorkspace), true)
+  const installedManifest = JSON.parse(readFileSync(installedManifestPath, 'utf8')) as {
+    exports: Record<string, string | { types?: string; default?: string }>
+  }
+  const checkoutManifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
+    exports: Record<string, unknown>
+  }
+  const modules = Object.keys(installedManifest.exports)
+    .filter(subpath => subpath === '.' || (!subpath.includes('*') && !subpath.endsWith('.json') && !subpath.endsWith('.yml')))
+  const expectedModules = Object.keys(checkoutManifest.exports)
+    .filter(subpath => subpath === '.' || (!subpath.includes('*') && !subpath.endsWith('.json') && !subpath.endsWith('.yml')))
+  check('the installed tarball exposes the same public module set as its source manifest',
+    modules.sort().join(','), expectedModules.sort().join(','))
+  for (const subpath of modules) {
+    const specifier = subpath === '.' ? packageName : `${packageName}${subpath.slice(1)}`
+    const target = installedManifest.exports[subpath]
+    const resolved = realpathSync(fromProfile.resolve(specifier))
+    const insidePackage = relative(installedRoot, resolved)
+    check(`${specifier} resolves inside the installed tarball`,
+      insidePackage !== '..' && !insidePackage.startsWith(`..${sep}`) && !isAbsolute(insidePackage), true)
+    check(`${specifier} includes its published declaration`,
+      typeof target === 'object' && typeof target.types === 'string'
+      && existsSync(join(installedRoot, target.types)), true)
+    // DSH installs a runtime resolver for optional peers; importing this file
+    // in the test runner would bypass that resolver and fail even when dsh
+    // itself can load the bundle. Check the emitted consumer JS on disk here;
+    // dsh's boot above and the source build gate exercise executable imports.
+    check(`${specifier} points to emitted JavaScript in the installed package`,
+      resolved.endsWith('.js'), true)
+  }
 
   // The startup row replacement is visible before anything binds: the shipped
   // provider refuses --host 0.0.0.0 and has no --keep-awake at all.
