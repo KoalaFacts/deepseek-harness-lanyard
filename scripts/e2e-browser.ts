@@ -198,7 +198,7 @@ async function startModelFixture(): Promise<{
         chunk({ content: MODEL_REPLY }, null),
         chunk({}, 'stop'),
         '[DONE]',
-      ]) response.write(`data: ${frame}\\n\\n`)
+      ]) response.write(`data: ${frame}\n\n`)
       response.end()
     })
   })
@@ -926,7 +926,7 @@ try {
       `    provider: ${MODEL_ROUTE}`,
       `    model: ${MODEL_ID}`,
       '',
-    ].join('\\n'),
+    ].join('\n'),
     env: { LANYARD_E2E_MODEL_KEY: 'local-fixture-not-a-secret' },
   })
 } finally {
