@@ -639,7 +639,42 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     check('the phone displays its submitted normal prompt in the conversation',
       await submittedPrompt.isVisible(), true)
 
+    // ---- reopening a submitted task must restore the message, not send it again ----
+    // A Host "accepted" response alone can hide a task that disappears when
+    // the phone discards its tab. Reopen the saved origin with this phone's
+    // existing profile, not a new launch token, and require the exact prompt
+    // to reappear without any second session/prompt request.
     await mobileAfterRestart.close()
+    const reopenedTask = await phone.newPage()
+    let reopenedTaskSawToken = false
+    let reopenedTaskResubmissions = 0
+    reopenedTask.on('request', (request) => {
+      const target = new URL(request.url())
+      if (request.isNavigationRequest() && target.searchParams.has('token')) {
+        reopenedTaskSawToken = true
+      }
+      if (target.pathname === '/api/session/prompt') reopenedTaskResubmissions += 1
+    })
+    const reopenedTaskSession = reopenedTask.waitForResponse(
+      response => new URL(response.url()).pathname === '/api/session/list')
+    const reopenedTaskLanding = await reopenedTask.goto(origin, { waitUntil: 'domcontentloaded' })
+    const reopenedTaskReply = await reopenedTaskSession
+    const reopenedTaskRpc = await reopenedTaskReply.json() as { result?: { ok?: unknown } }
+    check('a submitted task reopens at the saved phone TLS address',
+      reopenedTaskLanding?.status() === 200 && reopenedTask.url() === `${origin}/`, true)
+    check('a reopened task still authenticates its Host session/list RPC',
+      reopenedTaskReply.status() === 200 && reopenedTaskRpc.result?.ok === true, true)
+    const restoredPrompt = reopenedTask.getByText(normalPrompt, { exact: true })
+    await restoredPrompt.waitFor({ state: 'visible', timeout: 20_000 })
+    check('the reopened phone displays its previously submitted ordinary prompt',
+      await restoredPrompt.isVisible(), true)
+    check('reopening a submitted task does not re-send its prompt',
+      reopenedTaskResubmissions, 0)
+    check('reopening a submitted task does not re-use a launch token',
+      reopenedTaskSawToken, false)
+    check('reopening a submitted task keeps the configuration plane pinned',
+      pageRefused(await apiAnswer(reopenedTask, '/api/settings/describe')), true)
+    await reopenedTask.close()
     await phone.close()
 
     // ---- neither the old launch token nor a forged one can pair ----
