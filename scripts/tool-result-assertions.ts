@@ -29,3 +29,40 @@ export function hasNoPluginEntries(content: unknown): boolean {
   }
   return inspect(content, 0)
 }
+
+/**
+ * A successfully executed plugin_manager/list_plugins response, as carried by
+ * the real Agent's next model request. A generic tool message (including
+ * permission denial or an error string) is not evidence of execution.
+ *
+ * The shipped tool returns a JSON object with entries, total and nextOffset.
+ * The AI adapter may transport it as a string or one text content block.
+ */
+export function hasPluginListEntries(content: unknown): boolean {
+  const inspect = (value: unknown, depth: number): boolean => {
+    if (depth > 8) return false
+    if (typeof value === 'string') {
+      try {
+        return inspect(JSON.parse(value) as unknown, depth + 1)
+      } catch {
+        return false
+      }
+    }
+    if (Array.isArray(value)) return value.length === 1 && inspect(value[0], depth + 1)
+    if (value === null || typeof value !== 'object') return false
+    if ('type' in value || 'content' in value) {
+      if ('type' in value && value.type === 'text' && 'text' in value && typeof value.text === 'string') return inspect(value.text, depth + 1)
+      if ('content' in value) return inspect(value.content, depth + 1)
+      return false
+    }
+    if (!('entries' in value) || !('total' in value) || !('nextOffset' in value)) return false
+    const { entries, total, nextOffset } = value
+    return Array.isArray(entries) && entries.length > 0
+      && entries.every(entry => entry !== null && typeof entry === 'object' && !Array.isArray(entry))
+      && typeof total === 'number' && Number.isSafeInteger(total) && total >= entries.length
+      && (nextOffset === null
+        || (typeof nextOffset === 'number' && Number.isSafeInteger(nextOffset)
+          && nextOffset >= entries.length && nextOffset < total))
+  }
+  return inspect(content, 0)
+}

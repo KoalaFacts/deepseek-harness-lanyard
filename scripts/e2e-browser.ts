@@ -21,7 +21,7 @@
 
 import { mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { hasNoPluginEntries } from './tool-result-assertions.ts'
+import { hasNoPluginEntries, hasPluginListEntries } from './tool-result-assertions.ts'
 import { join } from 'node:path'
 import type { BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
@@ -161,6 +161,9 @@ const MODEL_REPLY = 'The local fixture model replied to your phone task.'
 const APPROVAL_DENY_PROMPT = 'List one installed plugin, but ask first; I may reject permission.'
 const APPROVAL_DENY_CALL_ID = 'call_lanyard_denied_plugin_listing'
 const APPROVAL_DENIED_REPLY = 'The phone rejected permission; no plugin listing was returned.'
+const APPROVAL_ALLOW_PROMPT = 'List one installed plugin; I will approve this one-time request.'
+const APPROVAL_ALLOW_CALL_ID = 'call_lanyard_allowed_plugin_listing'
+const APPROVAL_ALLOWED_REPLY = 'The phone approved the tool and the Host returned a plugin list.'
 
 interface FixtureModelCall {
   model?: unknown
@@ -208,20 +211,35 @@ async function startModelFixture(): Promise<{
       // decision or tool output. plugin_manager/list_plugins is read-only but
       // requires upstream's real one-shot approval before execution.
       const messages = Array.isArray(input.messages) ? input.messages : []
-      const approvalTask = JSON.stringify(messages).includes(APPROVAL_DENY_PROMPT)
+      // Look at the most recent task; a reused session can contain both
+      // prompts in history, so merely searching for the deny text misroutes
+      // the later Allow-once request to the previous rejection case.
+      const transcript = JSON.stringify(messages)
+      const denyPosition = transcript.lastIndexOf(APPROVAL_DENY_PROMPT)
+      const allowPosition = transcript.lastIndexOf(APPROVAL_ALLOW_PROMPT)
+      const approvalTask = denyPosition > allowPosition
+      const allowTask = allowPosition > denyPosition
+      const approvalCallId = approvalTask ? APPROVAL_DENY_CALL_ID
+        : allowTask ? APPROVAL_ALLOW_CALL_ID : undefined
       const pluginToolAvailable = input.tools?.some(tool => tool.function?.name === 'plugin_manager') === true
-      const toolResult = messages.find(message =>
-        message.role === 'tool' && message.tool_call_id === APPROVAL_DENY_CALL_ID)
-      const callForApproval = approvalTask && pluginToolAvailable && toolResult === undefined
+      const matchingToolResults = approvalCallId === undefined ? [] : messages.filter(message =>
+        message.role === 'tool' && message.tool_call_id === approvalCallId)
+      const toolResult = matchingToolResults.length === 1 ? matchingToolResults[0] : undefined
+      const callForApproval = approvalCallId !== undefined
+        && pluginToolAvailable && matchingToolResults.length === 0
       const toolWasRejected = toolResult !== undefined &&
         JSON.stringify(toolResult.content).includes('the user rejected escalating this plugin management operation')
-      const answer = approvalTask && toolResult !== undefined
-        ? toolWasRejected ? APPROVAL_DENIED_REPLY : 'Unexpected plugin approval outcome.'
+      const answer = approvalCallId !== undefined && matchingToolResults.length > 0
+        ? toolResult === undefined ? 'Unexpected repeated plugin tool results.'
+          : approvalTask
+            ? toolWasRejected ? APPROVAL_DENIED_REPLY : 'Unexpected plugin rejection outcome.'
+            : hasPluginListEntries(toolResult.content)
+              ? APPROVAL_ALLOWED_REPLY : 'Unexpected plugin approval outcome.'
         : MODEL_REPLY
       const frames = callForApproval ? [
         chunk({ role: 'assistant', content: '' }, null),
         chunk({ tool_calls: [{
-          index: 0, id: APPROVAL_DENY_CALL_ID, type: 'function',
+          index: 0, id: approvalCallId, type: 'function',
           function: { name: 'plugin_manager', arguments: JSON.stringify({ action: 'list_plugins', limit: 1 }) },
         }] }, null),
         chunk({}, 'tool_calls'),
@@ -945,6 +963,61 @@ try {
     check('rejecting a tool does not unpin mobile settings',
       pageRefused(await apiAnswer(permissionPhone, '/api/settings/describe')), true)
     await permissionPhone.close()
+
+    // ---- same real Agent approval surface; phone permits exactly one read ----
+    // The fixture cannot invent a successful tool response: it only emits
+    // this continuation after the installed plugin_manager has returned its
+    // own structured list to the Agent's next provider request.
+    const allowingPhone = await phone.newPage()
+    const allowingLanding = await allowingPhone.goto(origin, { waitUntil: 'domcontentloaded' })
+    check('allow-once begins at the previously paired TLS address',
+      allowingLanding?.status(), 200)
+    const allowingComposer = allowingPhone.locator('[data-composer-input][contenteditable="true"]').first()
+    await allowingComposer.waitFor({ state: 'visible', timeout: 20_000 })
+    const allowingPromptResponse = allowingPhone.waitForResponse(
+      response => promptRequestId(response, APPROVAL_ALLOW_PROMPT) !== undefined)
+    await allowingComposer.fill(APPROVAL_ALLOW_PROMPT)
+    await allowingPhone.getByRole('button', { name: 'Send message', exact: true }).tap()
+    const allowingHostReply = await allowingPromptResponse
+    const allowingHostRpc = await allowingHostReply.json() as PromptRpcReply
+    check('Host accepts the exact phone task requesting an allowed tool execution',
+      allowingHostReply.status() === 200 && allowingHostRpc.type === 'server-response'
+      && allowingHostRpc.rpcId === promptRequestId(allowingHostReply, APPROVAL_ALLOW_PROMPT)
+      && allowingHostRpc.result?.ok === true && allowingHostRpc.result.value?.accepted === true, true)
+
+    const allowingCard = allowingPhone.locator('[data-approval-key]').first()
+    await allowingCard.waitFor({ state: 'visible', timeout: 30_000 })
+    check('Host approval card presents the actual plugin_manager tool before execution',
+      (await allowingCard.innerText()).includes('plugin_manager'), true)
+    check('the user can authorize only this tool call from the touch UI',
+      await allowingCard.getByRole('button', { name: 'Allow once', exact: true }).isVisible(), true)
+    check('the model was offered plugin_manager for the specific allowed task',
+      modelFixture.requests.some(call => call.model === MODEL_ID
+        && JSON.stringify(call.messages).includes(APPROVAL_ALLOW_PROMPT)
+        && call.tools?.some(tool => tool.function?.name === 'plugin_manager') === true), true)
+    await allowingCard.getByRole('button', { name: 'Allow once', exact: true }).tap()
+    const allowedReply = allowingPhone.locator('[data-chat-flow]')
+      .getByText(APPROVAL_ALLOWED_REPLY, { exact: true }).first()
+    await allowedReply.waitFor({ state: 'visible', timeout: 30_000 })
+    const successfulCalls = modelFixture.requests.filter(call => call.messages?.some(message =>
+      message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID))
+    // One provider call may carry several messages with the same call ID.
+    // Count actual tool messages, not just requests, or a valid list followed
+    // by a hidden denial would be incorrectly accepted as an approved run.
+    const correlatedResults = successfulCalls.flatMap(call => call.messages?.filter(message =>
+      message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID) ?? [])
+    const allowedToolResult = correlatedResults.length === 1 ? correlatedResults[0] : undefined
+    check('allow-once resumes the Agent in exactly one provider continuation',
+      successfulCalls.length, 1)
+    check('that continuation contains exactly one correlated Host tool message',
+      correlatedResults.length, 1)
+    check('the model received the Host plugin list, not a denial or an unrelated tool response',
+      hasPluginListEntries(allowedToolResult?.content), true)
+    check('the phone displays the Agent continuation after the real tool result',
+      await allowedReply.isVisible(), true)
+    check('approving the Agent tool does not grant access to phone settings',
+      pageRefused(await apiAnswer(allowingPhone, '/api/settings/describe')), true)
+    await allowingPhone.close()
     await phone.close()
 
     // ---- neither the old launch token nor a forged one can pair ----
