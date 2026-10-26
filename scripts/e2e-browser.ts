@@ -1000,6 +1000,11 @@ try {
     // Per-process CLI overlay: the shipped plugin and LAN admission rules are
     // unmodified. No external model key or real model traffic is used.
     overlay: [
+      // The shipped standard preset disables plugin_manager. Select the
+      // shipped cordis preset so this test can reach its real approval path.
+      '- id: agent-preset-registry',
+      '  config:',
+      '    default: cordis',
       '- id: llm-pi-ai',
       '  config:',
       '    providers:',
