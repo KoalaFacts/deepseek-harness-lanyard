@@ -1112,14 +1112,16 @@ try {
       new URL(completedApprovalUrl).searchParams.has('token'), false)
     const completedToolRequests = callsForPendingTask()
     const completedToolResults = priorToolResults()
+    await allowingPhone.goto('about:blank', { waitUntil: 'load' })
+    check('discarding the finished phone tab removes its previous Chat document',
+      await allowingPhone.locator('[data-chat-flow]').count(), 0)
+    // Subscribe only after the old document and socket are gone: otherwise
+    // an old frame could make the recovery assertion pass without reconnecting.
     let completedRecoveryFrames = 0
     allowingPhone.on('websocket', socket => {
       if (new URL(socket.url()).pathname !== '/api/remote.mux') return
       socket.on('framereceived', () => { completedRecoveryFrames += 1 })
     })
-    await allowingPhone.goto('about:blank', { waitUntil: 'load' })
-    check('discarding the finished phone tab removes its previous Chat document',
-      await allowingPhone.locator('[data-chat-flow]').count(), 0)
     const completedSessionResponse = allowingPhone.waitForResponse(
       response => new URL(response.url()).pathname === '/api/session/list')
     const reopenedCompletedPage = await allowingPhone.goto(completedApprovalUrl,
