@@ -51,7 +51,7 @@ export function hasPluginListEntries(content: unknown): boolean {
     if (Array.isArray(value)) return value.length === 1 && inspect(value[0], depth + 1)
     if (value === null || typeof value !== 'object') return false
     if ('type' in value || 'content' in value) {
-      if (value.type === 'text' && typeof value.text === 'string') return inspect(value.text, depth + 1)
+      if ('type' in value && value.type === 'text' && 'text' in value && typeof value.text === 'string') return inspect(value.text, depth + 1)
       if ('content' in value) return inspect(value.content, depth + 1)
       return false
     }
