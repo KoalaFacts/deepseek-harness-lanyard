@@ -673,17 +673,6 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     check('a reopened task still authenticates its Host session/list RPC',
       reopenedTaskReply.status() === 200 && reopenedTaskRpc.result?.ok === true, true)
 
-    // Avoid a page-wide text assertion: a retained draft, local optimistic
-    // echo, or a different Session can otherwise masquerade as Host history.
-    const restoredBubble = reopenedTask.locator('[data-chat-flow] [data-message-bubble]')
-      .filter({ hasText: normalPrompt }).first()
-    await restoredBubble.waitFor({ state: 'visible', timeout: 20_000 })
-    check('the reopened phone displays the exact user prompt in a conversation bubble',
-      await restoredBubble.textContent(), normalPrompt)
-    const echoedBubble = reopenedTask.locator('[data-chat-flow] [data-submission-echo] [data-message-bubble]')
-      .filter({ hasText: normalPrompt })
-    check('the restored prompt is not a browser-only submission echo', await echoedBubble.count(), 0)
-
     const hostHistory = await reopenedTask.evaluate(async (sessionId: string) => {
       interface Reply {
         status: number
@@ -747,6 +736,30 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     })
     check('the Host persisted the exact prompt under its original Session and request identity',
       durablePrompt, true)
+
+    // Locate the visible copy only AFTER reading the actual Host history.
+    // The surrounding DOM markers distinguish durable Chat from an optimistic
+    // echo, unsent composer draft, or another UI surface.
+    const visiblePrompt = reopenedTask.getByText(normalPrompt, { exact: true }).first()
+    await visiblePrompt.waitFor({ state: 'visible', timeout: 20_000 })
+    const visibleLocation = await visiblePrompt.evaluate((node) => {
+      const path: string[] = []
+      let current: Element | null = node
+      while (current !== null && path.length < 8) {
+        path.push(`${current.tagName.toLowerCase()}${current.hasAttribute('data-message-bubble') ? '[bubble]' : ''}${current.hasAttribute('data-chat-flow') ? '[flow]' : ''}${current.hasAttribute('data-submission-echo') ? '[echo]' : ''}${current.hasAttribute('data-composer-input') ? '[composer]' : ''}`)
+        current = current.parentElement
+      }
+      return {
+        bubble: node.closest('[data-message-bubble]') !== null,
+        flow: node.closest('[data-chat-flow]') !== null,
+        echo: node.closest('[data-submission-echo]') !== null,
+        composer: node.closest('[data-composer-input]') !== null,
+        path,
+      }
+    })
+    console.log(`lanyard e2e: reopened ordinary prompt location ${JSON.stringify(visibleLocation)}`)
+    check('the reopened phone displays the prompt in a durable Chat bubble, not an echo or draft',
+      visibleLocation.bubble && visibleLocation.flow && !visibleLocation.echo && !visibleLocation.composer, true)
 
     // The observation window ends only after the asynchronous Host history
     // and settings probes, then the tab is closed. Late resends or navigation
