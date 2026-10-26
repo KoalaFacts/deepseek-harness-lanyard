@@ -995,6 +995,37 @@ try {
       modelFixture.requests.some(call => call.model === MODEL_ID
         && JSON.stringify(call.messages).includes(APPROVAL_ALLOW_PROMPT)
         && call.tools?.some(tool => tool.function?.name === 'plugin_manager') === true), true)
+    // A transient phone Wi-Fi outage while a privileged tool is awaiting
+    // consent must not grant permission, change the pending request, or make
+    // the user resubmit the prompt. Keep the tab open: this is not the earlier
+    // close-and-reopen recovery case. Only the model endpoint is synthetic.
+    const pendingApprovalKey = await allowingCard.getAttribute('data-approval-key')
+    check('the Host permission request has an identifiable approval card',
+      typeof pendingApprovalKey === 'string' && pendingApprovalKey.length > 0, true)
+    const priorToolResults = (): number => modelFixture.requests.reduce((total, call) =>
+      total + (call.messages?.filter(message =>
+        message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID).length ?? 0), 0)
+    check('the model has received no allowed tool result before consent', priorToolResults(), 0)
+    await phone.setOffline(true)
+    check('the phone loses connectivity while the Host approval remains unanswered',
+      await allowingPhone.evaluate(() => navigator.onLine), false)
+    const offlineRequestFailed = await allowingPhone.evaluate(async () => {
+      try {
+        await fetch('/api/session/list', { cache: 'no-store' })
+        return false
+      } catch {
+        return true
+      }
+    })
+    check('the pending-approval phone cannot reach the Host while offline',
+      offlineRequestFailed, true)
+    await phone.setOffline(false)
+    await allowingCard.waitFor({ state: 'visible', timeout: 20_000 })
+    check('the original Host approval survives the phone reconnection',
+      await allowingCard.getAttribute('data-approval-key'), pendingApprovalKey)
+    check('reconnecting never silently approves the pending Host tool',
+      priorToolResults(), 0)
+
     await allowingCard.getByRole('button', { name: 'Allow once', exact: true }).tap()
     const allowedReply = allowingPhone.locator('[data-chat-flow]')
       .getByText(APPROVAL_ALLOWED_REPLY, { exact: true }).first()
