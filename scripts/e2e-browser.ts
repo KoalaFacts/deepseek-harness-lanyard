@@ -20,6 +20,7 @@
  */
 
 import { mkdirSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { join } from 'node:path'
 import type { BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
@@ -150,7 +151,77 @@ interface CommandRpcReply {
   result?: { ok?: unknown; value?: { result?: { kind?: unknown } } }
 }
 
-await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart }) => {
+/** Deliberately external to the shipped DSH Host, but bound to loopback only.
+ * This mocks inference, not the model adapter, Agent loop, Session, or phone UI.
+ */
+const MODEL_ROUTE = 'lanyard-e2e'
+const MODEL_ID = 'lanyard-e2e-model'
+const MODEL_REPLY = 'The local fixture model replied to your phone task.'
+
+async function startModelFixture(): Promise<{
+  url: string
+  requests: unknown[]
+  close(): Promise<void>
+}> {
+  const requests: unknown[] = []
+  const server = createServer((request, response) => {
+    if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
+      response.writeHead(404)
+      response.end()
+      return
+    }
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => {
+      body += chunk
+      if (body.length > 1_000_000) request.destroy(new Error('oversized model fixture request'))
+    })
+    request.on('end', () => {
+      try {
+        requests.push(JSON.parse(body) as unknown)
+      } catch {
+        response.writeHead(400)
+        response.end('invalid JSON')
+        return
+      }
+      const chunk = (delta: Record<string, unknown>, finishReason: string | null): string =>
+        JSON.stringify({
+          id: 'chatcmpl-lanyard-e2e',
+          object: 'chat.completion.chunk',
+          created: 1_793_030_000,
+          model: MODEL_ID,
+          choices: [{ index: 0, delta, finish_reason: finishReason }],
+        })
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
+      for (const frame of [
+        chunk({ role: 'assistant', content: '' }, null),
+        chunk({ content: MODEL_REPLY }, null),
+        chunk({}, 'stop'),
+        '[DONE]',
+      ]) response.write(`data: ${frame}\\n\\n`)
+      response.end()
+    })
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('model fixture has no port')
+  return {
+    url: `http://127.0.0.1:${String(address.port)}`,
+    requests,
+    close: async () => {
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) =>
+        server.close(error => { if (error) reject(error); else resolve() }))
+    },
+  }
+}
+
+const modelFixture = await startModelFixture()
+try {
+  await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
@@ -648,6 +719,24 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
     check('the phone displays its submitted normal prompt in the conversation',
       await submittedPrompt.isVisible(), true)
 
+    // This is a real DSH Agent/model-adapter/UI round trip. Only the
+    // non-deterministic model endpoint is fake, and it listens on loopback.
+    // Checking Host acceptance or local chat echo is insufficient.
+    const visibleModelReply = mobileAfterRestart.getByText(MODEL_REPLY, { exact: true })
+    await visibleModelReply.waitFor({ state: 'visible', timeout: 30_000 })
+    check('the paired phone displays the actual streamed model response',
+      await visibleModelReply.isVisible(), true)
+    check('the Host adapter made exactly one inference call to the local fixture',
+      modelFixture.requests.length, 1)
+    const modelWire = modelFixture.requests[0] as {
+      model?: unknown
+      messages?: unknown
+    } | undefined
+    check('the Host selected the explicit test-only model rather than a real provider',
+      modelWire?.model, MODEL_ID)
+    check('the model request contains the phone task, not an unrelated request',
+      JSON.stringify(modelWire?.messages ?? null).includes(normalPrompt), true)
+
     // ---- reopening a submitted task must restore its durable Host record ----
     // The local echo and browser storage cannot attest to persistence.
     // Read the Host's sequenced projection watermark, then its authoritative
@@ -817,6 +906,31 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
   } finally {
     await browser.close()
   }
-})
+  }, {
+    // Per-process CLI overlay: the shipped plugin and LAN admission rules are
+    // unmodified. No external model key or real model traffic is used.
+    overlay: [
+      '- id: llm-pi-ai',
+      '  config:',
+      '    providers:',
+      `      ${MODEL_ROUTE}:`,
+      '        api: openai-completions',
+      `        baseURL: ${modelFixture.url}/v1`,
+      '        apiKeyEnv: LANYARD_E2E_MODEL_KEY',
+      '        models:',
+      `          - id: ${MODEL_ID}`,
+      '            contextWindow: 32768',
+      '            maxTokens: 1024',
+      '- id: agent-default-model',
+      '  config:',
+      `    provider: ${MODEL_ROUTE}`,
+      `    model: ${MODEL_ID}`,
+      '',
+    ].join('\\n'),
+    env: { LANYARD_E2E_MODEL_KEY: 'local-fixture-not-a-secret' },
+  })
+} finally {
+  await modelFixture.close()
+}
 
 report('lanyard browser e2e')
