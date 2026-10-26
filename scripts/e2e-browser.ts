@@ -726,16 +726,22 @@ try {
     await visibleModelReply.waitFor({ state: 'visible', timeout: 30_000 })
     check('the paired phone displays the actual streamed model response',
       await visibleModelReply.isVisible(), true)
-    check('the Host adapter made exactly one inference call to the local fixture',
-      modelFixture.requests.length, 1)
-    const modelWire = modelFixture.requests[0] as {
-      model?: unknown
-      messages?: unknown
-    } | undefined
-    check('the Host selected the explicit test-only model rather than a real provider',
-      modelWire?.model, MODEL_ID)
-    check('the model request contains the phone task, not an unrelated request',
-      JSON.stringify(modelWire?.messages ?? null).includes(normalPrompt), true)
+    // The shipped Web profile performs TWO distinct model calls: one Agent
+    // answer and one asynchronous first-prompt Session title. Enforcing one
+    // total call was incorrect and flagged correct upstream title generation.
+    const titleDeadline = Date.now() + 10_000
+    while (modelFixture.requests.length < 2 && Date.now() < titleDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    const modelCalls = modelFixture.requests as Array<{ model?: unknown; messages?: unknown }>
+    check('the Host performs a task completion and its first-prompt title generation',
+      modelCalls.length, 2)
+    check('both provider calls stay on the local-only test model, never an ambient real provider',
+      modelCalls.every(call => call.model === MODEL_ID), true)
+    check('task completion and title generation have different input messages, not a duplicate retry',
+      JSON.stringify(modelCalls[0]?.messages) !== JSON.stringify(modelCalls[1]?.messages), true)
+    check('the model received the paired phone task, not an unrelated request',
+      modelCalls.some(call => JSON.stringify(call.messages ?? null).includes(normalPrompt)), true)
 
     // ---- reopening a submitted task must restore its durable Host record ----
     // The local echo and browser storage cannot attest to persistence.
