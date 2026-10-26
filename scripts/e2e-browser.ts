@@ -969,6 +969,17 @@ try {
     // this continuation after the installed plugin_manager has returned its
     // own structured list to the Agent's next provider request.
     const allowingPhone = await phone.newPage()
+    let awaitingReconnectStream = false
+    let approvalRecoveredFrames = 0
+    // A visible React approval card may outlive a dead socket. Observe a
+    // *new* Host Remote-mux connection receiving data after the outage.
+    allowingPhone.on('websocket', socket => {
+      if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      const openedAfterDrop = awaitingReconnectStream
+      socket.on('framereceived', () => {
+        if (openedAfterDrop) approvalRecoveredFrames += 1
+      })
+    })
     const allowingLanding = await allowingPhone.goto(origin, { waitUntil: 'domcontentloaded' })
     check('allow-once begins at the previously paired TLS address',
       allowingLanding?.status(), 200)
@@ -1019,7 +1030,18 @@ try {
     })
     check('the pending-approval phone cannot reach the Host while offline',
       offlineRequestFailed, true)
+    awaitingReconnectStream = true
     await phone.setOffline(false)
+    const reconnectDeadline = Date.now() + 15_000
+    while (approvalRecoveredFrames === 0 && Date.now() < reconnectDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('the reconnected phone receives a frame on a newly opened Host WebSocket',
+      approvalRecoveredFrames > 0, true)
+    const recoveredSession = await apiAnswer(allowingPhone, '/api/session/list')
+    const recoveredSessionRpc = JSON.parse(recoveredSession.body) as { result?: { ok?: unknown } }
+    check('the same phone can query its authenticated Host session after the WebSocket recovers',
+      recoveredSession.status === 200 && recoveredSessionRpc.result?.ok === true, true)
     await allowingCard.waitFor({ state: 'visible', timeout: 20_000 })
     check('the original Host approval survives the phone reconnection',
       await allowingCard.getAttribute('data-approval-key'), pendingApprovalKey)
