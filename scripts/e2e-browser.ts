@@ -358,6 +358,14 @@ await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart })
         && phoneCookieAfterRecovery.value === phoneCookie.value, true)
       const recoveredComposer = resumedPhone.locator('[data-composer-input][contenteditable="true"]').first()
       await recoveredComposer.waitFor({ state: 'visible', timeout: 20_000 })
+      // An editor and an authenticated socket alone do not show that the
+      // conversation survived. Require the actual Host acknowledgement from
+      // before the outage to return in the reopened phone's transcript; never
+      // issue /feedback again here (which would mask lost conversation state).
+      const recoveredReceipt = resumedPhone.getByText(/Feedback recorded for session/)
+      await recoveredReceipt.waitFor({ state: 'visible', timeout: 20_000 })
+      check('the reopened phone restores its pre-outage Host acknowledgement',
+        await recoveredReceipt.isVisible(), true)
       const recoveryBounds = await recoveredComposer.boundingBox()
       check('the existing workspace composer reappears within the phone viewport',
         recoveryBounds !== null && recoveryBounds.x >= 0 && recoveryBounds.y >= 0
