@@ -995,6 +995,15 @@ try {
       allowingHostReply.status() === 200 && allowingHostRpc.type === 'server-response'
       && allowingHostRpc.rpcId === promptRequestId(allowingHostReply, APPROVAL_ALLOW_PROMPT)
       && allowingHostRpc.result?.ok === true && allowingHostRpc.result.value?.accepted === true, true)
+    const approvedPromptRequest = allowingHostReply.request().postDataJSON() as {
+      payload?: { args?: { request?: { sessionId?: unknown; requestId?: unknown } } }
+    }
+    const approvedSessionId = approvedPromptRequest.payload?.args?.request?.sessionId
+    const approvedRequestId = approvedPromptRequest.payload?.args?.request?.requestId
+    if (typeof approvedSessionId !== 'string' || approvedSessionId.length === 0
+      || typeof approvedRequestId !== 'string' || approvedRequestId.length === 0) {
+      throw new Error('the approved phone task had no Host session/request identity')
+    }
 
     const allowingCard = allowingPhone.locator('[data-approval-key]').first()
     await allowingCard.waitFor({ state: 'visible', timeout: 30_000 })
@@ -1145,22 +1154,92 @@ try {
     check('reopened phone displays the completed Agent reply in Chat, not a draft or echo',
       restoredReplyPlacement.inChat && !restoredReplyPlacement.echo
       && !restoredReplyPlacement.draft, true)
+
+    // Browser storage and a successful session/list cannot prove the finished
+    // answer survived in the Host. Read that Session's sequenced history over
+    // the authenticated TLS route, independently of the restored React tree.
+    const completedHostHistory = await allowingPhone.evaluate(async (
+      { sessionId, requestId, finalReply }: {
+        sessionId: string; requestId: string; finalReply: string
+      },
+    ) => {
+      type Reply = {
+        status: number
+        rpcId: string
+        body: { type?: unknown; rpcId?: unknown; result?: { ok?: unknown; value?: unknown } }
+      }
+      const rpc = async (method: string, request: Record<string, unknown>): Promise<Reply> => {
+        const rpcId = `e2e-completed-${method.replace('/', '-')}`
+        const response = await fetch(`/api/${method}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: { request } } }),
+        })
+        return { status: response.status, rpcId, body: await response.json() as Reply['body'] }
+      }
+      const projection = await rpc('session/projections', { sessionId })
+      const watermark = projection.body.result?.value as {
+        kind?: unknown; asOfSeq?: unknown
+      } | undefined
+      const projectionOk = projection.status === 200 && projection.body.type === 'server-response'
+        && projection.body.rpcId === projection.rpcId && projection.body.result?.ok === true
+        && watermark?.kind === 'sequenced' && typeof watermark.asOfSeq === 'number'
+        && Number.isSafeInteger(watermark.asOfSeq) && watermark.asOfSeq >= 0
+      if (!projectionOk) {
+        return { projectionOk: false, pageOk: false, promptPersisted: false, answerPersisted: false }
+      }
+      const page = await rpc('session/page', {
+        address: { kind: 'session', sessionId }, throughSeq: watermark.asOfSeq, maxMessages: 50,
+      })
+      const records = (page.body.result?.value as {
+        records?: Array<{
+          type?: unknown
+          event?: {
+            type?: unknown
+            data?: { source?: { rpcId?: unknown }; content?: unknown }
+          }
+        }>
+      } | undefined)?.records
+      const pageOk = page.status === 200 && page.body.type === 'server-response'
+        && page.body.rpcId === page.rpcId && page.body.result?.ok === true
+        && Array.isArray(records)
+      if (!pageOk || !records) {
+        return { projectionOk: true, pageOk: false, promptPersisted: false, answerPersisted: false }
+      }
+      const promptPersisted = records.some(record =>
+        record.type === 'event' && record.event?.type === 'user/message'
+        && record.event.data?.source?.rpcId === requestId)
+      const answerPersisted = records.some(record =>
+        record.type === 'event' && record.event?.type !== 'user/message'
+        && JSON.stringify(record.event?.data?.content ?? null).includes(finalReply))
+      return { projectionOk, pageOk, promptPersisted, answerPersisted }
+    }, { sessionId: approvedSessionId, requestId: approvedRequestId, finalReply: APPROVAL_ALLOWED_REPLY })
+    check('completed task Host history has an authenticated sequenced projection',
+      completedHostHistory.projectionOk, true)
+    check('completed task Host history page is authoritative and readable',
+      completedHostHistory.pageOk, true)
+    check('completed task still has its exact submitted request in Host history',
+      completedHostHistory.promptPersisted, true)
+    check('Host persisted the completed Agent reply independently of phone browser storage',
+      completedHostHistory.answerPersisted, true)
     const completedFrameDeadline = Date.now() + 10_000
     while (completedRecoveryFrames === 0 && Date.now() < completedFrameDeadline) {
       await new Promise<void>(resolve => { setTimeout(resolve, 50) })
     }
     check('reopened completed task receives data on a new Host WebSocket',
       completedRecoveryFrames > 0, true)
-    check('reopening completed approval does not ask the model for the tool again',
-      callsForPendingTask(), completedToolRequests)
-    check('reopening completed approval does not replay the Host tool result',
-      priorToolResults(), completedToolResults)
     check('completed-task recovery keeps the configuration plane refused',
       pageRefused(await apiAnswer(allowingPhone, '/api/settings/describe')), true)
     check('the restored completed task stays at the saved bare TLS origin',
       allowingPhone.url(), `${origin}/`)
     await allowingPhone.close()
     await phone.close()
+    // Keep these observations until all awaited Host probes and phone cleanup
+    // finish; a replay during those operations must still fail this run.
+    check('reopening completed approval does not ask the model for the tool again',
+      callsForPendingTask(), completedToolRequests)
+    check('reopening completed approval does not replay the Host tool result',
+      priorToolResults(), completedToolResults)
 
     // ---- neither the old launch token nor a forged one can pair ----
     const hostile = await browser.newContext({ ignoreHTTPSErrors: true })
