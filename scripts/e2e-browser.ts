@@ -1102,6 +1102,61 @@ try {
       await allowedReply.isVisible(), true)
     check('approving the Agent tool does not grant access to phone settings',
       pageRefused(await apiAnswer(allowingPhone, '/api/settings/describe')), true)
+
+    // ---- completed tool approval survives a discarded phone tab ----
+    // A fresh document must fetch the Host's completed Chat; it must not
+    // resubmit the prompt, request plugin_manager again, or replay consent.
+    // This is browser document recovery, not an iOS/Android OS-background test.
+    const completedApprovalUrl = allowingPhone.url()
+    check('the completed-task bookmark contains no launch credential',
+      new URL(completedApprovalUrl).searchParams.has('token'), false)
+    const completedToolRequests = callsForPendingTask()
+    const completedToolResults = priorToolResults()
+    let completedRecoveryFrames = 0
+    allowingPhone.on('websocket', socket => {
+      if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      socket.on('framereceived', () => { completedRecoveryFrames += 1 })
+    })
+    await allowingPhone.goto('about:blank', { waitUntil: 'load' })
+    check('discarding the finished phone tab removes its previous Chat document',
+      await allowingPhone.locator('[data-chat-flow]').count(), 0)
+    const completedSessionResponse = allowingPhone.waitForResponse(
+      response => new URL(response.url()).pathname === '/api/session/list')
+    const reopenedCompletedPage = await allowingPhone.goto(completedApprovalUrl,
+      { waitUntil: 'domcontentloaded' })
+    const restoredSessionResponse = await completedSessionResponse
+    const restoredSessionRpc = await restoredSessionResponse.json() as {
+      result?: { ok?: unknown }
+    }
+    check('reopened approved task authenticates to the actual DSH Host',
+      reopenedCompletedPage?.status() === 200
+      && restoredSessionResponse.status() === 200
+      && restoredSessionRpc.result?.ok === true, true)
+    const restoredApprovalReply = allowingPhone.locator('[data-chat-flow]')
+      .getByText(APPROVAL_ALLOWED_REPLY, { exact: true }).first()
+    await restoredApprovalReply.waitFor({ state: 'visible', timeout: 30_000 })
+    const restoredReplyPlacement = await restoredApprovalReply.evaluate(node => ({
+      inChat: node.closest('[data-chat-flow]') !== null,
+      echo: node.closest('[data-submission-echo]') !== null,
+      draft: node.closest('[data-composer-input]') !== null,
+    }))
+    check('reopened phone displays the completed Agent reply in Chat, not a draft or echo',
+      restoredReplyPlacement.inChat && !restoredReplyPlacement.echo
+      && !restoredReplyPlacement.draft, true)
+    const completedFrameDeadline = Date.now() + 10_000
+    while (completedRecoveryFrames === 0 && Date.now() < completedFrameDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('reopened completed task receives data on a new Host WebSocket',
+      completedRecoveryFrames > 0, true)
+    check('reopening completed approval does not ask the model for the tool again',
+      callsForPendingTask(), completedToolRequests)
+    check('reopening completed approval does not replay the Host tool result',
+      priorToolResults(), completedToolResults)
+    check('completed-task recovery keeps the configuration plane refused',
+      pageRefused(await apiAnswer(allowingPhone, '/api/settings/describe')), true)
+    check('the restored completed task stays at the saved bare TLS origin',
+      allowingPhone.url(), `${origin}/`)
     await allowingPhone.close()
     await phone.close()
 
