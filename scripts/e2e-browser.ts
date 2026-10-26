@@ -1023,6 +1023,35 @@ try {
       total + (call.messages?.filter(message =>
         message.role === 'tool' && message.tool_call_id === APPROVAL_ALLOW_CALL_ID).length ?? 0), 0)
     check('the model has received no allowed tool result before consent', priorToolResults(), 0)
+    // Chromium-only approximation of an OS-backgrounded phone: suspend the
+    // already-paired tab while a genuine Host tool decision is outstanding.
+    // This does not attest to an actual iOS/Android lock-screen lifecycle.
+    const backgroundSession = await phone.newCDPSession(allowingPhone)
+    await backgroundSession.send('Emulation.setPageVisibilityState', { visibilityState: 'hidden' })
+    check('backgrounded approval tab reports hidden document visibility',
+      await allowingPhone.evaluate(() => document.visibilityState), 'hidden')
+    await backgroundSession.send('Page.setWebLifecycleState', { state: 'frozen' })
+    const toolRequestsBeforeFreeze = callsForPendingTask()
+    await new Promise<void>(resolve => { setTimeout(resolve, 250) })
+    check('a frozen phone tab does not repeat the pending model tool request',
+      callsForPendingTask(), toolRequestsBeforeFreeze)
+    check('a frozen phone tab does not grant pending Host permission',
+      priorToolResults(), 0)
+    await backgroundSession.send('Page.setWebLifecycleState', { state: 'active' })
+    await backgroundSession.send('Emulation.setPageVisibilityState', { visibilityState: 'visible' })
+    await backgroundSession.detach()
+    check('foregrounded approval tab reports visible document visibility',
+      await allowingPhone.evaluate(() => document.visibilityState), 'visible')
+    await allowingCard.waitFor({ state: 'visible', timeout: 20_000 })
+    check('foregrounding retains the pending real Host tool consent',
+      (await allowingCard.innerText()).includes('plugin_manager'), true)
+    check('foregrounding retains the explicit one-shot approval choice',
+      await allowingCard.getByRole('button', { name: 'Allow once', exact: true }).isVisible(), true)
+    check('foregrounding does not resubmit the model tool request',
+      callsForPendingTask(), toolRequestsBeforeFreeze)
+    check('foregrounding does not silently execute the pending tool',
+      priorToolResults(), 0)
+
     await phone.setOffline(true)
     check('the phone loses connectivity while the Host approval remains unanswered',
       await allowingPhone.evaluate(() => navigator.onLine), false)
