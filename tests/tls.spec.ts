@@ -176,6 +176,25 @@ describe('generateMaterial', () => {
     return { certPath: join(dir, 'cert.pem'), keyPath: join(dir, 'key.pem') }
   }
 
+  it('can retry first-time issuance after a blocked certificate write without an orphan key', async () => {
+    const { certPath, keyPath } = paths()
+    // An interrupted or concurrent writer may leave its own cert temp. The
+    // exclusive create must refuse it without leaving a new unpaired key.
+    const blockedTemp = `${certPath}.${String(process.pid)}.tmp`
+    writeFileSync(blockedTemp, 'leave the other writer\'s temp untouched')
+    try {
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5'])).rejects.toThrow()
+      expect(existsSync(certPath)).toBe(false)
+      expect(existsSync(keyPath)).toBe(false)
+      expect(readFileSync(blockedTemp, 'utf8')).toBe('leave the other writer\'s temp untouched')
+    } finally {
+      rmSync(blockedTemp, { force: true })
+    }
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    expect(new X509Certificate(readFileSync(certPath))
+      .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+  })
+
   it('reuses material that still names the current addresses', async () => {
     const { certPath, keyPath } = paths()
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])

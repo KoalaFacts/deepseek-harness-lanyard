@@ -32,6 +32,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # typecheck, then the suite, then the build gate that loads the artifact.
       - run: npm run check
+      # Verify changed TLS guards actually make their focused Vitest cases fail when removed.
+      - run: npm run test:mutation:tls
 
   e2e:
     # Installs the published dsh CLI and boots it with this plugin installed,
