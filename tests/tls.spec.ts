@@ -300,11 +300,39 @@ describe('generateMaterial', () => {
     expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
   })
 
-  it('replaces the key alongside the certificate, never pairing a fresh one with a stale one', async () => {
+  it('reissues a valid LAN certificate without replacing its matching private key', async () => {
     const { certPath, keyPath } = paths()
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])
-    const firstKey = readFileSync(keyPath, 'utf8')
+    const originalCert = readFileSync(certPath, 'utf8')
+    const originalKey = readFileSync(keyPath, 'utf8')
     await generateMaterial(certPath, keyPath, ['10.0.0.7'])
-    expect(readFileSync(keyPath, 'utf8')).not.toBe(firstKey)
+    const updatedCert = new X509Certificate(readFileSync(certPath))
+    expect(readFileSync(certPath, 'utf8')).not.toBe(originalCert)
+    expect(readFileSync(keyPath, 'utf8')).toBe(originalKey)
+    expect(updatedCert.checkPrivateKey(createPrivateKey(originalKey))).toBe(true)
+    expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
+  })
+
+  it('keeps a usable matching pair after a LAN certificate write is interrupted', async () => {
+    const { certPath, keyPath } = paths()
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const originalCert = readFileSync(certPath, 'utf8')
+    const originalKey = readFileSync(keyPath, 'utf8')
+    // The exclusive sibling temp file makes the cert write fail after the
+    // replacement PEM is generated. The old certificate/key must both survive.
+    const blockedTemp = `${certPath}.${String(process.pid)}.tmp`
+    writeFileSync(blockedTemp, 'simulated interrupted certificate update')
+    try {
+      await expect(generateMaterial(certPath, keyPath, ['10.0.0.7'])).rejects.toThrow()
+      expect(readFileSync(certPath, 'utf8')).toBe(originalCert)
+      expect(readFileSync(keyPath, 'utf8')).toBe(originalKey)
+      expect(new X509Certificate(readFileSync(certPath))
+        .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+    } finally {
+      rmSync(blockedTemp, { force: true })
+    }
+    await generateMaterial(certPath, keyPath, ['10.0.0.7'])
+    expect(readFileSync(keyPath, 'utf8')).toBe(originalKey)
+    expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
   })
 })
