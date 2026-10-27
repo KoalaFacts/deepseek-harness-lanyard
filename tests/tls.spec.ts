@@ -1,5 +1,5 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { X509Certificate } from 'node:crypto'
@@ -160,8 +160,35 @@ describe('generateMaterial', () => {
     const { certPath, keyPath } = paths()
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     const first = readFileSync(certPath, 'utf8')
+    const firstKey = readFileSync(keyPath, 'utf8')
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     expect(readFileSync(certPath, 'utf8')).toBe(first)
+    expect(readFileSync(keyPath, 'utf8')).toBe(firstKey)
+  })
+
+  it.each(['mismatched', 'malformed'] as const)('rejects a %s existing key without replacing either file', async (kind) => {
+    // Disposable pairs use the same offline fixture path as the existing TLS
+    // tests. A different valid key catches checking only PEM parseability.
+    const dir = mkdtempSync(join(tmpdir(), 'lanyard-reuse-'))
+    const certPath = join(dir, 'cert.pem'), keyPath = join(dir, 'key.pem')
+    try {
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      let replacement = 'not a private key'
+      if (kind === 'mismatched') {
+        const otherKey = join(dir, 'other-key.pem')
+        await generateMaterial(join(dir, 'other-cert.pem'), otherKey, ['192.168.1.5'])
+        replacement = readFileSync(otherKey, 'utf8')
+      }
+      writeFileSync(keyPath, replacement)
+      const cert = readFileSync(certPath, 'utf8')
+      const before = [statSync(certPath).mtimeMs, statSync(keyPath).mtimeMs]
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5'])).rejects.toThrow(/existing TLS certificate.*private key.*left unchanged.*matching pair/i)
+      expect(readFileSync(certPath, 'utf8')).toBe(cert)
+      expect(readFileSync(keyPath, 'utf8')).toBe(replacement)
+      expect([statSync(certPath).mtimeMs, statSync(keyPath).mtimeMs]).toEqual(before)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('replaces material once the machine is reachable somewhere it does not name', async () => {
