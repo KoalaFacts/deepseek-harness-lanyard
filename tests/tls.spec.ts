@@ -13,7 +13,7 @@ let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
 
 /** Mount the row and read back what it provided. */
-async function provide(config: { enabled: boolean; dir: string }): Promise<LanyardTlsValues> {
+async function provide(config: { enabled: boolean; dir: string; host?: string }): Promise<LanyardTlsValues> {
   ctx = new Context()
   await ctx.plugin(Tls, config).await()
   return ctx.get(LANYARD_TLS_SERVICE) as LanyardTlsValues
@@ -67,6 +67,26 @@ describe('the tls row', () => {
     ctx = undefined
     await provide({ enabled: true, dir })
     expect(readFileSync(join(dir, 'cert.pem'), 'utf8')).toBe(first)
+  })
+
+  it('keeps a concrete-bound phone certificate independent of unrelated network adapters', async () => {
+    // This documentation-only address is deliberately not a runner interface.
+    // A carrier bound to it cannot serve another adapter, so adding a VPN
+    // must not invalidate the phone's accepted certificate on the next boot.
+    const dir = unusedDir()
+    const host = '198.51.100.7'
+    await provide({ enabled: true, dir, host })
+    const certPath = join(dir, 'cert.pem')
+    const first = readFileSync(certPath, 'utf8')
+    const san = new Set((new X509Certificate(first).subjectAltName ?? '').split(',').map(entry => entry.trim()))
+    expect(san.has(`IP Address:${host}`)).toBe(true)
+    for (const address of lanIpv4Addresses()) {
+      if (address !== host) expect(san.has(`IP Address:${address}`)).toBe(false)
+    }
+    await ctx?.fiber.dispose()
+    ctx = undefined
+    await provide({ enabled: true, dir, host })
+    expect(readFileSync(certPath, 'utf8')).toBe(first)
   })
 
   it('carries localhost and every LAN address in the certificate\'s subject alternative names', async () => {
