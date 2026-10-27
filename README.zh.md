@@ -47,7 +47,7 @@ dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz
 dsh --profile web --host 0.0.0.0
 ```
 
-在 dsh 的 0.2.1 预发布版本中，载体本身会拒绝通配地址。请指定这台电脑实际拥有的一个 IPv4 地址，例如 `dsh --profile web --host 192.168.1.5`。Lanyard 保留上游限制：TLS 监听和配对链接只使用这个接口。目前尚不支持 IPv6 监听。较早的 0.2.0 版本仍使用上面的命令。不传参数时仍然只服务本机。
+在 dsh 的 0.2.1 预发布版本中，载体本身会拒绝通配地址。请指定这台电脑实际拥有的一个 IPv4 地址，例如 `dsh --profile web --host 192.168.1.5`。Lanyard 保留上游限制：TLS 监听和配对链接只使用这个接口。目前尚不支持 IPv6 监听。较早的 0.2.0 版本仍使用上面的命令。不传参数时仍然只服务本机。指定具体 IPv4 地址时，自动生成的 TLS 证书只包含该绑定地址；无关的 VPN 或容器网卡变化不会在下次重启时迫使手机重新接受证书。若改用另一个局域网绑定地址，仍须生成新证书并重新核对指纹；旧版通配地址监听继续覆盖全部网卡。
 
 `--tls-cert <file> --tls-key <file>` 可以为 TLS 前端提供已有的 PEM 证书和私钥文件，替代自动生成；两者必须同时提供。本机监听仍然使用明文 HTTP。在支持此功能的 dsh 版本中，`--public-url <url>` 只修改公布的根 URL，不授予 Host 信任；需要时另行使用 `--trusted-host`。它不会修改 Lanyard 直接连接的 TLS 配对地址。
 
