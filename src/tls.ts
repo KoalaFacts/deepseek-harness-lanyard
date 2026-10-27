@@ -120,21 +120,34 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
     // operator moving one file. Never destroy the survivor to "repair" it.
     throw new Error('Existing TLS certificate and private key are incomplete. Files were left unchanged; restore the missing file from a matching pair before restarting.')
   }
+  // A LAN-address-only certificate reissue must not replace the matching
+  // private key. If the certificate rename fails, the saved pair must still
+  // match on the next boot rather than strand the user's phone identity.
+  let retainedKeyPair: { privateKey: string; publicKey: string } | undefined
   if (hasCertificate) {
     let cert: X509Certificate
+    let savedKey: string
     try {
       cert = new X509Certificate(readFileSync(certPath))
-      if (!cert.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))) throw new Error('key mismatch')
+      savedKey = readFileSync(keyPath, 'utf8')
+      if (!cert.checkPrivateKey(createPrivateKey(savedKey))) throw new Error('key mismatch')
     } catch {
       // Check identity before SANs: a moved LAN address must never make a
       // mismatched or unreadable saved pair eligible for automatic replacement.
       throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
     }
-    // A *valid matching* pair can rotate for a new LAN address or validity
-    // dates. Otherwise preserve the fingerprint accepted by the phone.
     const now = Date.now()
-    if (certificateCovers(certPath, addresses)
-      && Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo)) return
+    const withinValidity = Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo)
+    if (withinValidity) {
+      if (certificateCovers(certPath, addresses)) return
+      // The only reason to reissue this still-valid certificate is the LAN
+      // address. Reuse its public/private key pair so writing the new cert is
+      // the single atomic file replacement; expiry still rotates both files.
+      retainedKeyPair = {
+        privateKey: savedKey,
+        publicKey: cert.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      }
+    }
   }
   const notBeforeDate = new Date()
   const notAfterDate = new Date(notBeforeDate.getTime() + CERT_VALIDITY_DAYS * 24 * 60 * 60 * 1000)
@@ -143,6 +156,7 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
     notAfterDate,
     keySize: CERT_KEY_SIZE,
     algorithm: CERT_ALGORITHM,
+    ...(retainedKeyPair === undefined ? {} : { keyPair: retainedKeyPair }),
     extensions: [{
       name: 'subjectAltName',
       altNames: [
@@ -152,7 +166,7 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
       ],
     }],
   })
-  writeAtomic(keyPath, pems.private, 0o600)
+  if (retainedKeyPair === undefined) writeAtomic(keyPath, pems.private, 0o600)
   writeAtomic(certPath, pems.cert, 0o644)
 }
 
