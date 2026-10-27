@@ -212,6 +212,49 @@ describe('generateMaterial', () => {
   })
 
 
+  it.each(['cert.pem', 'key.pem'] as const)('refuses to overwrite a surviving identity file when %s is missing', async (missing) => {
+    const { certPath, keyPath } = paths()
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const missingPath = missing === 'cert.pem' ? certPath : keyPath
+    const survivorPath = missing === 'cert.pem' ? keyPath : certPath
+    const survivor = readFileSync(survivorPath, 'utf8')
+    rmSync(missingPath)
+
+    // Even an address change cannot license silent identity replacement.
+    await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+      .rejects.toThrow(/existing TLS certificate and private key are incomplete.*left unchanged/i)
+    expect(readFileSync(survivorPath, 'utf8')).toBe(survivor)
+    expect(existsSync(missingPath)).toBe(false)
+  })
+
+  it('refuses a mismatched saved key even when the certificate no longer names the LAN address', async () => {
+    const { certPath, keyPath } = paths()
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const originalCert = readFileSync(certPath, 'utf8')
+    const other = paths()
+    await generateMaterial(other.certPath, other.keyPath, ['192.168.1.5'])
+    const unrelatedKey = readFileSync(other.keyPath, 'utf8')
+    writeFileSync(keyPath, unrelatedKey)
+
+    expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(false)
+    await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+      .rejects.toThrow(/existing TLS certificate and private key cannot be used together.*left unchanged/i)
+    expect(readFileSync(certPath, 'utf8')).toBe(originalCert)
+    expect(readFileSync(keyPath, 'utf8')).toBe(unrelatedKey)
+  })
+
+  it('refuses an unreadable saved certificate instead of overwriting its private key', async () => {
+    const { certPath, keyPath } = paths()
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const originalKey = readFileSync(keyPath, 'utf8')
+    writeFileSync(certPath, 'damaged certificate')
+
+    await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+      .rejects.toThrow(/existing TLS certificate and private key cannot be used together.*left unchanged/i)
+    expect(readFileSync(certPath, 'utf8')).toBe('damaged certificate')
+    expect(readFileSync(keyPath, 'utf8')).toBe(originalKey)
+  })
+
   it.each(['expired', 'not-yet-valid'] as const)('renews a %s certificate instead of reusing an unusable TLS identity', async (kind) => {
     const { certPath, keyPath } = paths()
     const now = Date.now()
