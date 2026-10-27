@@ -1258,8 +1258,10 @@ try {
     // a lost session. Synthetic inference is still bound only to loopback.
     const completedCookieBeforeRestart = (await phone.cookies(origin)).find(
       cookie => cookie.name.startsWith('dsh-auth-'))
-    const completedCallsBeforeRestart = callsForPendingTask()
-    const completedResultsBeforeRestart = priorToolResults()
+    // Preserve the original completed-task baseline across the cookie await;
+    // a replay during that read must not become part of a new baseline.
+    const completedCallsBeforeRestart = completedToolRequests
+    const completedResultsBeforeRestart = completedToolResults
     const secondRestart = await restart()
     check('the completed-task restart keeps the previously trusted certificate',
       secondRestart.fingerprint, fingerprint)
