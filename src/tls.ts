@@ -166,8 +166,27 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
       ],
     }],
   })
-  if (retainedKeyPair === undefined) writeAtomic(keyPath, pems.private, 0o600)
-  writeAtomic(certPath, pems.cert, 0o644)
+  if (retainedKeyPair === undefined) {
+    writeAtomic(keyPath, pems.private, 0o600)
+    try {
+      writeAtomic(certPath, pems.cert, 0o644)
+    } catch (error) {
+      // On the very first issue there was no identity to preserve. If the
+      // certificate could not be installed, do not strand this attempt's new
+      // private key and make every later start fail the incomplete-pair guard.
+      // Do not touch an existing identity or any key another writer changed.
+      if (!hasCertificate && !hasKey) {
+        try {
+          if (!existsSync(certPath) && readFileSync(keyPath, 'utf8') === pems.private) {
+            unlinkSync(keyPath)
+          }
+        } catch { /* Fail closed if cleanup fails; preserve the original error. */ }
+      }
+      throw error
+    }
+  } else {
+    writeAtomic(certPath, pems.cert, 0o644)
+  }
 }
 
 /** Write through a sibling temp file and rename, so a reader sees old-or-new, never partial. */
