@@ -47,7 +47,7 @@ Installing changes nothing on its own: dsh goes on serving this machine only. Se
 dsh --profile web --host 0.0.0.0
 ```
 
-On dsh's 0.2.1 prerelease line, wildcard binds are rejected by the carrier itself. Use one IPv4 address assigned to this computer, for example `dsh --profile web --host 192.168.1.5`. Lanyard keeps that upstream restriction: only this interface receives the TLS listener and pairing link. IPv6 binds are not yet supported. The older 0.2.0 line still uses the command above. No flag still means loopback only.
+On dsh's 0.2.1 prerelease line, wildcard binds are rejected by the carrier itself. Use one IPv4 address assigned to this computer, for example `dsh --profile web --host 192.168.1.5`. Lanyard keeps that upstream restriction: only this interface receives the TLS listener and pairing link. IPv6 binds are not yet supported. The older 0.2.0 line still uses the command above. No flag still means loopback only. With a concrete IPv4 bind, the generated TLS certificate names that one address, so unrelated VPN or container adapter changes will not force a new phone certificate on restart. A different bound LAN address still requires a new certificate and fingerprint check; legacy wildcard binds continue to cover all interfaces.
 
 `--tls-cert <file> --tls-key <file>` supplies an existing PEM pair for the TLS front instead of generating one; both are required. The local listener stays plain HTTP. On dsh releases supporting it, `--public-url <url>` changes the advertised root, but grants no Host trust; use `--trusted-host` separately when needed. It does not change lanyard's direct TLS pairing address.
 
