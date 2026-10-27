@@ -30,14 +30,17 @@ export interface LanyardTlsValues {
 
 /** Plugin config: whether this invocation serves the network, and where material persists. */
 export interface Config {
-  /** Generate and provide TLS paths: true exactly when the composition binds all interfaces. */
+  /** Generate and provide TLS paths on a non-loopback bind without explicit PEM material. */
   enabled: boolean
+  /** The network bind host; concrete IPv4 binds need only that address in their certificate. */
+  host?: string
   /** Directory holding the generated `cert.pem` and `key.pem`. */
   dir: string
 }
 
 export const Config: z<Config> = z.object({
   enabled: z.boolean().required(),
+  host: z.string().default('0.0.0.0'),
   dir: z.string().required(),
 })
 
@@ -172,7 +175,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Owner-only: the key's directory must not be world-traversable on a shared host.
   mkdirSync(config.dir, { recursive: true, mode: 0o700 })
   try {
-    await generateMaterial(certPath, keyPath)
+    // A concrete-interface carrier cannot serve the other adapters. Requiring
+    // SANs for all of them rotates a phone's accepted certificate whenever an
+    // unrelated VPN or virtual adapter appears. Legacy wildcard binds still
+    // need the full address snapshot because pairing offers each reachable LAN.
+    const addresses = config.host === undefined || config.host === '0.0.0.0'
+      ? lanIpv4Addresses() : [config.host]
+    await generateMaterial(certPath, keyPath, addresses)
   } catch (error) {
     throw new Error(`lanyard-tls: could not generate TLS material in ${config.dir}`, { cause: error })
   }
