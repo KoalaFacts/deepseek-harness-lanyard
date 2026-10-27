@@ -1243,13 +1243,149 @@ try {
     check('the restored completed task stays at the saved bare TLS origin',
       allowingPhone.url(), `${origin}/`)
     await allowingPhone.close()
-    await phone.close()
-    // Keep these observations until all awaited Host probes and phone cleanup
-    // finish; a replay during those operations must still fail this run.
+    // The previous document is gone; check again after its asynchronous
+    // cleanup before interrupting the installed Host.
     check('reopening completed approval does not ask the model for the tool again',
       callsForPendingTask(), completedToolRequests)
     check('reopening completed approval does not replay the Host tool result',
       priorToolResults(), completedToolResults)
+
+    // ---- a finished Agent/tool reply must survive a real DSH restart ----
+    // Earlier checks rebooted DSH before an Agent task existed. This verifies
+    // the completed permission-controlled task after the Host has stopped and
+    // reloaded its persisted session. Keep the original paired phone profile;
+    // neither a new browser context nor the old launch-token URL may mask
+    // a lost session. Synthetic inference is still bound only to loopback.
+    const completedCookieBeforeRestart = (await phone.cookies(origin)).find(
+      cookie => cookie.name.startsWith('dsh-auth-'))
+    // Preserve the original completed-task baseline across the cookie await;
+    // a replay during that read must not become part of a new baseline.
+    const completedCallsBeforeRestart = completedToolRequests
+    const completedResultsBeforeRestart = completedToolResults
+    const secondRestart = await restart()
+    check('the completed-task restart keeps the previously trusted certificate',
+      secondRestart.fingerprint, fingerprint)
+    const previousToken = new URL(restarted.pairingLink).searchParams.get('token')
+    const secondToken = new URL(secondRestart.pairingLink).searchParams.get('token')
+    check('a second Host process rotates its launch token without re-pairing the phone',
+      previousToken !== null && secondToken !== null && previousToken !== secondToken, true)
+
+    const afterHostRestart = await phone.newPage()
+    let postRestartFrames = 0
+    let postRestartUsedToken = false
+    afterHostRestart.on('request', request => {
+      if (request.isNavigationRequest() && new URL(request.url()).searchParams.has('token')) {
+        postRestartUsedToken = true
+      }
+    })
+    afterHostRestart.on('websocket', socket => {
+      if (new URL(socket.url()).pathname !== '/api/remote.mux') return
+      socket.on('framereceived', () => { postRestartFrames += 1 })
+    })
+    const postRestartSession = afterHostRestart.waitForResponse(
+      response => new URL(response.url()).pathname === '/api/session/list')
+    const postRestartLanding = await afterHostRestart.goto(completedApprovalUrl,
+      { waitUntil: 'domcontentloaded' })
+    const postRestartReply = await postRestartSession
+    const postRestartRpc = await postRestartReply.json() as {
+      type?: unknown; result?: { ok?: unknown }
+    }
+    check('the old phone bookmark opens the restarted real DSH Host',
+      postRestartLanding?.status() === 200 && postRestartReply.status() === 200
+      && postRestartRpc.type === 'server-response' && postRestartRpc.result?.ok === true, true)
+    const postRestartAnswer = afterHostRestart.locator('[data-chat-flow]')
+      .getByText(APPROVAL_ALLOWED_REPLY, { exact: true }).first()
+    await postRestartAnswer.waitFor({ state: 'visible', timeout: 30_000 })
+    check('restarted DSH restores the completed Agent reply in phone Chat',
+      await postRestartAnswer.isVisible(), true)
+
+    // React state or a stale cached page is not authoritative. Ask this new
+    // Host process for a sequenced projection and persisted session/page,
+    // requiring the original submitted request AND committed assistant text.
+    const postRestartHistory = await afterHostRestart.evaluate(async (
+      { sessionId, requestId, expectedReply }: {
+        sessionId: string; requestId: string; expectedReply: string
+      },
+    ) => {
+      const rpc = async (method: string, request: Record<string, unknown>) => {
+        const rpcId = 'e2e-restarted-' + method.replace('/', '-')
+        const response = await fetch('/api/' + method, {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: { request } } }),
+        })
+        const body = await response.json() as {
+          type?: unknown; rpcId?: unknown; result?: { ok?: unknown; value?: unknown }
+        }
+        return response.status === 200 && body.type === 'server-response'
+          && body.rpcId === rpcId && body.result?.ok === true ? body.result.value : undefined
+      }
+      const projection = await rpc('session/projections', { sessionId }) as {
+        kind?: unknown; asOfSeq?: unknown
+      } | undefined
+      if (projection?.kind !== 'sequenced' || typeof projection.asOfSeq !== 'number'
+        || !Number.isSafeInteger(projection.asOfSeq) || projection.asOfSeq < 0) {
+        return { persistedRequest: false, persistedAnswer: false }
+      }
+      const page = await rpc('session/page', {
+        address: { kind: 'session', sessionId },
+        throughSeq: projection.asOfSeq, maxMessages: 50,
+      }) as { records?: Array<{
+        type?: unknown
+        event?: {
+          type?: unknown
+          data?: { source?: { rpcId?: unknown }; message?: { content?: unknown } }
+        }
+      }> } | undefined
+      if (!Array.isArray(page?.records)) {
+        return { persistedRequest: false, persistedAnswer: false }
+      }
+      return {
+        persistedRequest: page.records.some(record =>
+          record.type === 'event' && record.event?.type === 'user/message'
+          && record.event.data?.source?.rpcId === requestId),
+        persistedAnswer: page.records.some(record => {
+          if (record.type !== 'event' || record.event?.type !== 'assistant/message') return false
+          const blocks = record.event.data?.message?.content
+          return Array.isArray(blocks) && blocks.map((part: unknown) => {
+            const block = part as { type?: unknown; text?: unknown } | null
+            return block?.type === 'text' && typeof block.text === 'string' ? block.text : ''
+          }).join('') === expectedReply
+        }),
+      }
+    }, { sessionId: approvedSessionId, requestId: approvedRequestId,
+      expectedReply: APPROVAL_ALLOWED_REPLY })
+    check('restarted Host still has the original phone approval-task request',
+      postRestartHistory.persistedRequest, true)
+    check('restarted Host has the completed Agent reply independently of browser storage',
+      postRestartHistory.persistedAnswer, true)
+    const postRestartDeadline = Date.now() + 10_000
+    while (postRestartFrames === 0 && Date.now() < postRestartDeadline) {
+      await new Promise<void>(resolve => { setTimeout(resolve, 50) })
+    }
+    check('the reopened phone receives a new Remote-mux frame after Host reboot',
+      postRestartFrames > 0, true)
+    const completedCookieAfterRestart = (await phone.cookies(origin)).find(
+      cookie => cookie.name.startsWith('dsh-auth-'))
+    check('the completed-task reboot retains the original secure HttpOnly phone cookie',
+      completedCookieBeforeRestart !== undefined && completedCookieAfterRestart !== undefined
+      && completedCookieAfterRestart.httpOnly && completedCookieAfterRestart.secure
+      && completedCookieAfterRestart.value === completedCookieBeforeRestart.value, true)
+    check('completed-task reboot leaves the phone configuration plane pinned',
+      pageRefused(await apiAnswer(afterHostRestart, '/api/settings/describe')), true)
+    check('completed-task reboot does not reuse any launch-token navigation',
+      postRestartUsedToken, false)
+    check('completed-task reboot retains the original token-free TLS bookmark',
+      afterHostRestart.url(), completedApprovalUrl)
+    await afterHostRestart.close()
+    await phone.close()
+    // Count *after* all Host reads, stream activity and phone cleanup, not
+    // before them: asynchronous replay during any of these must fail.
+    check('completed-task Host reboot does not replay the model tool request',
+      callsForPendingTask(), completedCallsBeforeRestart)
+    check('completed-task Host reboot does not replay the executed tool result',
+      priorToolResults(), completedResultsBeforeRestart)
 
     // ---- neither the old launch token nor a forged one can pair ----
     const hostile = await browser.newContext({ ignoreHTTPSErrors: true })
