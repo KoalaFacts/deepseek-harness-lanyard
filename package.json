@@ -78,10 +78,11 @@
   "scripts": {
     "prepare": "tsc -p tsconfig.build.json --noCheck",
     "build": "tsc -p tsconfig.build.json && node scripts/verify-build.ts",
+    "verify:package": "node scripts/verify-package.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:mutation:tls": "node scripts/mutate-tls-recovery.ts",
-    "check": "npm run typecheck && npm run test && npm run build",
+    "check": "npm run typecheck && npm run test && npm run build && npm run verify:package",
     "test:e2e": "node scripts/e2e-dsh.ts",
     "test:e2e:browser": "node scripts/e2e-browser.ts"
   },
