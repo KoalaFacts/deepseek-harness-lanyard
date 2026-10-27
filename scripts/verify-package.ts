@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { permittedPayloadPaths } from './payload-allowlist.ts'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
@@ -51,12 +52,9 @@ for (const dir of ['', 'startup/', 'tls/', 'webserver/', 'pairing/', 'keep-awake
   for (const lang of ['en', 'zh']) required.add('locale/' + dir + lang + '.json')
 }
 for (const path of required) assert.ok(paths.has(path), 'npm would omit required file: ' + path)
-// Do not let new packaging rules leak source, tests, maps, credentials or tooling.
-const allowed = (path: string): boolean => metadata.has(path)
-  || /^locale\/(?:[\w-]+\/)*[\w-]+\.json$/.test(path)
-  || /^lib\/(?:[^/]+\/)*[^/]+\.js$/.test(path)
-  || /^lib\/types\/(?:[^/]+\/)*[^/]+\.d\.ts$/.test(path)
-const unexpected = [...paths].filter(path => !allowed(path))
+// New exports alone must not authorize accidental runtime or translation files.
+// A separately enumerated inventory makes a new pack member an explicit review.
+const unexpected = [...paths].filter(path => !permittedPayloadPaths.has(path))
 assert.deepEqual(unexpected, [], 'unexpected packed files: ' + unexpected.join(', '))
 let modules = 0
 for (const path of paths) {
