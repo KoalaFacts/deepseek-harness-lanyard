@@ -78,9 +78,9 @@ export function lanIpv4Addresses(): string[] {
  * the certificate was generated, and the certificate outlives them: move the
  * machine to another network and the pairing link advertises an address the
  * certificate does not cover, so the phone gets a name-mismatch error rather
- * than the plain untrusted-issuer prompt the README describes. A certificate
- * that cannot be read at all counts as not covering anything, so the next step
- * replaces it rather than serving something unparseable.
+ * than the plain untrusted-issuer prompt the README describes. The predicate returns false for an unreadable certificate. The caller must
+ * first validate any saved certificate/key pair and fail closed if it is
+ * incomplete, malformed or mismatched, rather than silently replacing it.
  * @param certPath - the PEM certificate to inspect.
  * @param addresses - the LAN literals the certificate has to name.
  */
@@ -101,8 +101,9 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
 /**
  * Write one certificate and key pair unless a usable one already exists. The
  * key is written before the certificate and each lands through a rename.
- * Reuse validates that they match: an interrupted replacement must not silently
- * accept a fresh key paired with a stale certificate or rotate that identity.
+ * Any pre-existing material must form a readable matching pair before SAN or
+ * date checks permit renewal: an interrupted replacement must not silently
+ * discard the remaining identity, even when the LAN address has changed.
  *
  * "Usable" means a matching pair still naming this machine's current addresses:
  * reuse is what keeps a paired device's accept-once exception valid, but only
@@ -112,21 +113,28 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
  * @param addresses - LAN literals to name; this machine's current ones by default.
  */
 export async function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): Promise<void> {
-  if (existsSync(certPath) && existsSync(keyPath) && certificateCovers(certPath, addresses)) {
+  const hasCertificate = existsSync(certPath)
+  const hasKey = existsSync(keyPath)
+  if (hasCertificate !== hasKey) {
+    // A partial identity may be the result of an interrupted update or an
+    // operator moving one file. Never destroy the survivor to "repair" it.
+    throw new Error('Existing TLS certificate and private key are incomplete. Files were left unchanged; restore the missing file from a matching pair before restarting.')
+  }
+  if (hasCertificate) {
     let cert: X509Certificate
     try {
       cert = new X509Certificate(readFileSync(certPath))
       if (!cert.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))) throw new Error('key mismatch')
     } catch {
-      // A mismatched or unreadable key must never cause an automatic identity
-      // rotation: an interrupted replacement needs an operator to restore it.
+      // Check identity before SANs: a moved LAN address must never make a
+      // mismatched or unreadable saved pair eligible for automatic replacement.
       throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
     }
-    // SAN coverage and a matching key do not make an expired (or future-dated)
-    // certificate usable in a phone browser. Rotate only for date validity,
-    // after confirming this really is the saved pair.
+    // A *valid matching* pair can rotate for a new LAN address or validity
+    // dates. Otherwise preserve the fingerprint accepted by the phone.
     const now = Date.now()
-    if (Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo)) return
+    if (certificateCovers(certPath, addresses)
+      && Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo)) return
   }
   const notBeforeDate = new Date()
   const notAfterDate = new Date(notBeforeDate.getTime() + CERT_VALIDITY_DAYS * 24 * 60 * 60 * 1000)
