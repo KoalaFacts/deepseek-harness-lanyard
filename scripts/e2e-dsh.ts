@@ -149,7 +149,9 @@ await withDshDeployment(async ({ dsh, env, cwd, port, localPort, pairingLink, fi
   // Commander wraps at the terminal width, so a phrase may span lines.
   const help = run(dsh, ['--profile', 'web', '--help'], { cwd, env }).replace(/\s+/g, ' ')
   check('the replacement provider owns the command line',
-    help.includes('--network-port') && help.includes('0.0.0.0 also serves your network over TLS'), true)
+    help.includes('--network-port')
+      && help.includes("use this computer's assigned LAN IPv4 on the 0.2.1 line")
+      && help.includes('dsh --profile web --host 192.168.1.5 --network-port 8443'), true)
   check('and still offers the shipped flags it replaced', help.includes('--no-open') && help.includes('--trusted-host'), true)
 
   check('the pairing link names the LAN address, the TLS port, and upstream\'s launch token',
