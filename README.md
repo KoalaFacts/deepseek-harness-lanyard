@@ -83,6 +83,8 @@ The first time, the phone warns that the certificate is not trusted: it is self-
 
 Opening the link signs the phone in: dsh swaps the token for a session cookie and redirects to the plain address, so the token leaves the address bar at once. From then on `https://192.168.1.5:3443` just works, across restarts, until the session expires — 30 days by default. Add it to your home screen if you want it to open like an app.
 
+If an existing certificate still names the current addresses but its private key is unreadable or does not match, startup stops and leaves both files unchanged. Restore the matching certificate/key pair before restarting; Lanyard does not silently replace that identity.
+
 Three things to expect:
 
 - **Both devices must be on the same network.** The link uses your machine's LAN address; there is no relay and nothing leaves your network. On a machine with more than one network, the code names the likeliest home network, and a link is printed for each other network a phone could be on (container and virtual-machine networks are left out). If those are all it finds, it prints no link and says so.

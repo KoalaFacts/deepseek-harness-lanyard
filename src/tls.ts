@@ -9,7 +9,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { X509Certificate } from 'node:crypto'
+import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -97,11 +97,11 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
 
 /**
  * Write one certificate and key pair unless a usable one already exists. The
- * key is written before the certificate and both land through a rename, so a
- * crash mid-generation leaves the next boot regenerating both rather than
- * pairing a fresh key with a stale certificate.
+ * key is written before the certificate and each lands through a rename.
+ * Reuse validates that they match: an interrupted replacement must not silently
+ * accept a fresh key paired with a stale certificate or rotate that identity.
  *
- * "Usable" means present *and* still naming this machine's current addresses:
+ * "Usable" means a matching pair still naming this machine's current addresses:
  * reuse is what keeps a paired device's accept-once exception valid, but only
  * while the certificate still matches what the pairing link points at.
  * @param certPath - destination of the PEM certificate.
@@ -109,7 +109,15 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
  * @param addresses - LAN literals to name; this machine's current ones by default.
  */
 export async function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): Promise<void> {
-  if (existsSync(certPath) && existsSync(keyPath) && certificateCovers(certPath, addresses)) return
+  if (existsSync(certPath) && existsSync(keyPath) && certificateCovers(certPath, addresses)) {
+    try {
+      const cert = new X509Certificate(readFileSync(certPath))
+      if (cert.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))) return
+    } catch {
+      // Unreadable/unparseable keys also fail closed, without echoing material.
+    }
+    throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
+  }
   const notBeforeDate = new Date()
   const notAfterDate = new Date(notBeforeDate.getTime() + CERT_VALIDITY_DAYS * 24 * 60 * 60 * 1000)
   const pems = await generate([{ name: 'commonName', value: 'dsh' }], {
