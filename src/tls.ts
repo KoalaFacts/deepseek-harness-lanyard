@@ -8,7 +8,7 @@
  * @module
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
@@ -177,7 +177,15 @@ function writeAtomic(path: string, content: string, mode: number): void {
   // mid-write, which is worth failing on. The rename over `path` is what makes
   // replacing an existing certificate work at all.
   writeFileSync(temp, content, { mode, flag: 'wx' })
-  renameSync(temp, path)
+  try {
+    renameSync(temp, path)
+  } catch (error) {
+    // The exclusive create succeeded, so this temp belongs to this attempt.
+    // Remove it after a failed rename; otherwise retrying in this same process
+    // hits EEXIST forever. Never remove a temp that failed the 'wx' guard.
+    try { unlinkSync(temp) } catch { /* Preserve the original rename failure. */ }
+    throw error
+  }
 }
 
 /**
