@@ -30,13 +30,17 @@ const paths = new Set<string>()
 for (const item of packed.files) {
   const path = (item as { path?: unknown })?.path
   assert.ok(typeof path === 'string' && path.length > 0, 'invalid packed file path')
+  assert.ok(!path.includes('\\') && !path.startsWith('/') && path.split('/').every(part => part && part !== '.' && part !== '..'), 'noncanonical packed path: ' + path)
   assert.ok(!paths.has(path), 'duplicate packed file: ' + path)
   paths.add(path)
 }
-const required = new Set(['package.json', 'LICENSE', 'README.md', 'README.zh.md', 'icon.svg', 'cordis.patch.yml'])
+const metadata = new Set(['package.json', 'LICENSE', 'README.md', 'README.zh.md', 'icon.svg', 'cordis.patch.yml'])
+const required = new Set(metadata)
 for (const target of Object.values(manifest.exports)) {
   if (typeof target === 'string') {
-    if (!target.includes('*')) required.add(target.replace(/^\.\//, ''))
+    for (const language of ['en', 'zh']) {
+      required.add(target.replaceAll('*', language).replace(/^\.\//, ''))
+    }
   } else {
     assert.ok(target.types && target.default, 'each module export needs JS and types')
     required.add(target.default.replace(/^\.\//, ''))
@@ -48,7 +52,7 @@ for (const dir of ['', 'startup/', 'tls/', 'webserver/', 'pairing/', 'keep-awake
 }
 for (const path of required) assert.ok(paths.has(path), 'npm would omit required file: ' + path)
 // Do not let new packaging rules leak source, tests, maps, credentials or tooling.
-const allowed = (path: string): boolean => required.has(path)
+const allowed = (path: string): boolean => metadata.has(path)
   || /^locale\/(?:[\w-]+\/)*[\w-]+\.json$/.test(path)
   || /^lib\/(?:[^/]+\/)*[^/]+\.js$/.test(path)
   || /^lib\/types\/(?:[^/]+\/)*[^/]+\.d\.ts$/.test(path)
