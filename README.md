@@ -44,10 +44,10 @@ Or, where the web sidebar has a **Plugins** page, install it there by the same n
 Installing changes nothing on its own: dsh goes on serving this machine only. Serving your network is a choice you make each time you start it:
 
 ```sh
-dsh --profile web --host 0.0.0.0
+dsh --profile web --host 192.168.1.5
 ```
 
-On dsh's 0.2.1 prerelease line, wildcard binds are rejected by the carrier itself. Use one IPv4 address assigned to this computer, for example `dsh --profile web --host 192.168.1.5`. Lanyard keeps that upstream restriction: only this interface receives the TLS listener and pairing link. IPv6 binds are not yet supported. The older 0.2.0 line still uses the command above. No flag still means loopback only. With a concrete IPv4 bind, the generated TLS certificate names that one address, so unrelated VPN or container adapter changes will not force a new phone certificate on restart. A different bound LAN address still requires a new certificate and fingerprint check; legacy wildcard binds continue to cover all interfaces.
+Replace `192.168.1.5` with an IPv4 address actually assigned to this computer (usually its Wi-Fi or Ethernet address); do not copy that example address unchanged. The dsh 0.2.1 prerelease carrier rejects wildcard `0.0.0.0`. On the older 0.2.0 line, `dsh --profile web --host 0.0.0.0` is also supported but listens on every network interface. Lanyard preserves each carrier's restriction; the concrete bind exposes only the selected interface. IPv6 binds are not yet supported. No flag still means loopback only. With a concrete IPv4 bind, the generated TLS certificate names that one address, so unrelated VPN or container adapter changes will not force a new phone certificate on restart. A different bound LAN address still requires a new certificate and fingerprint check; legacy wildcard binds continue to cover all interfaces.
 
 `--tls-cert <file> --tls-key <file>` supplies an existing PEM pair for the TLS front instead of generating one; both are required. The local listener stays plain HTTP. On dsh releases supporting it, `--public-url <url>` changes the advertised root, but grants no Host trust; use `--trusted-host` separately when needed. It does not change lanyard's direct TLS pairing address.
 
@@ -68,7 +68,7 @@ Ignore the `(LAN: …)` link on dsh's own `dsh web:` line: it is plain http and 
 
 | Flag | |
 |---|---|
-| `--host 0.0.0.0` | serve your network over TLS, and print the pairing link |
+| `--host <LAN IPv4>` | serve the selected trusted LAN interface over TLS, and print the pairing link |
 | `--network-port <port>` | the port devices on the network reach; 3443 unless you name one |
 | `--keep-awake` | hold the machine awake so sleep cannot cut the phone off mid-session |
 | `--port`, `--no-open`, `--trusted-host` | as shipped; `--port` stays this machine's own |

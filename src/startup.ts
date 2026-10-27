@@ -80,9 +80,9 @@ interface WebOptions {
 export function webCommand(): Command {
   return new Command()
     .name('dsh --profile web')
-    .description('Serve the DeepSeek Harness browser UI (lanyard: and, with --host 0.0.0.0, your phone over your own network).')
+    .description('Serve the DeepSeek Harness browser UI (lanyard: use --host with your LAN IPv4 to pair a phone over TLS).')
     .helpOption('-h, --help', 'show this help')
-    .option('--host <host>', 'bind host; on next use one local IPv4 address; on older releases 0.0.0.0 also serves your network over TLS and prints a code to pair a phone')
+    .option('--host <host>', 'bind host; use this computer\'s assigned LAN IPv4 on the 0.2.1 line (legacy 0.2.0 also accepts 0.0.0.0)')
     .option('--no-open', 'do not open the Web UI in the default browser')
     .option('--port <port>', 'listen port on this machine; pass 0 to let the OS pick a free one')
     .option('--network-port <port>', 'port devices on your network reach over TLS (default 3443)')
@@ -94,9 +94,9 @@ export function webCommand(): Command {
     .addHelpText('after', `
 Examples:
   dsh --profile web                          serve this machine only, on the composed port
-  dsh --profile web --host 0.0.0.0           also serve your network over TLS; scan the printed code with a phone
-  dsh --profile web --host 0.0.0.0 --network-port 8443
-                                             serve your network on another port
+  dsh --profile web --host 192.168.1.5       serve this LAN interface over TLS; scan the QR code with a phone
+  dsh --profile web --host 192.168.1.5 --network-port 8443
+                                             serve this LAN interface on another TLS port
   dsh --profile web --no-open                serve without opening a browser
 `)
 }

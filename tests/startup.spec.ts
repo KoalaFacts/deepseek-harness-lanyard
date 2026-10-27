@@ -78,10 +78,15 @@ describe('the lanyard web command line', () => {
 
   it('documents the network bind, its port, and --keep-awake in its help text', () => {
     // Commander wraps at the terminal width, so a phrase may span lines.
-    const help = webCommand().helpInformation().replace(/\s+/g, ' ')
+    let rendered = ''
+    webCommand().configureOutput({ writeOut: text => { rendered += text } }).outputHelp()
+    const help = rendered.replace(/\s+/g, ' ')
     expect(help).toContain('--keep-awake')
     expect(help).toContain('--network-port')
-    expect(help).toContain('0.0.0.0 also serves your network over TLS')
+    expect(help).toContain('use this computer\'s assigned LAN IPv4 on the 0.2.1 line')
+    expect(help).toContain('legacy 0.2.0 also accepts 0.0.0.0')
+    expect(help).toContain('dsh --profile web --host 192.168.1.5')
+    expect(help).toContain('dsh --profile web --host 192.168.1.5 --network-port 8443')
     // The default the help names is the one the carrier applies.
     expect(help).toContain(`(default ${String(DEFAULT_NETWORK_PORT)})`)
   })
