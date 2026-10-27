@@ -196,6 +196,8 @@ Four layers, each covering what the one below cannot:
 | `npm run test:e2e` | a real `dsh` boot, gate driven from the machine's LAN address over TLS |
 | `npm run test:e2e:browser` | the pairing flow in Chromium — the only thing that proves the session rides the shell's own fetches and WebSocket, and that nothing the shell calls on load is refused by accident |
 
+Run `npm run test:mutation:tls` for the TLS identity recovery guards: it runs the real focused Vitest cases against the original source and three deliberately broken variants, verifies assertion-specific failures, and restores the source.
+
 **Mutation-test any guard you add or change**: break what it guards and confirm the test fails. This repo has repeatedly found tests that passed against the mutation and guarded nothing. A green suite is not evidence until it can go red.
 
 **Re-run the old mutations when a neighbouring rule changes, not only the new ones.** When exact routes began denying by default, the test pinning `session%2FopenWorkspacePath` kept passing and stopped guarding anything: an escaped separator now reads as one unlisted name, pinned without the decoded reading it existed to test. Nothing in that change touched the test; only re-running its mutation showed it had lost its teeth.
