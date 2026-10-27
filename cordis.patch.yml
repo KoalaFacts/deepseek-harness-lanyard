@@ -37,6 +37,7 @@
       inject: [webStartup]
       config:
         enabled: !!js (ctx.webStartup.host ?? '127.0.0.1') !== '127.0.0.1' && ctx.webStartup.tls === undefined
+        host: !!js ctx.webStartup.host ?? '127.0.0.1'
         dir: !!js dshHomePath('lanyard-tls')
 
     # The gated carrier. It provides `webServer`, so every consumer that injects
