@@ -2,7 +2,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { X509Certificate } from 'node:crypto'
+import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { generate } from 'selfsigned'
@@ -189,6 +189,39 @@ describe('generateMaterial', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+
+  it.each(['expired', 'not-yet-valid'] as const)('renews a %s certificate instead of reusing an unusable TLS identity', async (kind) => {
+    const { certPath, keyPath } = paths()
+    const now = Date.now()
+    const day = 86_400_000
+    const pems = await generate([{ name: 'commonName', value: 'dsh' }], {
+      notBeforeDate: new Date(now + (kind === 'expired' ? -4 : 2) * day),
+      notAfterDate: new Date(now + (kind === 'expired' ? -2 : 4) * day),
+      keySize: 2048,
+      algorithm: 'sha256',
+      extensions: [{
+        name: 'subjectAltName',
+        altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '192.168.1.5' }],
+      }],
+    })
+    writeFileSync(certPath, pems.cert)
+    writeFileSync(keyPath, pems.private)
+    const oldCert = new X509Certificate(readFileSync(certPath))
+    expect(oldCert.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+    expect(certificateCovers(certPath, ['192.168.1.5'])).toBe(true)
+    if (kind === 'expired') expect(Date.parse(oldCert.validTo)).toBeLessThan(now)
+    else expect(Date.parse(oldCert.validFrom)).toBeGreaterThan(now)
+
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const renewed = new X509Certificate(readFileSync(certPath))
+    expect(readFileSync(certPath, 'utf8')).not.toBe(pems.cert)
+    expect(readFileSync(keyPath, 'utf8')).not.toBe(pems.private)
+    expect(renewed.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+    expect(certificateCovers(certPath, ['192.168.1.5'])).toBe(true)
+    expect(Date.parse(renewed.validFrom)).toBeLessThanOrEqual(Date.now())
+    expect(Date.parse(renewed.validTo)).toBeGreaterThan(Date.now())
   })
 
   it('replaces material once the machine is reachable somewhere it does not name', async () => {

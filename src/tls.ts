@@ -110,13 +110,20 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
  */
 export async function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): Promise<void> {
   if (existsSync(certPath) && existsSync(keyPath) && certificateCovers(certPath, addresses)) {
+    let cert: X509Certificate
     try {
-      const cert = new X509Certificate(readFileSync(certPath))
-      if (cert.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))) return
+      cert = new X509Certificate(readFileSync(certPath))
+      if (!cert.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))) throw new Error('key mismatch')
     } catch {
-      // Unreadable/unparseable keys also fail closed, without echoing material.
+      // A mismatched or unreadable key must never cause an automatic identity
+      // rotation: an interrupted replacement needs an operator to restore it.
+      throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
     }
-    throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
+    // SAN coverage and a matching key do not make an expired (or future-dated)
+    // certificate usable in a phone browser. Rotate only for date validity,
+    // after confirming this really is the saved pair.
+    const now = Date.now()
+    if (Date.parse(cert.validFrom) <= now && now < Date.parse(cert.validTo)) return
   }
   const notBeforeDate = new Date()
   const notAfterDate = new Date(notBeforeDate.getTime() + CERT_VALIDITY_DAYS * 24 * 60 * 60 * 1000)
