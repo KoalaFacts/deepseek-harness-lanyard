@@ -69,10 +69,10 @@ function runTest(mutant: Mutant, label: string, expectFailure: boolean): void {
   const matches = (report.testResults ?? [])
     .flatMap(suite => suite.assertionResults ?? [])
     .filter(test => test.fullName?.includes(mutant.test))
-  if (matches.length !== 1) {
+  const [target] = matches
+  if (matches.length !== 1 || target === undefined) {
     throw new Error(`${label}: expected one targeted test, saw ${matches.length} (status ${result.status})`)
   }
-  const target = matches[0]
   if (!expectFailure) {
     if (result.status !== 0 || target.status !== 'passed') {
       throw new Error(`${label}: baseline failed: ${(target.failureMessages ?? []).join('\n')}`)
