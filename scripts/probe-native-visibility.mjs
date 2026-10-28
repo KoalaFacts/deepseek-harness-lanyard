@@ -14,9 +14,13 @@ const { chromium } = createRequire(resolve(process.argv[2], 'package.json'))('pl
 
 async function probe(noDefaults) {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-visibility-'))
-  // Native executable launch intentionally retains Chromium's sandbox defaults.
-  // No real profile, model, LAN host, certificate, or external page is used.
+  // This isolated, blank-page diagnostic needs the same test-runner sandbox
+  // exemption used by Playwright's managed Chromium on GitHub-hosted Linux,
+  // where unprivileged namespaces are unavailable. It has no DSH, secrets,
+  // LAN listener, certificates or external navigation; runtime TLS/auth/pins
+  // and the separate real-DSH browser gate are not affected.
   const child = spawn(chromium.executablePath(), [
+    '--no-sandbox',
     `--user-data-dir=${profile}`, '--remote-debugging-port=0',
     '--remote-debugging-address=127.0.0.1', '--no-first-run',
     '--no-default-browser-check', '--disable-background-networking', 'about:blank',
