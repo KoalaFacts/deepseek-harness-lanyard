@@ -11,10 +11,10 @@ run-name: publish v${{ inputs.version }} to npm${{ inputs.dry_run && ' (dry run)
 # configuration, so exactly one file can hold the credential. `release.yml`
 # gates the tree and cuts the tag; this publishes what that tag points at.
 #
-# It publishes the TAG, never a branch. Naming a version and getting whatever
-# `main` happens to hold is how a release comes to differ from the thing that
-# was reviewed and tagged, so the tree comes from `refs/tags/v<version>` and the
-# version in it is checked against what you asked for.
+# It publishes the VERIFIED TAG COMMIT, never the mutable tag name or a branch.
+# `verify` resolves the tag once and builds/tests that commit; `publish` checks
+# out the immutable SHA and refuses a release tag changed after verification.
+# This prevents the metadata in the publish job differing from its `lib` artifact.
 #
 # Setting this up is not only this file — npmjs.com has to be told to trust it.
 # See "Releasing" in AGENTS.md. The trusted publisher names a workflow BY
@@ -51,6 +51,7 @@ jobs:
     timeout-minutes: 45
     outputs:
       dist_tag: ${{ steps.resolve.outputs.dist_tag }}
+      tag_sha: ${{ steps.pin.outputs.tag_sha }}
     steps:
       # Before the checkout, because the version reaches `ref:` below and a
       # value should be shaped like a version before it is used as one.
@@ -94,6 +95,7 @@ jobs:
       # release.yml gated it. Requiring the tag to be an ancestor of the default
       # branch puts it back on the reviewed line of history.
       - name: Refuse a tag that is not on the default branch
+        id: pin
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -105,6 +107,7 @@ jobs:
             exit 1
           fi
           echo "v$VERSION is $TAG_SHA, which is on main"
+          echo "tag_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
 
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
@@ -215,7 +218,9 @@ jobs:
       # so this job installs nothing and runs no lifecycle scripts.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/v${{ inputs.version }}
+          # This exact commit produced the verified lib artifact. Do not resolve
+          # refs/tags/v<version> a second time in the credential-holding job.
+          ref: ${{ needs.verify.outputs.tag_sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Trusted publishing needs Node >= 22.14; the 22 line satisfies it.
@@ -237,6 +242,26 @@ jobs:
         with:
           name: lib
           path: lib
+
+      # A moved tag must not silently repoint the published version, even though
+      # checkout is pinned above. Fetch only to FETCH_HEAD, supporting both
+      # lightweight and annotated tags without overwriting a local tag.
+      - name: Refuse a release tag changed after verification
+        env:
+          VERSION: ${{ inputs.version }}
+          VERIFIED_SHA: ${{ needs.verify.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/v$VERSION"
+          CURRENT_SHA="$(git rev-parse "FETCH_HEAD^{commit}")"
+          if [ "$CURRENT_SHA" != "$VERIFIED_SHA" ]; then
+            echo "::error::tag v$VERSION moved after verification (verified $VERIFIED_SHA, current $CURRENT_SHA); refusing publish"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$VERIFIED_SHA" ]; then
+            echo "::error::publish checkout is not the verified commit $VERIFIED_SHA"
+            exit 1
+          fi
 
       # `--ignore-scripts` keeps `prepare` from running: `lib/` is already built,
       # above, which is the only thing it would have produced. A future prepack

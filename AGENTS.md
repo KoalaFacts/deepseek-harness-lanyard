@@ -235,13 +235,13 @@ Two workflows, run in order from the Actions tab. Both are deliberate: pushing a
 
 1. **Bump the version** on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
 2. **release** — *Run workflow*, on `main`, type the version, untick **dry_run**. Gates the tree, then creates the tag `v<version>` and the GitHub Release.
-3. **publish-npm** — *Run workflow*, on `main`, type the same version, untick **dry_run**. Checks out that tag, gates it again, and publishes to npm.
+3. **publish-npm** — *Run workflow*, on `main`, type the same version, untick **dry_run**. Resolves the tag to one verified commit, gates it again, checks out that immutable SHA for publishing and refuses to publish if the remote tag changed during verification.
 
 The version is typed rather than inferred, and checked against `package.json` both times. It is a confirmation, not a source: npm publishes what `package.json` says, so the check is there to catch the release started without bumping the version first.
 
 **Why two workflows rather than one.** npm allows a package exactly one trusted publisher configuration, so exactly one file here can hold the OIDC credential. Keeping it in the one that does nothing else is what stops the gate's deliberately-unpinned dependencies from running beside a credential that can publish under this name. Each workflow is also split into `verify` and `publish`/`tag` jobs for the same reason, one level down.
 
-**publish-npm publishes the tag, never a branch.** Naming a version and getting whatever `main` holds is how a release comes to differ from what was reviewed. Both workflows additionally refuse a real run from anywhere but `main`, because `workflow_dispatch` offers every branch and the workflow *file* comes from whichever ref is selected.
+**publish-npm publishes the exact commit verified from the tag, never a branch or a second resolution of the tag.** Naming a version and getting whatever `main` holds — or a retargeted tag between verification and publishing — is how a release comes to differ from what was reviewed. The credential-holding job rechecks the remote tag immediately before publishing and fails closed if it moved; pinning the SHA also prevents a later tag move changing the already-verified source. Both workflows additionally refuse a real run from anywhere but `main`, because `workflow_dispatch` offers every branch and the workflow *file* comes from whichever ref is selected.
 
 Guards, all of which run before the slow legs and all of which fail closed — a network error or a 5xx is never read as "clear to proceed":
 
