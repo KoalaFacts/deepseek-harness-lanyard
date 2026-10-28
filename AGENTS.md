@@ -197,7 +197,7 @@ Four layers, each covering what the one below cannot:
 | `npm run test:e2e` | a real `dsh` boot, gate driven from the machine's LAN address over TLS |
 | `npm run test:e2e:browser` | the pairing flow in Chromium — the only thing that proves the session rides the shell's own fetches and WebSocket, and that nothing the shell calls on load is refused by accident |
 
-Run `npm run test:mutation:tls` for the TLS identity recovery guards: it runs the real focused Vitest cases against the original source and four deliberately broken variants, verifies assertion-specific failures, and restores the source.
+Run `npm run test:mutation:tls` for the TLS identity recovery guards: it runs the real focused Vitest cases against the original source and five deliberately broken variants, verifies assertion-specific failures, and restores the source.
 
 **Mutation-test any guard you add or change**: break what it guards and confirm the test fails. This repo has repeatedly found tests that passed against the mutation and guarded nothing. A green suite is not evidence until it can go red.
 

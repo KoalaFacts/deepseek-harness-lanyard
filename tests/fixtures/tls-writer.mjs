@@ -3,7 +3,8 @@ import fs from 'node:fs'
 import { join } from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
 const [moduleUrl, directory, mode] = process.argv.slice(2)
-const cert = join(directory, 'cert.pem'), key = join(directory, 'key.pem')
+// Preserve symlink/.. components for filesystem-semantics regression cases.
+const cert = `${directory}/cert.pem`, key = `${directory}/key.pem`
 const rename = fs.renameSync
 const fault = Object.assign(new Error('controlled certificate rename EIO'), { code: 'EIO' })
 if (mode === 'hold-fail' || mode === 'hold-success') {

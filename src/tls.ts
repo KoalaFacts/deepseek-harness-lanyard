@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { generate } from 'selfsigned'
@@ -118,8 +118,8 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
   // Canonical parents make relative paths and directory symlink aliases share
   // a lock. No stale-lock stealing: an abandoned lock must fail closed.
   const locks = [...new Set([certPath, keyPath].map(path => {
-    const absolute = resolve(path)
-    return join(realpathSync(dirname(absolute)), `${basename(absolute)}.lanyard-lock`)
+    // Resolve the original parent through the filesystem before normalizing '..'.
+    return join(realpathSync.native(dirname(path)), `${basename(path)}.lanyard-lock`)
   }))].sort()
   const held: string[] = []
   let failed = false

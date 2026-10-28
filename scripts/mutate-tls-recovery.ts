@@ -20,6 +20,14 @@ interface Mutant {
 
 const mutants: Mutant[] = [
   {
+    label: 'filesystem-preserving lock parent canonicalization',
+    from: 'realpathSync.native(dirname(path))',
+    to: 'realpathSync.native(dirname(join(path))) /* MUTANT: normalize before resolving symlinks */',
+    file: 'tests/tls-writer-lock.spec.ts',
+    test: 'coordinates a symlink followed by dot-dot with its filesystem parent across processes',
+    failure: /expected true to be false/i,
+  },
+  {
     label: 'cooperating TLS writer exclusion',
     from: 'for (const lock of locks)',
     to: 'for (const lock of [] as string[]) /* MUTANT: omit writer locks */',

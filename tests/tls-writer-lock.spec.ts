@@ -148,3 +148,28 @@ it('reports a release failure after successful publication without deleting the 
     rmSync(dir, { recursive: true, force: true })
   }
 }, 30_000)
+
+
+it('coordinates a symlink followed by dot-dot with its filesystem parent across processes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lanyard-lock-dotdot-'))
+  const dir = join(root, 'material'), child = join(dir, 'sub'), alias = join(root, 'alias')
+  mkdirSync(child, { recursive: true })
+  symlinkSync(child, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const first = writer(dir, 'hold-success')
+  void first.done.catch(() => {})
+  try {
+    await until(() => existsSync(join(dir, 'ready')))
+    const second = await writer(`${alias}/..`, 'normal').done
+    writeFileSync(join(dir, 'release'), '')
+    expect((await first.done).ok).toBe(true)
+    expect(second.ok).toBe(false)
+    expect(second.message).toMatch(/TLS material.*busy/i)
+    expect(existsSync(join(root, 'cert.pem'))).toBe(false)
+    expect(new X509Certificate(readFileSync(join(dir, 'cert.pem')))
+      .checkPrivateKey(createPrivateKey(readFileSync(join(dir, 'key.pem'))))).toBe(true)
+  } finally {
+    writeFileSync(join(dir, 'release'), '')
+    await first.done.catch(() => {})
+    rmSync(root, { recursive: true, force: true })
+  }
+}, 30_000)
