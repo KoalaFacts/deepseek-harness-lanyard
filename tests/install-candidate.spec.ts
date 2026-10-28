@@ -63,10 +63,12 @@ describe('downloaded main install candidate identity', () => {
 
 it('the main candidate consumer downloads this run artifact only after all main gates', () => {
   const workflow = parse(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')) as {
-    jobs: { 'candidate-consumer': { needs: string[]; if: string; steps: Array<{ uses?: string; with?: { name?: string }; env?: Record<string, string>; run?: string }> } }
+    jobs: { 'candidate-consumer': { needs: string[]; if: string; steps: Array<{ uses?: string; with?: { name?: string; 'persist-credentials'?: boolean }; env?: Record<string, string>; run?: string }> } }
   }
   const job = workflow.jobs['candidate-consumer']
   expect(job.needs).toEqual(['check', 'e2e', 'browser'])
+  const checkout = job.steps.find(step => step.uses?.startsWith('actions/checkout@'))
+  expect(checkout?.with?.['persist-credentials']).toBe(false)
   expect(job.if).toContain("github.ref == 'refs/heads/main'")
   expect(job.steps.find(step => step.uses?.startsWith('actions/download-artifact@'))?.with?.name)
     .toBe('unpublished-lanyard-${{ github.sha }}')
