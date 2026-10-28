@@ -26,13 +26,21 @@ async function probe(noDefaults) {
     '--no-default-browser-check', '--disable-background-networking', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] })
   let launchError
-  child.once('error', error => { launchError = error })
+  let spawned = false
+  child.once('spawn', () => { spawned = true })
   // Do not log browser/profile metadata; expose only a bounded diagnostic on failure.
   let stderr = ''
   child.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000) })
-  // Chromium subprocesses can inherit stderr; `close` may lag after the owned
-  // browser itself has exited. Observe the process `exit` event instead.
-  const childExited = new Promise(resolveExit => child.once('exit', resolveExit))
+  // Chromium helpers can inherit stderr, so 'close' can lag behind 'exit'.
+  // A failed spawn has no 'exit' event: settle on its pre-spawn 'error' only.
+  // Never treat a post-spawn error as permission to delete a live profile.
+  const childExited = new Promise(resolveExit => {
+    child.once('exit', resolveExit)
+    child.once('error', error => {
+      launchError = error
+      if (!spawned) resolveExit()
+    })
+  })
   let browser
   try {
     let port

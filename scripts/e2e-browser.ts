@@ -68,11 +68,21 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
     '--ignore-certificate-errors', 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] })
   let launchError: Error | undefined
-  owned.once('error', (error: Error) => { launchError = error })
+  let spawned = false
+  owned.once('spawn', () => { spawned = true })
   // Drain stderr so child processes cannot block on a full inherited pipe;
   // do not print a diagnostic potentially containing browser profile details.
   owned.stderr?.on('data', () => {})
-  const exited = new Promise<void>(resolve => { owned.once('exit', () => resolve()) })
+  // Failed spawn emits 'error' and 'close', but not 'exit'. Only that
+  // pre-spawn error proves no browser could hold a session-bearing profile;
+  // an error on an already running child must not permit early cleanup.
+  const exited = new Promise<void>(resolve => {
+    owned.once('exit', () => resolve())
+    owned.once('error', (error: Error) => {
+      launchError = error
+      if (!spawned) resolve()
+    })
+  })
   let nativeBrowser: Browser | undefined
   try {
     let port: number | undefined
