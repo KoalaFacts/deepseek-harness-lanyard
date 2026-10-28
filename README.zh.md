@@ -41,7 +41,7 @@ dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz
 
 ### 下载未发布的 CI 安装候选包
 
-如果暂时无法在本机从源码构建，可以打开 [CI 工作流](https://github.com/KoalaFacts/deepseek-harness-lanyard/actions/workflows/ci.yml)，选择一次 **`main` 分支全部成功的运行**。先确认 **check、e2e、browser** 三项全部通过，再到 *Artifacts* 下载 **`unpublished-lanyard-<完整提交 SHA>`**。在运行 dsh 的电脑上解压 ZIP，里面有可安装的 `.tgz`、`SHA256SUMS` 和 `SOURCE_SHA`。确认 `SOURCE_SHA` 与该次成功运行的完整提交 SHA 一致；也可运行 `sha256sum -c SHA256SUMS`（macOS：`shasum -a 256 -c SHA256SUMS`）检查文件有无意外损坏。然后用 `dsh plugin --profile web add "/实际解压目录/安装包.tgz"` 安装，替换成文件的真实绝对路径。
+如果暂时无法在本机从源码构建，可以打开 [CI 工作流](https://github.com/KoalaFacts/deepseek-harness-lanyard/actions/workflows/ci.yml)，选择一次 **`main` 分支全部成功的运行**。先确认 **check、e2e、browser、candidate-consumer** 四项全部通过，再到 *Artifacts* 下载 **`unpublished-lanyard-<完整提交 SHA>`**。在运行 dsh 的电脑上解压 ZIP，里面有可安装的 `.tgz`、`SHA256SUMS` 和 `SOURCE_SHA`。确认 `SOURCE_SHA` 与该次成功运行的完整提交 SHA 一致；也可运行 `sha256sum -c SHA256SUMS`（macOS：`shasum -a 256 -c SHA256SUMS`）检查文件有无意外损坏。然后用 `dsh plugin --profile web add "/实际解压目录/安装包.tgz"` 安装，替换成文件的真实绝对路径。
 
 这种产物**只会在 main 推送时生成**，保存七天，**不是 npm 正式发布、独立签名的来源证明，也不是实体手机验收结果**。与安装包放在同一 ZIP 的校验和仅用于发现意外损坏，不能单独证明来源可信；必须在 GitHub 上核对工作流和提交。安装后仍需显式提供 `--host <本机实际局域网 IPv4>` 才会开放局域网服务。
 
