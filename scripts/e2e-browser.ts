@@ -590,8 +590,6 @@ try {
         backgroundCookie !== undefined && phoneCookieAfterRecovery !== undefined
         && backgroundCookie.secure && backgroundCookie.httpOnly
         && backgroundCookie.value === phoneCookieAfterRecovery.value, true)
-      check('backgrounding never submits the unsent phone draft to the Host',
-        backgroundPromptSubmissions, 0)
       check('the returned tab remains at the token-free bookmarked address',
         resumedPhone.url(), `${origin}/`)
 
@@ -607,6 +605,10 @@ try {
       // navigation to a pairing token must not pass unnoticed.
       check('mobile recovery never revisits a launch-token URL', usedTokenOnResume, false)
       check('mobile recovery ends at the saved bare TLS address', resumedPhone.url(), `${origin}/`)
+      // Observe through the asynchronous stream and API work above. An automatic
+      // delayed submission is still a regression even if the draft looks intact.
+      check('backgrounding never submits the unsent phone draft to the Host',
+        backgroundPromptSubmissions, 0)
       await resumedPhone.close()
     }
 
