@@ -541,6 +541,60 @@ try {
       await recoveredComposer.fill(recoveredDraft)
       check('the reopened phone can type a fresh task draft',
         await recoveredComposer.textContent(), recoveredDraft)
+
+      // ---- a touch phone backgrounds a live, UNSENT draft and returns ----
+      // The previous offline test discarded the entire tab. This one leaves
+      // the same document alive while another tab takes focus, then requires
+      // its actual hidden/visible lifecycle, unsent input and Host session.
+      // A Chromium background tab is NOT an iOS/Android screen lock or an
+      // OS-evicted page; those still require physical-device acceptance.
+      let backgroundPromptSubmissions = 0
+      resumedPhone.on('request', request => {
+        if (new URL(request.url()).pathname === '/api/session/prompt') {
+          backgroundPromptSubmissions += 1
+        }
+      })
+      const otherTab = await phone.newPage()
+      try {
+        await otherTab.bringToFront()
+        // Background tabs throttle requestAnimationFrame. Poll on a timer so
+        // the assertion itself does not wait forever for a hidden-frame RAF.
+        await resumedPhone.waitForFunction(
+          () => document.visibilityState === 'hidden', undefined,
+          { polling: 250, timeout: 10_000 },
+        )
+        check('switching mobile tabs actually hides the pending task',
+          await resumedPhone.evaluate(() => document.visibilityState), 'hidden')
+      } finally {
+        await resumedPhone.bringToFront()
+        await otherTab.close()
+      }
+      await resumedPhone.waitForFunction(
+        () => document.visibilityState === 'visible', undefined,
+        { polling: 250, timeout: 10_000 },
+      )
+      check('returning to the original mobile tab retains its unsent task draft',
+        await recoveredComposer.textContent(), recoveredDraft)
+      const backgroundSession = await apiAnswer(resumedPhone, '/api/session/list')
+      const backgroundRpc = JSON.parse(backgroundSession.body) as {
+        type?: unknown
+        rpcId?: unknown
+        result?: { ok?: unknown }
+      }
+      check('the foregrounded tab still completes a real authenticated Host RPC',
+        backgroundSession.status === 200 && backgroundRpc.type === 'server-response'
+        && backgroundRpc.rpcId === 'e2e' && backgroundRpc.result?.ok === true, true)
+      const backgroundCookie = (await phone.cookies(origin)).find(
+        cookie => cookie.name.startsWith('dsh-auth-'))
+      check('backgrounding preserves the same secure HttpOnly phone session',
+        backgroundCookie !== undefined && phoneCookieAfterRecovery !== undefined
+        && backgroundCookie.secure && backgroundCookie.httpOnly
+        && backgroundCookie.value === phoneCookieAfterRecovery.value, true)
+      check('backgrounding never submits the unsent phone draft to the Host',
+        backgroundPromptSubmissions, 0)
+      check('the returned tab remains at the token-free bookmarked address',
+        resumedPhone.url(), `${origin}/`)
+
       const resumedPhoneFrameDeadline = Date.now() + 10_000
       while (resumedPhoneFrames === 0 && Date.now() < resumedPhoneFrameDeadline) {
         await new Promise<void>(resolve => { setTimeout(resolve, 50) })
