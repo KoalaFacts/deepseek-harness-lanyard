@@ -97,7 +97,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:browser
+      - run: xvfb-run -a npm run test:e2e:browser
 
   candidate-consumer:
     # The regular e2e packs its own checkout; this job validates the artifact

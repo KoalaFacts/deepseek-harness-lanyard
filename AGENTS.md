@@ -31,7 +31,7 @@ npm run typecheck
 npm run test               # vitest
 npm run build              # tsc to lib/ + lib/types, then scripts/verify-build.ts
 npm run test:e2e           # boot a real dsh and drive the gate over TLS
-npm run test:e2e:browser   # drive the pairing flow in Chromium
+npm run test:e2e:browser   # headed Chromium; on Linux without a display use xvfb-run -a
 node scripts/sync-dsh.ts   # move the dsh-* devDependencies to dsh@latest, then pnpm install
 ```
 

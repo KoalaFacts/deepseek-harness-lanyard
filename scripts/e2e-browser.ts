@@ -10,7 +10,8 @@
  * but this gate pins shows up here as a failure rather than as a phone that
  * quietly cannot do something.
  *
- * Usage:  node scripts/e2e-browser.ts
+ * Usage:  node scripts/e2e-browser.ts (with a desktop display)
+ *         xvfb-run -a node scripts/e2e-browser.ts (Linux CI)
  *         LANYARD_CHROMIUM=/path/to/chrome node scripts/e2e-browser.ts
  *
  * Playwright normally resolves its own matching Chromium build. Set
@@ -279,6 +280,9 @@ try {
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
   const browser = await chromium.launch({
+    // Real tab visibility transitions require the headed browser. Linux CI
+    // supplies a virtual display; do not simulate document.visibilityState.
+    headless: false,
     // The deployment under test is on this machine's own LAN address. An
     // ambient HTTP(S)_PROXY — normal in a container — would send the
     // navigation through it and the connection is reset.

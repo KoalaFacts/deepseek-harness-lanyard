@@ -174,7 +174,7 @@ jobs:
       - run: npm run check
       - run: npm run test:e2e
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:browser
+      - run: xvfb-run -a npm run test:e2e:browser
 
       # `publish` installs nothing, so the build it uploads is the one this gate
       # approved rather than a second build of the same source.
