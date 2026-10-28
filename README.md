@@ -39,6 +39,12 @@ The tarball filename above corresponds to this checkout's current `package.json`
 
 This **does not publish anything to npm** or open the LAN automatically. The existing real-DSH e2e installs this same kind of local tarball into a clean profile; that is not a substitute for an official npm release or a physical phone test. Once installed, start dsh with an explicit trusted-LAN address as described below, and follow the TLS certificate/fingerprint pairing instructions.
 
+### Download an unpublished CI install candidate
+
+If you cannot build the source locally, open a **successful `main` run** of the [CI workflow](https://github.com/KoalaFacts/deepseek-harness-lanyard/actions/workflows/ci.yml). Confirm **check, e2e and browser** all passed, then download the **`unpublished-lanyard-<full commit SHA>`** artifact under *Artifacts*. Extract its ZIP on the computer running dsh; it contains the installable `.tgz`, `SHA256SUMS`, and `SOURCE_SHA`. Verify that `SOURCE_SHA` matches the successful run's full commit SHA and optionally check the tarball for download damage using `sha256sum -c SHA256SUMS` (macOS: `shasum -a 256 -c SHA256SUMS`). From that directory, install with `dsh plugin --profile web add "/absolute/path/to/the-downloaded.tgz"` (replace the placeholder with the real extracted path).
+
+These artifacts exist **only for main pushes**, expire after seven days, and are **not an npm release, a signed provenance statement, or proof of a physical phone test**. A checksum packaged in the same ZIP detects accidental changes but does not independently authenticate its origin; confirm the workflow and commit on GitHub. Installing still leaves networking off until you explicitly start dsh with `--host <your assigned LAN IPv4>`.
+
 Or, where the web sidebar has a **Plugins** page, install it there by the same name; it is listed as *Lanyard — phone access*.
 
 Installing changes nothing on its own: dsh goes on serving this machine only. Serving your network is a choice you make each time you start it:

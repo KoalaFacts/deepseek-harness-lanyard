@@ -231,6 +231,8 @@ The publish-payload allowlist is an explicit 32-file inventory in `scripts/paylo
 
 `npm run check` also runs `npm run verify:package` **after** the build. This asks `npm pack --dry-run --json --ignore-scripts` for the exact payload the credential-holding publish job would send, and refuses missing module declarations, both-language plugin locales, README/metadata, or unexpected files (including source, tests and source maps). It does not create a tarball or publish. The real DSH e2e continues to prove tarball installation and runtime behavior separately; neither is proof of a registry release or a physical phone trial.
 
+On each successful **main** push, the CI `check` job additionally creates an unpublished `.tgz` from that same checked `lib/` with `npm pack --ignore-scripts`, then saves the tarball, a SHA-256 checksum, and the source commit SHA as a seven-day GitHub Actions artifact. The artifact is not generated on PRs and holds no npm publishing credentials. Treat it as a manual **install candidate**, not as a release: only use a run where `check`, real-DSH `e2e`, and `browser` all completed successfully. This adds no new dependency or build step to the credential-bearing `publish-npm` job. The checksum shares the archive and does not independently attest provenance. The operator must check the GitHub run SHA; physical iOS/Android validation is still separate.
+
 Two workflows, run in order from the Actions tab. Both are deliberate: pushing a tag starts nothing, and neither runs on its own.
 
 1. **Bump the version** on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
