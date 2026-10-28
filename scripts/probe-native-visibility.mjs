@@ -30,7 +30,9 @@ async function probe(noDefaults) {
   // Do not log browser/profile metadata; expose only a bounded diagnostic on failure.
   let stderr = ''
   child.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000) })
-  const closed = new Promise(resolveClose => child.once('close', resolveClose))
+  // Chromium subprocesses can inherit stderr; `close` may lag after the owned
+  // browser itself has exited. Observe the process `exit` event instead.
+  const childExited = new Promise(resolveExit => child.once('exit', resolveExit))
   let browser
   try {
     let port
@@ -90,8 +92,14 @@ async function probe(noDefaults) {
     }
     finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
-      const exited = await Promise.race([closed.then(() => true), delay(5000).then(() => false)])
-      if (!exited) throw new Error(`owned browser did not exit; retained temporary profile ${profile}`)
+      let stopped = await Promise.race([childExited.then(() => true), delay(5000).then(() => false)])
+      if (!stopped) {
+        child.kill('SIGKILL')
+        stopped = await Promise.race([childExited.then(() => true), delay(5000).then(() => false)])
+      }
+      // Never hold this diagnostic open on inherited helper stderr handles.
+      child.stderr.destroy()
+      if (!stopped) throw new Error(`owned browser did not exit; retained temporary profile ${profile}`)
       await rm(profile, { recursive: true, force: true })
     }
   }
