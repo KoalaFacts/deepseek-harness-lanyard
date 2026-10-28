@@ -12,6 +12,19 @@ import { setTimeout as delay } from 'node:timers/promises'
 assert(process.argv[2], 'supply the repository containing installed pinned Playwright')
 const { chromium } = createRequire(resolve(process.argv[2], 'package.json'))('playwright')
 
+// Cancel a winning race's unused timeout; otherwise this diagnostic can keep
+// the Node process alive after Chromium is gone.
+async function settleWithin(work, ms, fallback) {
+  let timer
+  try {
+    return await Promise.race([work, new Promise(resolve => {
+      timer = setTimeout(() => resolve(fallback), ms)
+    })])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 async function probe(noDefaults) {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-visibility-'))
   // This isolated, blank-page diagnostic needs the same test-runner sandbox
@@ -93,17 +106,17 @@ async function probe(noDefaults) {
   } finally {
     // Only terminate this fixture's process; await exit before removing its profile.
     try {
-      if (browser) await Promise.race([
-        browser.close(),
-        delay(5000).then(() => { throw new Error('CDP disconnect timed out') }),
-      ])
+      if (browser) {
+        const closed = await settleWithin(browser.close().then(() => true), 5000, false)
+        if (!closed) throw new Error('CDP disconnect timed out')
+      }
     }
     finally {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
-      let stopped = await Promise.race([childExited.then(() => true), delay(5000).then(() => false)])
+      let stopped = await settleWithin(childExited.then(() => true), 5000, false)
       if (!stopped) {
         child.kill('SIGKILL')
-        stopped = await Promise.race([childExited.then(() => true), delay(5000).then(() => false)])
+        stopped = await settleWithin(childExited.then(() => true), 5000, false)
       }
       // Never hold this diagnostic open on inherited helper stderr handles.
       child.stderr.destroy()

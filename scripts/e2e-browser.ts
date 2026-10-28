@@ -45,6 +45,22 @@ try {
 }
 
 /**
+ * Wait for a subprocess/transport result or a bounded timeout. Cancel the
+ * losing timer on success, otherwise each completed race keeps Node alive for
+ * five more seconds even after the owned browser has exited.
+ */
+async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([work, new Promise<T>(resolve => {
+      timer = setTimeout(() => resolve(fallback), ms)
+    })])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
  * Real background/foreground tab lifecycle needs a native Chromium default
  * context. Playwright-managed contexts force tabs to report focus even when
  * their CDP focus-emulation setting is later disabled. The separate blank-page
@@ -117,14 +133,13 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
     await run(page, context)
   } finally {
     if (nativeBrowser) {
-      await Promise.race([nativeBrowser.close().catch(() => {}),
-        delay(5_000)]).catch(() => {})
+      await settleWithin(nativeBrowser.close().catch(() => {}), 5_000, undefined)
     }
     if (owned.exitCode === null && owned.signalCode === null) owned.kill('SIGTERM')
-    let stopped = await Promise.race([exited.then(() => true), delay(5_000).then(() => false)])
+    let stopped = await settleWithin(exited.then(() => true), 5_000, false)
     if (!stopped) {
       owned.kill('SIGKILL')
-      stopped = await Promise.race([exited.then(() => true), delay(5_000).then(() => false)])
+      stopped = await settleWithin(exited.then(() => true), 5_000, false)
     }
     owned.stderr?.destroy()
     // The profile contains a real test-session bearer cookie, so never leave
