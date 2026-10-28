@@ -96,8 +96,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: npx playwright install --with-deps chromium
-      - run: xvfb-run -a npm run test:e2e:browser
+      - id: chromium
+        run: npx playwright install --with-deps chromium
+      - name: Diagnose native tab visibility without business state
+        run: xvfb-run -a node scripts/probe-native-visibility.mjs .
+      - name: Full browser product gate
+        if: ${{ !cancelled() && steps.chromium.outcome == 'success' }}
+        run: xvfb-run -a npm run test:e2e:browser
 
   candidate-consumer:
     # The regular e2e packs its own checkout; this job validates the artifact
