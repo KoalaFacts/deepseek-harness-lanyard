@@ -99,6 +99,21 @@ describe('publish-npm commit identity', () => {
       git(source, 'push', '--force', 'origin', 'v0.2.0')
       expect(runGuard().status).toBe(0)
 
+      // A correct remote tag cannot bless an accidentally different checkout.
+      git(publisher, 'fetch', 'origin', 'main')
+      git(publisher, 'checkout', '--detach', 'FETCH_HEAD')
+      const wrongHead = runGuard()
+      expect(wrongHead.status).not.toBe(0)
+      expect(String(wrongHead.stdout) + String(wrongHead.stderr)).toContain('checkout is not the verified commit')
+      git(publisher, 'checkout', '--detach', verified)
+      expect(runGuard().status).toBe(0)
+
+      // A transport failure is not evidence that the tag is still unchanged.
+      git(publisher, 'remote', 'set-url', 'origin', join(root, 'missing-origin.git'))
+      expect(runGuard().status).not.toBe(0)
+      git(publisher, 'remote', 'set-url', 'origin', remote)
+      expect(runGuard().status).toBe(0)
+
       git(source, 'push', 'origin', ':refs/tags/v0.2.0')
       expect(runGuard().status).not.toBe(0)
     } finally {
