@@ -82,7 +82,7 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
         throw new Error('native DSH browser exited before CDP became ready')
       try {
         const first = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]
-        if (/^\d+$/.test(first) && Number(first) > 0 && Number(first) <= 65535) {
+        if (first !== undefined && /^\d+$/.test(first) && Number(first) > 0 && Number(first) <= 65535) {
           port = Number(first)
           break
         }
@@ -150,6 +150,39 @@ const apiAnswer = (page: Page, path: string): Promise<PageAnswer> => page.evalua
   })
   return { status: response.status, body: await response.text() }
 }, path)
+
+/**
+ * Re-run the real GUI's successful read-only session/list request after tab
+ * recovery, with a fresh correlation id. A hand-built empty args object is not
+ * the shell's contract on all supported DSH versions; replay only the exact
+ * observed request shape (without copying a browser bearer credential).
+ */
+async function recheckRealSessionList(page: Page, previous: Response, rpcId: string): Promise<boolean> {
+  let body: { type?: unknown; method?: unknown; rpcId?: unknown; payload?: unknown }
+  try {
+    body = previous.request().postDataJSON() as typeof body
+  } catch {
+    return false
+  }
+  if (!body || body.type !== 'client-request' || body.method !== 'session/list'
+    || typeof body.rpcId !== 'string' || body.rpcId.length === 0
+    || body.payload === undefined) return false
+  return page.evaluate(async ({ request, id }) => {
+    const response = await fetch('/api/session/list', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...request, rpcId: id }),
+    })
+    if (response.status !== 200) return false
+    const reply = await response.json() as {
+      type?: unknown; rpcId?: unknown; result?: { ok?: unknown }
+    }
+    return reply.type === 'server-response' && reply.rpcId === id
+      && reply.result?.ok === true
+  }, { request: body, id: rpcId })
+}
 
 /** Whether the gate refused the page's own fetch. */
 const pageRefused = (answer: PageAnswer): boolean => answer.status === 403 && answer.body === REFUSAL_BODY
@@ -715,13 +748,8 @@ try {
         )
         check('returning to the same native DSH tab retains its exact unsent draft',
           await nativeComposer.textContent(), nativeDraft)
-        const resumedNativeRpc = await apiAnswer(nativePage, '/api/session/list')
-        const nativeHost = JSON.parse(resumedNativeRpc.body) as {
-          type?: unknown; rpcId?: unknown; result?: { ok?: unknown }
-        }
         check('foregrounded native DSH tab still completes a real Host RPC',
-          resumedNativeRpc.status === 200 && nativeHost.type === 'server-response'
-          && nativeHost.rpcId === 'e2e' && nativeHost.result?.ok === true, true)
+          await recheckRealSessionList(nativePage, nativeListed, 'lanyard-native-foreground'), true)
         const nativeCookieAfter = (await nativeContext.cookies(origin)).find(
           cookie => cookie.name.startsWith('dsh-auth-'))
         check('native DSH backgrounding retains exactly its Secure HttpOnly session',
@@ -739,15 +767,8 @@ try {
       })
       check('original recovered phone keeps its separate unsent task draft',
         await recoveredComposer.textContent(), recoveredDraft)
-      const backgroundSession = await apiAnswer(resumedPhone, '/api/session/list')
-      const backgroundRpc = JSON.parse(backgroundSession.body) as {
-        type?: unknown
-        rpcId?: unknown
-        result?: { ok?: unknown }
-      }
-      check('the foregrounded tab still completes a real authenticated Host RPC',
-        backgroundSession.status === 200 && backgroundRpc.type === 'server-response'
-        && backgroundRpc.rpcId === 'e2e' && backgroundRpc.result?.ok === true, true)
+      check('the recovered Playwright tab still completes a real Host RPC',
+        await recheckRealSessionList(resumedPhone, resumedPhoneReply, 'lanyard-recovered-tab'), true)
       const backgroundCookie = (await phone.cookies(origin)).find(
         cookie => cookie.name.startsWith('dsh-auth-'))
       check('backgrounding preserves the same secure HttpOnly phone session',
