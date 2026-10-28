@@ -671,6 +671,14 @@ try {
         recoveryBounds !== null && recoveryBounds.x >= 0 && recoveryBounds.y >= 0
         && recoveryBounds.x + recoveryBounds.width <= phoneSize.width + 1
         && recoveryBounds.y + recoveryBounds.height <= 844, true)
+      // Attach before entering the draft: a spontaneous submission during
+      // typing must not escape the same zero-submission assertion as a delayed
+      // submission after backgrounding.
+      let backgroundPromptSubmissions = 0
+      resumedPhone.on('request', request => {
+        if (new URL(request.url()).pathname === '/api/session/prompt')
+          backgroundPromptSubmissions += 1
+      })
       const recoveredDraft = 'Continue from this workspace after reconnecting.'
       await recoveredComposer.fill(recoveredDraft)
       check('the reopened phone can type a fresh task draft',
@@ -682,11 +690,6 @@ try {
       // Pair a separate native default-context mobile tab with this SAME live
       // Host and prove the lifecycle there; do not fake visibility or count the
       // empty-page diagnostic as a product test.
-      let backgroundPromptSubmissions = 0
-      resumedPhone.on('request', request => {
-        if (new URL(request.url()).pathname === '/api/session/prompt')
-          backgroundPromptSubmissions += 1
-      })
       await withNativePhoneTab(async (nativePage, nativeContext) => {
         const sessionReply = nativePage.waitForResponse(
           response => new URL(response.url()).pathname === '/api/session/list')
@@ -722,6 +725,17 @@ try {
           await picker.waitFor({ state: 'hidden', timeout: 15_000 })
         }
         await nativeComposer.waitFor({ state: 'visible', timeout: 20_000 })
+        // Observe the complete unsent-draft lifetime, including initial
+        // editing. Installing this only after fill would miss an unexpected
+        // automatic prompt submission triggered by typing.
+        let nativePromptSubmissions = 0
+        let tokenNavigationOnReturn = false
+        nativePage.on('request', request => {
+          const url = new URL(request.url())
+          if (url.pathname === '/api/session/prompt') nativePromptSubmissions += 1
+          if (request.isNavigationRequest() && url.searchParams.has('token'))
+            tokenNavigationOnReturn = true
+        })
         const nativeDraft = 'Keep this genuine DSH phone task unsent through a tab switch.'
         await nativeComposer.fill(nativeDraft)
         check('native DSH mobile task is still an unsent editor draft',
@@ -731,14 +745,6 @@ try {
         check('native phone has its own upstream Secure HttpOnly session',
           nativeCookieBefore !== undefined && nativeCookieBefore.secure
           && nativeCookieBefore.httpOnly, true)
-        let nativePromptSubmissions = 0
-        let tokenNavigationOnReturn = false
-        nativePage.on('request', request => {
-          const url = new URL(request.url())
-          if (url.pathname === '/api/session/prompt') nativePromptSubmissions += 1
-          if (request.isNavigationRequest() && url.searchParams.has('token'))
-            tokenNavigationOnReturn = true
-        })
 
         // This default-context browser is attached with noDefaults:true; the
         // blank-page control proved that a real tab switch triggers visibility.
