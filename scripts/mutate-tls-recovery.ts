@@ -20,6 +20,14 @@ interface Mutant {
 
 const mutants: Mutant[] = [
   {
+    label: 'cooperating TLS writer exclusion',
+    from: 'for (const lock of locks)',
+    to: 'for (const lock of [] as string[]) /* MUTANT: omit writer locks */',
+    file: 'tests/tls-writer-lock.spec.ts',
+    test: 'excludes a second process until failed first issuance cleans up, then permits retry',
+    failure: /expected true to be false/i,
+  },
+  {
     label: 'first-issue orphan-key cleanup',
     from: 'unlinkSync(keyPath)',
     to: 'void keyPath /* MUTANT: leave orphaned first-issue key */',
@@ -110,4 +118,4 @@ try {
 if (readFileSync(sourcePath, 'utf8') !== original) {
   throw new Error('TLS source restoration failed')
 }
-process.stdout.write('TLS source-level mutation gate passed (3/3 guards killed).\n')
+process.stdout.write(`TLS source-level mutation gate passed (${mutants.length}/${mutants.length} guards killed).\n`)

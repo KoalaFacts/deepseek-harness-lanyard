@@ -8,10 +8,10 @@
  * @module
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { generate } from 'selfsigned'
@@ -113,6 +113,44 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
  * @param addresses - LAN literals to name; this machine's current ones by default.
  */
 export async function generateMaterial(certPath: string, keyPath: string, addresses: string[] = lanIpv4Addresses()): Promise<void> {
+  // All cooperating Lanyard writers lock both destinations before inspecting
+  // saved state, including while asynchronous key generation is in flight.
+  // Canonical parents make relative paths and directory symlink aliases share
+  // a lock. No stale-lock stealing: an abandoned lock must fail closed.
+  const locks = [...new Set([certPath, keyPath].map(path => {
+    const absolute = resolve(path)
+    return join(realpathSync(dirname(absolute)), `${basename(absolute)}.lanyard-lock`)
+  }))].sort()
+  const held: string[] = []
+  let failed = false
+  try {
+    for (const lock of locks) {
+      try {
+        mkdirSync(lock, { mode: 0o700 })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new Error(`TLS material is busy or an earlier writer left a lock: ${lock}. Retry after the writer finishes; abandoned locks are not removed automatically.`, { cause: error })
+        }
+        throw error
+      }
+      held.push(lock)
+    }
+    await generateLockedMaterial(certPath, keyPath, addresses)
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    let releaseError: unknown
+    for (const lock of held.reverse()) {
+      try { rmdirSync(lock) } catch (error) { releaseError ??= error }
+    }
+    // A cleanup failure must never mask the original generation/IO error.
+    if (!failed && releaseError !== undefined) throw releaseError
+  }
+}
+
+/** The complete material transaction, called only with both writer locks held. */
+async function generateLockedMaterial(certPath: string, keyPath: string, addresses: string[]): Promise<void> {
   const hasCertificate = existsSync(certPath)
   const hasKey = existsSync(keyPath)
   if (hasCertificate !== hasKey) {
