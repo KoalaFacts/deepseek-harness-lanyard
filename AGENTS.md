@@ -226,6 +226,8 @@ The verification layers above catch code that does not do what it says. These ca
 
 ## Releasing
 
+The publish-payload allowlist is an explicit 32-file inventory in `scripts/payload-allowlist.ts`, deliberately separate from the `package.json`-derived required files. Adding a JS/declaration pair or an extra JSON translation that matches the `files` glob must not silently grow what npm publishes. Adding **or removing** a runtime module or locale requires review of both the manifest and this inventory: removing an export must not silently drop a reviewed file from npm. This is a file-name guard, **not** a scan of file contents for secrets.
+
 `npm run check` also runs `npm run verify:package` **after** the build. This asks `npm pack --dry-run --json --ignore-scripts` for the exact payload the credential-holding publish job would send, and refuses missing module declarations, both-language plugin locales, README/metadata, or unexpected files (including source, tests and source maps). It does not create a tarball or publish. The real DSH e2e continues to prove tarball installation and runtime behavior separately; neither is proof of a registry release or a physical phone trial.
 
 Two workflows, run in order from the Actions tab. Both are deliberate: pushing a tag starts nothing, and neither runs on its own.
