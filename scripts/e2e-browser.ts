@@ -120,7 +120,10 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
     // The profile contains a real test-session bearer cookie, so never leave
     // it behind after a normal run or on assertion failures.
     if (!stopped) throw new Error('owned native DSH browser did not exit; profile cleanup refused')
-    await rm(profile, { recursive: true, force: true })
+    // Chrome helpers may briefly recreate profile files after the owned
+    // browser process exits. Node's bounded ENOTEMPTY/EBUSY retries keep
+    // cleanup fail-closed without hiding persistent profile-leak failures.
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 }
 
