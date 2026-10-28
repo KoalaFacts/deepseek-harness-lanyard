@@ -233,6 +233,8 @@ The publish-payload allowlist is an explicit 32-file inventory in `scripts/paylo
 
 On each successful **main** push, the CI `check` job additionally creates an unpublished `.tgz` from that same checked `lib/` with `npm pack --ignore-scripts`, then saves the tarball, a SHA-256 checksum, and the source commit SHA as a seven-day GitHub Actions artifact. The artifact is not generated on PRs and holds no npm publishing credentials. Treat it as a manual **install candidate**, not as a release: only use a run where `check`, real-DSH `e2e`, and `browser` all completed successfully. This adds no new dependency or build step to the credential-bearing `publish-npm` job. The checksum shares the archive and does not independently attest provenance. The operator must check the GitHub run SHA; physical iOS/Android validation is still separate.
 
+After the successful main check, real-DSH E2E and browser jobs, `candidate-consumer` downloads **that same run's** artifact into a separate runner, checks its exact three members, source SHA and tarball checksum, then installs that downloaded `.tgz` with the published dsh CLI in a fresh DSH_HOME. It verifies the resulting web profile and seven installed JS/declaration exports. This is an automated **clean install** acceptance that the source-packing E2E cannot provide; it does not start a mobile GUI session or validate real phone behavior. Candidate failures must remain visible as CI failures, not hidden as skipped successes.
+
 Two workflows, run in order from the Actions tab. Both are deliberate: pushing a tag starts nothing, and neither runs on its own.
 
 1. **Bump the version** on `main` (`npm version patch --no-git-tag-version`, or edit `package.json`) and merge it.
