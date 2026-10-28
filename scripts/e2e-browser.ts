@@ -565,7 +565,6 @@ try {
       // Turn off its test-only CDP focus override, not the browser visibility API.
       const focusSession = await phone.newCDPSession(resumedPhone)
       await focusSession.send('Emulation.setFocusEmulationEnabled', { enabled: false })
-      await focusSession.detach()
       const [otherTab] = await Promise.all([
         resumedPhone.waitForEvent('popup', { timeout: 10_000 }),
         resumedPhone.evaluate(() => { window.open('about:blank', '_blank') }),
@@ -583,6 +582,7 @@ try {
       } finally {
         await resumedPhone.bringToFront()
         await otherTab.close()
+        await focusSession.detach()
       }
       await resumedPhone.waitForFunction(
         () => document.visibilityState === 'visible', undefined,
