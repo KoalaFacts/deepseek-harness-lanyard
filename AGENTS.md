@@ -195,7 +195,7 @@ Four layers, each covering what the one below cannot:
 | `npm run test` | unit behavior against published `@deepseek-ai/dsh-*`, no harness checkout |
 | `npm run build` | every subpath the shipped `lib/` exports loads |
 | `npm run test:e2e` | a real `dsh` boot, gate driven from the machine's LAN address over TLS |
-| `npm run test:e2e:browser` | the pairing and task flow in Chromium, including a touch-emulated tab becoming hidden and visible without losing an unsent draft or Host session; it proves neither an iOS/Android screen-lock lifecycle nor a background-evicted app |
+| `npm run test:e2e:browser` | the actual pairing, task and approval flow in Chromium; background/foreground checks use an owned native Chromium default profile attached with `connectOverCDP({ noDefaults: true })` to a real DSH pairing and Host session (Playwright-managed contexts otherwise force visibility), preserving a pending draft and Secure HttpOnly session. Test-only Chromium bypasses the self-signed certificate warning; this proves neither physical iOS/Android screen lock nor OS eviction |
 
 Run `npm run test:mutation:tls` for the TLS identity recovery guards: it runs the real focused Vitest cases against the original source and five deliberately broken variants, verifies assertion-specific failures, and restores the source.
 

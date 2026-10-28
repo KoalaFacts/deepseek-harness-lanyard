@@ -20,11 +20,15 @@
  * so the suite runs there without downloading a second browser.
  */
 
+import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import { hasNoPluginEntries, hasPluginListEntries } from './tool-result-assertions.ts'
 import { join } from 'node:path'
-import type { BrowserType, Page, Response } from 'playwright'
+import type { Browser, BrowserContext, BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
 import { REFUSAL_BODY } from '../src/webserver.ts'
 
@@ -38,6 +42,86 @@ try {
   console.error('lanyard e2e: playwright is not installed, so the browser half cannot be exercised.')
   console.error('lanyard e2e: SKIPPED (not passed) — run `pnpm install` then `npx playwright install chromium`.')
   process.exit(2)
+}
+
+/**
+ * Real background/foreground tab lifecycle needs a native Chromium default
+ * context. Playwright-managed contexts force tabs to report focus even when
+ * their CDP focus-emulation setting is later disabled. The separate blank-page
+ * probe proves that only connectOverCDP({ noDefaults: true }) reliably produces
+ * hidden -> visible on the CI browser; here that context visits the REAL DSH.
+ *
+ * Own one disposable Chrome process/profile per call. CDP is localhost-only;
+ * --no-sandbox and certificate trust bypass apply ONLY to the CI test fixture,
+ * just as in the existing browser and native visibility tests. No production
+ * settings, networking or certificates are touched.
+ */
+async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
+  const profile = await mkdtemp(join(tmpdir(), 'lanyard-dsh-native-tab-'))
+  const owned = spawn(process.env.LANYARD_CHROMIUM ?? chromium.executablePath(), [
+    '--no-sandbox',
+    `--user-data-dir=${profile}`,
+    '--remote-debugging-port=0',
+    '--remote-debugging-address=127.0.0.1',
+    '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--no-proxy-server',
+    '--ignore-certificate-errors', 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+  let launchError: Error | undefined
+  owned.once('error', (error: Error) => { launchError = error })
+  // Drain stderr so child processes cannot block on a full inherited pipe;
+  // do not print a diagnostic potentially containing browser profile details.
+  owned.stderr?.on('data', () => {})
+  const exited = new Promise<void>(resolve => { owned.once('exit', () => resolve()) })
+  let nativeBrowser: Browser | undefined
+  try {
+    let port: number | undefined
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (launchError) throw launchError
+      if (owned.exitCode !== null || owned.signalCode !== null)
+        throw new Error('native DSH browser exited before CDP became ready')
+      try {
+        const first = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\\n')[0]
+        if (/^\\d+$/.test(first) && Number(first) > 0 && Number(first) <= 65535) {
+          port = Number(first)
+          break
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      await delay(100)
+    }
+    if (port === undefined) throw new Error('native DSH browser CDP readiness timed out')
+    nativeBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { noDefaults: true })
+    const context = nativeBrowser.contexts()[0]
+    const page = context?.pages()[0]
+    if (!context || !page) throw new Error('native Chrome default context has no initial tab')
+    await page.setViewportSize({ width: 390, height: 844 })
+    // CDP device emulation changes layout/touch; it does NOT override focus or
+    // document.visibilityState. Keep its session alive until the test finishes.
+    const emulation = await context.newCDPSession(page)
+    await emulation.send('Emulation.setDeviceMetricsOverride', {
+      width: 390, height: 844, deviceScaleFactor: 3, mobile: true,
+    })
+    await emulation.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+    await run(page, context)
+  } finally {
+    if (nativeBrowser) {
+      await Promise.race([nativeBrowser.close().catch(() => {}),
+        delay(5_000)]).catch(() => {})
+    }
+    if (owned.exitCode === null && owned.signalCode === null) owned.kill('SIGTERM')
+    let stopped = await Promise.race([exited.then(() => true), delay(5_000).then(() => false)])
+    if (!stopped) {
+      owned.kill('SIGKILL')
+      stopped = await Promise.race([exited.then(() => true), delay(5_000).then(() => false)])
+    }
+    owned.stderr?.destroy()
+    // The profile contains a real test-session bearer cookie, so never leave
+    // it behind after a normal run or on assertion failures.
+    if (!stopped) throw new Error('owned native DSH browser did not exit; profile cleanup refused')
+    await rm(profile, { recursive: true, force: true })
+  }
 }
 
 /**
@@ -546,49 +630,114 @@ try {
       check('the reopened phone can type a fresh task draft',
         await recoveredComposer.textContent(), recoveredDraft)
 
-      // ---- a touch phone backgrounds a live, UNSENT draft and returns ----
-      // The previous offline test discarded the entire tab. This one leaves
-      // the same document alive while another tab takes focus, then requires
-      // its actual hidden/visible lifecycle, unsent input and Host session.
-      // A Chromium background tab is NOT an iOS/Android screen lock or an
-      // OS-evicted page; those still require physical-device acceptance.
+      // ---- native mobile Chromium: background a REAL DSH task tab ----
+      // The Playwright-managed phone above proves network recovery, but its
+      // force-focus CDP plumbing cannot produce actual hidden/visible events.
+      // Pair a separate native default-context mobile tab with this SAME live
+      // Host and prove the lifecycle there; do not fake visibility or count the
+      // empty-page diagnostic as a product test.
       let backgroundPromptSubmissions = 0
       resumedPhone.on('request', request => {
-        if (new URL(request.url()).pathname === '/api/session/prompt') {
+        if (new URL(request.url()).pathname === '/api/session/prompt')
           backgroundPromptSubmissions += 1
-        }
       })
-      // Establish a real opener relationship rather than an independent target.
-      // The hidden assertion below still proves whether this browser backgrounds
-      // the original document; opening another page alone is not evidence.
-      // Playwright forces focus on each page, masking native tab visibility.
-      // Turn off its test-only CDP focus override, not the browser visibility API.
-      const focusSession = await phone.newCDPSession(resumedPhone)
-      await focusSession.send('Emulation.setFocusEmulationEnabled', { enabled: false })
-      const [otherTab] = await Promise.all([
-        resumedPhone.waitForEvent('popup', { timeout: 10_000 }),
-        resumedPhone.evaluate(() => { window.open('about:blank', '_blank') }),
-      ])
-      try {
-        await otherTab.bringToFront()
-        // Background tabs throttle requestAnimationFrame. Poll on a timer so
-        // the assertion itself does not wait forever for a hidden-frame RAF.
-        await resumedPhone.waitForFunction(
-          () => document.visibilityState === 'hidden', undefined,
+      await withNativePhoneTab(async (nativePage, nativeContext) => {
+        const sessionReply = nativePage.waitForResponse(
+          response => new URL(response.url()).pathname === '/api/session/list')
+        const nativeLanding = await nativePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
+        const nativeListed = await sessionReply
+        const nativeRpc = await nativeListed.json() as { result?: { ok?: unknown } }
+        check('native mobile tab signs in through the REAL DSH pairing link',
+          nativeLanding?.status() === 200 && nativeListed.status() === 200
+          && nativeRpc.result?.ok === true, true)
+        check('native mobile tab strips the launch token before backgrounding',
+          nativePage.url(), `${origin}/`)
+        const nativeViewport = await nativePage.evaluate(() => ({
+          width: window.innerWidth, touchPoints: navigator.maxTouchPoints,
+        }))
+        check('native DSH tab is phone-width with browser touch emulation',
+          nativeViewport.width <= 390 && nativeViewport.touchPoints > 0, true)
+
+        // A new browser profile has no client-side workspace selection, even
+        // though the actual workspace already exists in the running DSH Host.
+        const nativeComposer = nativePage.locator('[data-composer-input][contenteditable="true"]').first()
+        const composerAlreadyVisible = await nativeComposer.waitFor({
+          state: 'visible', timeout: 3_000,
+        }).then(() => true, () => false)
+        if (!composerAlreadyVisible) {
+          await nativePage.getByRole('button', { name: 'Add workspace', exact: true }).click()
+          const picker = nativePage.getByRole('dialog', { name: 'Select Workspace Directory' })
+          await picker.waitFor({ timeout: 15_000 })
+          await picker.getByRole('button', { name: 'Edit path' }).click()
+          const pathInput = picker.getByRole('textbox', { name: 'Edit path' })
+          await pathInput.fill(workspacePath)
+          await pathInput.press('Enter')
+          await picker.getByRole('button', { name: 'Open', exact: true }).click()
+          await picker.waitFor({ state: 'hidden', timeout: 15_000 })
+        }
+        await nativeComposer.waitFor({ state: 'visible', timeout: 20_000 })
+        const nativeDraft = 'Keep this genuine DSH phone task unsent through a tab switch.'
+        await nativeComposer.fill(nativeDraft)
+        check('native DSH mobile task is still an unsent editor draft',
+          await nativeComposer.textContent(), nativeDraft)
+        const nativeCookieBefore = (await nativeContext.cookies(origin)).find(
+          cookie => cookie.name.startsWith('dsh-auth-'))
+        check('native phone has its own upstream Secure HttpOnly session',
+          nativeCookieBefore !== undefined && nativeCookieBefore.secure
+          && nativeCookieBefore.httpOnly, true)
+        let nativePromptSubmissions = 0
+        let tokenNavigationOnReturn = false
+        nativePage.on('request', request => {
+          const url = new URL(request.url())
+          if (url.pathname === '/api/session/prompt') nativePromptSubmissions += 1
+          if (request.isNavigationRequest() && url.searchParams.has('token'))
+            tokenNavigationOnReturn = true
+        })
+
+        // This default-context browser is attached with noDefaults:true; the
+        // blank-page control proved that a real tab switch triggers visibility.
+        const otherTab = await nativeContext.newPage()
+        try {
+          await otherTab.bringToFront()
+          await nativePage.waitForFunction(
+            () => document.visibilityState === 'hidden', undefined,
+            { polling: 250, timeout: 10_000 },
+          )
+          check('real native DSH phone tab becomes hidden when switching tabs',
+            await nativePage.evaluate(() => document.visibilityState), 'hidden')
+        } finally {
+          await nativePage.bringToFront()
+          await otherTab.close()
+        }
+        await nativePage.waitForFunction(
+          () => document.visibilityState === 'visible', undefined,
           { polling: 250, timeout: 10_000 },
         )
-        check('switching mobile tabs actually hides the pending task',
-          await resumedPhone.evaluate(() => document.visibilityState), 'hidden')
-      } finally {
-        await resumedPhone.bringToFront()
-        await otherTab.close()
-        await focusSession.detach()
-      }
-      await resumedPhone.waitForFunction(
-        () => document.visibilityState === 'visible', undefined,
-        { polling: 250, timeout: 10_000 },
-      )
-      check('returning to the original mobile tab retains its unsent task draft',
+        check('returning to the same native DSH tab retains its exact unsent draft',
+          await nativeComposer.textContent(), nativeDraft)
+        const resumedNativeRpc = await apiAnswer(nativePage, '/api/session/list')
+        const nativeHost = JSON.parse(resumedNativeRpc.body) as {
+          type?: unknown; rpcId?: unknown; result?: { ok?: unknown }
+        }
+        check('foregrounded native DSH tab still completes a real Host RPC',
+          resumedNativeRpc.status === 200 && nativeHost.type === 'server-response'
+          && nativeHost.rpcId === 'e2e' && nativeHost.result?.ok === true, true)
+        const nativeCookieAfter = (await nativeContext.cookies(origin)).find(
+          cookie => cookie.name.startsWith('dsh-auth-'))
+        check('native DSH backgrounding retains exactly its Secure HttpOnly session',
+          nativeCookieAfter !== undefined && nativeCookieBefore !== undefined
+          && nativeCookieAfter.secure && nativeCookieAfter.httpOnly
+          && nativeCookieAfter.value === nativeCookieBefore.value, true)
+        check('native tab still refuses the paired phone configuration API',
+          pageRefused(await apiAnswer(nativePage, '/api/settings/describe')), true)
+        check('native DSH tab returns at the token-free saved TLS origin',
+          nativePage.url(), `${origin}/`)
+        check('native DSH tab never navigates to a new launch-token URL',
+          tokenNavigationOnReturn, false)
+        check('native tab backgrounding never submits its unsent task',
+          nativePromptSubmissions, 0)
+      })
+      check('original recovered phone keeps its separate unsent task draft',
         await recoveredComposer.textContent(), recoveredDraft)
       const backgroundSession = await apiAnswer(resumedPhone, '/api/session/list')
       const backgroundRpc = JSON.parse(backgroundSession.body) as {
@@ -622,7 +771,7 @@ try {
       check('mobile recovery ends at the saved bare TLS address', resumedPhone.url(), `${origin}/`)
       // Observe through the asynchronous stream and API work above. An automatic
       // delayed submission is still a regression even if the draft looks intact.
-      check('backgrounding never submits the unsent phone draft to the Host',
+      check('recovered Playwright phone never submits its separate unsent draft',
         backgroundPromptSubmissions, 0)
       await resumedPhone.close()
     }
