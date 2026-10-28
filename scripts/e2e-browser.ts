@@ -81,8 +81,8 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
       if (owned.exitCode !== null || owned.signalCode !== null)
         throw new Error('native DSH browser exited before CDP became ready')
       try {
-        const first = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\\n')[0]
-        if (/^\\d+$/.test(first) && Number(first) > 0 && Number(first) <= 65535) {
+        const first = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]
+        if (/^\d+$/.test(first) && Number(first) > 0 && Number(first) <= 65535) {
           port = Number(first)
           break
         }
