@@ -558,7 +558,13 @@ try {
           backgroundPromptSubmissions += 1
         }
       })
-      const otherTab = await phone.newPage()
+      // Establish a real opener relationship rather than an independent target.
+      // The hidden assertion below still proves whether this browser backgrounds
+      // the original document; opening another page alone is not evidence.
+      const [otherTab] = await Promise.all([
+        resumedPhone.waitForEvent('popup', { timeout: 10_000 }),
+        resumedPhone.evaluate(() => { window.open('about:blank', '_blank') }),
+      ])
       try {
         await otherTab.bringToFront()
         // Background tabs throttle requestAnimationFrame. Poll on a timer so
