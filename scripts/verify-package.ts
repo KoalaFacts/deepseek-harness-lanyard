@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { permittedPayloadPaths } from './payload-allowlist.ts'
+import { missingPermittedPayloadPaths, permittedPayloadPaths } from './payload-allowlist.ts'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
@@ -56,6 +56,8 @@ for (const path of required) assert.ok(paths.has(path), 'npm would omit required
 // A separately enumerated inventory makes a new pack member an explicit review.
 const unexpected = [...paths].filter(path => !permittedPayloadPaths.has(path))
 assert.deepEqual(unexpected, [], 'unexpected packed files: ' + unexpected.join(', '))
+const missing = missingPermittedPayloadPaths(paths)
+assert.deepEqual(missing, [], 'missing reviewed packed files: ' + missing.join(', '))
 let modules = 0
 for (const path of paths) {
   if (path.startsWith('lib/') && path.endsWith('.js')) {

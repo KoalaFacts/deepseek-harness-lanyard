@@ -12,3 +12,7 @@ export const permittedPayloadPaths: ReadonlySet<string> = new Set([
   ...modules.flatMap(name => [`lib/${name}.js`, `lib/types/${name}.d.ts`]),
   ...localeDirectories.flatMap(dir => ['en', 'zh'].map(lang => `locale/${dir}${lang}.json`)),
 ])
+
+/** Fail closed if a reviewed file disappears, even if its manifest export is removed. */
+export const missingPermittedPayloadPaths = (packedPaths: ReadonlySet<string>): string[] =>
+  [...permittedPayloadPaths].filter(path => !packedPaths.has(path))
