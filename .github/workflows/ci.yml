@@ -9,11 +9,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Every job here only reads the tree and runs the suites — nothing pushes,
-# comments, or uploads. Without this block the jobs inherit the repository
-# default, which on an older repository is write-all, and this is the workflow
-# that runs on `pull_request` for every branch including automated dependency
-# bumps. Narrow it to what the jobs actually use.
+# Jobs never push, comment, or publish. The check job uploads only an
+# ephemeral, unpublished install candidate from main after its local gates.
+# Without this block jobs could inherit the repository's default write scopes,
+# including on pull requests from automated dependency bumps. Artifact upload
+# uses the Actions runtime and does not require repository write permission.
 permissions:
   contents: read
 
