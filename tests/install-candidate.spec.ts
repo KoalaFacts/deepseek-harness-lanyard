@@ -55,8 +55,15 @@ describe('downloaded main install candidate identity', () => {
   it('rejects a symlink in place of the source identity file', () => {
     withFixture(directory => {
       unlinkSync(join(directory, 'SOURCE_SHA'))
-      symlinkSync(join(root, 'package.json'), join(directory, 'SOURCE_SHA'))
-      expect(() => verifyInstallCandidate(directory, sha)).toThrow(/non-file/)
+      const outside = mkdtempSync(join(tmpdir(), 'lanyard-candidate-link-'))
+      try {
+        const identity = join(outside, 'SOURCE_SHA')
+        writeFileSync(identity, sha + '\n')
+        symlinkSync(identity, join(directory, 'SOURCE_SHA'))
+        expect(() => verifyInstallCandidate(directory, sha)).toThrow(/non-file/)
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
     })
   })
 })
