@@ -49,6 +49,25 @@ try {
   process.exit(2)
 }
 
+/** All upstream auth cookies in a profile, including path-scoped variants. */
+async function upstreamAuthCookies(context: BrowserContext) {
+  return (await context.cookies()).filter(cookie => cookie.name.startsWith('dsh-auth-'))
+}
+
+/**
+ * Keep the phone's one upstream Secure/HttpOnly session through recovery.
+ * A first-match/root-only check would silently accept an insecure duplicate
+ * scoped to /api, or a substituted cookie in a profile that still works.
+ */
+async function oneUpstreamAuthCookie(context: BrowserContext) {
+  const cookies = await upstreamAuthCookies(context)
+  if (cookies.length !== 1 || !cookies[0]?.secure || !cookies[0].httpOnly) {
+    throw new Error('expected exactly one upstream Secure HttpOnly session cookie; found '
+      + String(cookies.length) + ' candidate(s)')
+  }
+  return cookies[0]
+}
+
 /**
  * Wait for a subprocess/transport result or a bounded timeout. Cancel the
  * losing timer on success, otherwise each completed race keeps Node alive for
@@ -494,7 +513,7 @@ try {
     await Promise.all(checks)
 
     check('the link lands on the bare origin, the token gone from the address bar', page.url(), `${origin}/`)
-    const session = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const session = await oneUpstreamAuthCookie(paired)
     check('upstream set its session cookie, out of reach of the page\'s scripts', session?.httpOnly, true)
     // What the browser stored, not what the header said: Secure is what keeps
     // it off any later plain-http request to this machine's address.
@@ -540,7 +559,7 @@ try {
       }))
       check('the task draft runs in an actual narrow touch-emulated viewport',
         phoneSize.width <= 390 && phoneSize.touchPoints > 0, true)
-      const phoneCookie = (await phone.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+      const phoneCookie = await oneUpstreamAuthCookie(phone)
       check('the phone stores the upstream session as an HttpOnly Secure cookie',
         phoneCookie?.httpOnly === true && phoneCookie.secure === true, true)
 
@@ -673,12 +692,11 @@ try {
       check('the phone reopens its saved TLS origin after network loss', resumedPhoneLanding?.status(), 200)
       check('the reopened phone authenticates a real session/list RPC',
         resumedPhoneReply.status() === 200 && resumedPhoneRpc.result?.ok === true, true)
-      const phoneCookieAfterRecovery = (await phone.cookies(origin)).find(
-        cookie => cookie.name.startsWith('dsh-auth-'))
+      const phoneCookieAfterRecovery = await oneUpstreamAuthCookie(phone)
       check('the reopened phone retains its existing secure HttpOnly session',
         phoneCookie !== undefined && phoneCookieAfterRecovery !== undefined
         && phoneCookieAfterRecovery.httpOnly && phoneCookieAfterRecovery.secure
-        && phoneCookieAfterRecovery.value === phoneCookie.value, true)
+        && phoneCookieAfterRecovery.name === phoneCookie.name && phoneCookieAfterRecovery.value === phoneCookie.value, true)
       const recoveredComposer = resumedPhone.locator('[data-composer-input][contenteditable="true"]').first()
       await recoveredComposer.waitFor({ state: 'visible', timeout: 20_000 })
       // An editor and an authenticated socket alone do not show that the
@@ -784,8 +802,7 @@ try {
         // An insecure duplicate scoped to /api can still reach task endpoints
         // while escaping that query. This native profile is disposable and only
         // visits the real DSH origin, so inspect its entire cookie jar.
-        const nativeAuthCookies = async () => (await nativeContext.cookies()).filter(
-          cookie => cookie.name.startsWith('dsh-auth-'))
+        const nativeAuthCookies = () => upstreamAuthCookies(nativeContext)
         // Mutation control: add a deliberately insecure, API-scoped cookie
         // WITHOUT sending any request, prove the old root-URL query misses it
         // but the current whole-profile guard finds both, then remove it.
@@ -804,6 +821,12 @@ try {
             (await nativeContext.cookies(origin)).some(cookie => cookie.name === scopeProbe), false)
           check('native cookie guard detects the API-scoped duplicate',
             (await nativeAuthCookies()).length, 2)
+          // The exact helper protecting every phone recovery must fail when
+          // the test injects a second insecure API-scoped auth cookie.
+          const rejectedDuplicate = await oneUpstreamAuthCookie(nativeContext)
+            .then(() => false, () => true)
+          check('phone recovery refuses a second API-scoped session cookie',
+            rejectedDuplicate, true)
         } finally {
           await nativeContext.clearCookies({ name: scopeProbe })
         }
@@ -862,12 +885,11 @@ try {
         await recoveredComposer.textContent(), recoveredDraft)
       check('the recovered Playwright tab still completes a real Host RPC',
         await recheckRealSessionList(resumedPhone, resumedPhoneReply, 'lanyard-recovered-tab'), true)
-      const backgroundCookie = (await phone.cookies(origin)).find(
-        cookie => cookie.name.startsWith('dsh-auth-'))
+      const backgroundCookie = await oneUpstreamAuthCookie(phone)
       check('backgrounding preserves the same secure HttpOnly phone session',
         backgroundCookie !== undefined && phoneCookieAfterRecovery !== undefined
         && backgroundCookie.secure && backgroundCookie.httpOnly
-        && backgroundCookie.value === phoneCookieAfterRecovery.value, true)
+        && backgroundCookie.name === phoneCookieAfterRecovery.name && backgroundCookie.value === phoneCookieAfterRecovery.value, true)
       check('the returned tab remains at the token-free bookmarked address',
         resumedPhone.url(), `${origin}/`)
 
@@ -938,15 +960,14 @@ try {
     }
     check('a new WebSocket receives a frame after network recovery', offlineRecoveryFrames > 0, true)
     expectingOfflineRecovery = false
-    const onlineCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const onlineCookie = await oneUpstreamAuthCookie(paired)
     check('network recovery keeps the same HttpOnly session cookie',
-      session !== undefined && onlineCookie !== undefined && onlineCookie.value === session.value, true)
+      session !== undefined && onlineCookie !== undefined && onlineCookie.name === session.name && onlineCookie.value === session.value, true)
     check('the configuration plane stays refused after network recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
 
     // Save the mobile profile's existing cookie before the actual host reboot.
-    const mobileCookieBeforeRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const mobileCookieBeforeRestart = await oneUpstreamAuthCookie(phone)
 
     // ---- restart dsh: the same phone should resume without scanning again ----
     const restarted = await restart()
@@ -975,9 +996,9 @@ try {
     }
     check('the recovered stream delivers a frame on a new WebSocket', recoveredMuxFrames > 0, true)
     // Never log the cookie value in CI: it is a bearer credential.
-    const resumedCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const resumedCookie = await oneUpstreamAuthCookie(paired)
     check('the browser retained its existing HttpOnly session rather than getting a new one',
-      session !== undefined && resumedCookie !== undefined && resumedCookie.value === session.value, true)
+      session !== undefined && resumedCookie !== undefined && resumedCookie.name === session.name && resumedCookie.value === session.value, true)
     check('the configuration plane is still refused after recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
 
@@ -1012,10 +1033,10 @@ try {
       await new Promise<void>(resolve => { setTimeout(resolve, 50) })
     }
     check('the new tab receives a frame on its own stream WebSocket', reopenedMuxFrames > 0, true)
-    const reopenedCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const reopenedCookie = await oneUpstreamAuthCookie(paired)
     check('reopening the tab retains the original HttpOnly session cookie',
       session !== undefined && reopenedCookie !== undefined
-      && reopenedCookie.httpOnly && reopenedCookie.value === session.value, true)
+      && reopenedCookie.httpOnly && reopenedCookie.name === session.name && reopenedCookie.value === session.value, true)
     check('the new tab still cannot reach the configuration plane',
       pageRefused(await apiAnswer(reopened, '/api/settings/describe')), true)
     // Evaluate navigation history and final URL *after* asynchronous RPC,
@@ -1050,12 +1071,11 @@ try {
       mobileRestartLanding?.status(), 200)
     check('the reopened phone makes a successful Host session/list RPC after restart',
       mobileRestartReply.status() === 200 && mobileRestartRpc.result?.ok === true, true)
-    const mobileCookieAfterRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const mobileCookieAfterRestart = await oneUpstreamAuthCookie(phone)
     check('DSH restart preserves the phone original secure HttpOnly session cookie',
       mobileCookieBeforeRestart !== undefined && mobileCookieAfterRestart !== undefined
       && mobileCookieAfterRestart.httpOnly && mobileCookieAfterRestart.secure
-      && mobileCookieAfterRestart.value === mobileCookieBeforeRestart.value, true)
+      && mobileCookieAfterRestart.name === mobileCookieBeforeRestart.name && mobileCookieAfterRestart.value === mobileCookieBeforeRestart.value, true)
     const restartMobileComposer = mobileAfterRestart.locator('[data-composer-input][contenteditable="true"]').first()
     await restartMobileComposer.waitFor({ state: 'visible', timeout: 20_000 })
     const mobileRestartReceipt = mobileAfterRestart.getByText(/Feedback recorded for session/)
@@ -1590,8 +1610,7 @@ try {
     // reloaded its persisted session. Keep the original paired phone profile;
     // neither a new browser context nor the old launch-token URL may mask
     // a lost session. Synthetic inference is still bound only to loopback.
-    const completedCookieBeforeRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const completedCookieBeforeRestart = await oneUpstreamAuthCookie(phone)
     // Preserve the original completed-task baseline across the cookie await;
     // a replay during that read must not become part of a new baseline.
     const completedCallsBeforeRestart = completedToolRequests
@@ -1700,12 +1719,11 @@ try {
     }
     check('the reopened phone receives a new Remote-mux frame after Host reboot',
       postRestartFrames > 0, true)
-    const completedCookieAfterRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const completedCookieAfterRestart = await oneUpstreamAuthCookie(phone)
     check('the completed-task reboot retains the original secure HttpOnly phone cookie',
       completedCookieBeforeRestart !== undefined && completedCookieAfterRestart !== undefined
       && completedCookieAfterRestart.httpOnly && completedCookieAfterRestart.secure
-      && completedCookieAfterRestart.value === completedCookieBeforeRestart.value, true)
+      && completedCookieAfterRestart.name === completedCookieBeforeRestart.name && completedCookieAfterRestart.value === completedCookieBeforeRestart.value, true)
     check('completed-task reboot leaves the phone configuration plane pinned',
       pageRefused(await apiAnswer(afterHostRestart, '/api/settings/describe')), true)
     check('completed-task reboot does not reuse any launch-token navigation',
@@ -1728,7 +1746,7 @@ try {
     check('the previous process\'s pairing link is invalid after restart', expired?.status(), 401)
     const forged = await hostilePage.goto(`${origin}/?token=${'A'.repeat(43)}`, { waitUntil: 'domcontentloaded' })
     check('a link carrying the wrong token is refused', forged?.status(), 401)
-    check('and leaves no session behind', (await hostile.cookies(origin)).some(cookie => cookie.name.startsWith('dsh-auth-')), false)
+    check('and leaves no session behind', (await upstreamAuthCookies(hostile)).length, 0)
 
     // Even if an unpaired device learns a real Session ID, it must neither
     // execute a task nor read that Session's history. Use fully shaped RPCs:
