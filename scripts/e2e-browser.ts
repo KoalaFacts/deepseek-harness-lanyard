@@ -767,10 +767,34 @@ try {
             observed.__lanyardVisibilityEvents?.push(document.visibilityState)
           })
         })
-        // A matching secure cookie is not sufficient if a second session
-        // cookie at the same origin could still travel over plain HTTP.
-        const nativeCookiesBefore = (await nativeContext.cookies(origin)).filter(
+        // URL-filtered cookies(origin) only includes cookies sent to '/'.
+        // An insecure duplicate scoped to /api can still reach task endpoints
+        // while escaping that query. This native profile is disposable and only
+        // visits the real DSH origin, so inspect its entire cookie jar.
+        const nativeAuthCookies = async () => (await nativeContext.cookies()).filter(
           cookie => cookie.name.startsWith('dsh-auth-'))
+        // Mutation control: add a deliberately insecure, API-scoped cookie
+        // WITHOUT sending any request, prove the old root-URL query misses it
+        // but the current whole-profile guard finds both, then remove it.
+        // Replacing nativeAuthCookies() with cookies(origin) must fail here.
+        const scopeProbe = 'dsh-auth-lanyard-path-probe'
+        await nativeContext.addCookies([{
+          name: scopeProbe,
+          value: 'test-only-no-session',
+          domain: new URL(origin).hostname,
+          path: '/api',
+          secure: false,
+          httpOnly: false,
+        }])
+        try {
+          check('root URL cookie query misses an insecure API-scoped duplicate',
+            (await nativeContext.cookies(origin)).some(cookie => cookie.name === scopeProbe), false)
+          check('native cookie guard detects the API-scoped duplicate',
+            (await nativeAuthCookies()).length, 2)
+        } finally {
+          await nativeContext.clearCookies({ name: scopeProbe })
+        }
+        const nativeCookiesBefore = await nativeAuthCookies()
         const nativeCookieBefore = nativeCookiesBefore[0]
         check('native phone has exactly one upstream Secure HttpOnly session',
           nativeCookiesBefore.length === 1 && nativeCookieBefore !== undefined
@@ -804,8 +828,7 @@ try {
           hiddenEvent >= 0 && observedVisibility.slice(hiddenEvent + 1).includes('visible'), true)
         check('foregrounded native DSH tab still completes a real Host RPC',
           await recheckRealSessionList(nativePage, nativeListed, 'lanyard-native-foreground'), true)
-        const nativeCookiesAfter = (await nativeContext.cookies(origin)).filter(
-          cookie => cookie.name.startsWith('dsh-auth-'))
+        const nativeCookiesAfter = await nativeAuthCookies()
         const nativeCookieAfter = nativeCookiesAfter[0]
         check('native DSH backgrounding retains exactly its Secure HttpOnly session',
           nativeCookiesBefore.length === 1 && nativeCookiesAfter.length === 1
