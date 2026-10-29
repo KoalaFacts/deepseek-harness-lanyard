@@ -767,11 +767,14 @@ try {
             observed.__lanyardVisibilityEvents?.push(document.visibilityState)
           })
         })
-        const nativeCookieBefore = (await nativeContext.cookies(origin)).find(
+        // A matching secure cookie is not sufficient if a second session
+        // cookie at the same origin could still travel over plain HTTP.
+        const nativeCookiesBefore = (await nativeContext.cookies(origin)).filter(
           cookie => cookie.name.startsWith('dsh-auth-'))
-        check('native phone has its own upstream Secure HttpOnly session',
-          nativeCookieBefore !== undefined && nativeCookieBefore.secure
-          && nativeCookieBefore.httpOnly, true)
+        const nativeCookieBefore = nativeCookiesBefore[0]
+        check('native phone has exactly one upstream Secure HttpOnly session',
+          nativeCookiesBefore.length === 1 && nativeCookieBefore !== undefined
+          && nativeCookieBefore.secure && nativeCookieBefore.httpOnly, true)
 
         // This default-context browser is attached with noDefaults:true; the
         // blank-page control proved that a real tab switch triggers visibility.
@@ -801,10 +804,13 @@ try {
           hiddenEvent >= 0 && observedVisibility.slice(hiddenEvent + 1).includes('visible'), true)
         check('foregrounded native DSH tab still completes a real Host RPC',
           await recheckRealSessionList(nativePage, nativeListed, 'lanyard-native-foreground'), true)
-        const nativeCookieAfter = (await nativeContext.cookies(origin)).find(
+        const nativeCookiesAfter = (await nativeContext.cookies(origin)).filter(
           cookie => cookie.name.startsWith('dsh-auth-'))
+        const nativeCookieAfter = nativeCookiesAfter[0]
         check('native DSH backgrounding retains exactly its Secure HttpOnly session',
-          nativeCookieAfter !== undefined && nativeCookieBefore !== undefined
+          nativeCookiesBefore.length === 1 && nativeCookiesAfter.length === 1
+          && nativeCookieAfter !== undefined && nativeCookieBefore !== undefined
+          && nativeCookieAfter.name === nativeCookieBefore.name
           && nativeCookieAfter.secure && nativeCookieAfter.httpOnly
           && nativeCookieAfter.value === nativeCookieBefore.value, true)
         check('native tab still refuses the paired phone configuration API',
