@@ -36,8 +36,13 @@ const lan = requireLan()
 const { check, report } = recorder()
 
 let chromium: BrowserType
+let nativePhoneUserAgent: string
 try {
-  ({ chromium } = await import('playwright'))
+  const playwright = await import('playwright')
+  chromium = playwright.chromium
+  // Match a real mobile browser's user agent as well as its touch/viewport:
+  // CDP device metrics alone leave navigator.userAgent identifying desktop Linux.
+  nativePhoneUserAgent = playwright.devices['Pixel 7'].userAgent
 } catch {
   console.error('lanyard e2e: playwright is not installed, so the browser half cannot be exercised.')
   console.error('lanyard e2e: SKIPPED (not passed) — run `pnpm install` then `npx playwright install chromium`.')
@@ -130,6 +135,9 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
       width: 390, height: 844, deviceScaleFactor: 3, mobile: true,
     })
     await emulation.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+    await emulation.send('Emulation.setUserAgentOverride', {
+      userAgent: nativePhoneUserAgent, platform: 'Android',
+    })
     await run(page, context)
   } finally {
     if (nativeBrowser) {
@@ -718,9 +726,14 @@ try {
           nativePage.url(), `${origin}/`)
         const nativeViewport = await nativePage.evaluate(() => ({
           width: window.innerWidth, touchPoints: navigator.maxTouchPoints,
+          userAgent: navigator.userAgent, platform: navigator.platform,
         }))
         check('native DSH tab is phone-width with browser touch emulation',
           nativeViewport.width <= 390 && nativeViewport.touchPoints > 0, true)
+        check('native DSH tab has an Android mobile user agent, not desktop Linux',
+          nativeViewport.userAgent.includes('Android')
+          && nativeViewport.userAgent.includes('Mobile')
+          && nativeViewport.platform === 'Android', true)
 
         // A new browser profile has no client-side workspace selection, even
         // though the actual workspace already exists in the running DSH Host.
