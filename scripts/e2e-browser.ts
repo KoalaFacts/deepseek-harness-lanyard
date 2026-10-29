@@ -534,6 +534,9 @@ try {
       deviceScaleFactor: 3,
       isMobile: true,
       hasTouch: true,
+      // Exercise the same Android UA as the native background/foreground tab.
+      // Viewport/isMobile/hasTouch alone still advertise desktop Linux.
+      userAgent: nativePhoneUserAgent,
       locale: 'en-US',
     })
     // Preserve the same mobile browser profile and its cookie through the
@@ -556,9 +559,12 @@ try {
       const phoneSize = await phonePage.evaluate(() => ({
         width: window.innerWidth,
         touchPoints: navigator.maxTouchPoints,
+        userAgent: navigator.userAgent,
       }))
       check('the task draft runs in an actual narrow touch-emulated viewport',
         phoneSize.width <= 390 && phoneSize.touchPoints > 0, true)
+      check('the real task and approval flow uses an Android mobile user agent',
+        phoneSize.userAgent.includes('Android') && phoneSize.userAgent.includes('Mobile'), true)
       const phoneCookie = await oneUpstreamAuthCookie(phone)
       check('the phone stores the upstream session as an HttpOnly Secure cookie',
         phoneCookie?.httpOnly === true && phoneCookie.secure === true, true)
