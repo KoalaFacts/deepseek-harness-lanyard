@@ -950,10 +950,15 @@ try {
     const onlineSession = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
     const onlinePage = await page.goto(origin, { waitUntil: 'domcontentloaded' })
     const onlineReply = await onlineSession
-    const onlineRpc = await onlineReply.json() as { result?: { ok?: unknown } }
     check('the bookmarked TLS address loads again without a new pairing link', onlinePage?.status(), 200)
+    // A navigation can supersede the shell's response before Playwright reads
+    // its body (Network.getResponseBody: no resource with given identifier).
+    // Still require the shell's own successful load RPC, then verify a fresh
+    // fully shaped Host RPC from the recovered document; do not weaken this to
+    // status-only admission or replay the obsolete response body.
     check('the prior session authenticates real RPC after connectivity returns',
-      onlineReply.status() === 200 && onlineRpc.result?.ok === true, true)
+      onlineReply.status() === 200
+      && await recheckRealSessionList(page, listed, 'lanyard-after-offline'), true)
     const onlineFrameDeadline = Date.now() + 10_000
     while (offlineRecoveryFrames === 0 && Date.now() < onlineFrameDeadline) {
       await new Promise<void>(resolve => { setTimeout(resolve, 50) })
