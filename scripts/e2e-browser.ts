@@ -755,6 +755,18 @@ try {
         await nativeComposer.fill(nativeDraft)
         check('native DSH mobile task is still an unsent editor draft',
           await nativeComposer.textContent(), nativeDraft)
+        // The UI may respond to visibilitychange, not merely read the current
+        // visibilityState. Observe the real document events before switching;
+        // no synthetic events or CDP visibility overrides are permitted.
+        check('native DSH task tab starts visible before backgrounding',
+          await nativePage.evaluate(() => document.visibilityState), 'visible')
+        await nativePage.evaluate(() => {
+          const observed = window as Window & { __lanyardVisibilityEvents?: string[] }
+          observed.__lanyardVisibilityEvents = []
+          document.addEventListener('visibilitychange', () => {
+            observed.__lanyardVisibilityEvents?.push(document.visibilityState)
+          })
+        })
         const nativeCookieBefore = (await nativeContext.cookies(origin)).find(
           cookie => cookie.name.startsWith('dsh-auth-'))
         check('native phone has its own upstream Secure HttpOnly session',
@@ -782,6 +794,11 @@ try {
         )
         check('returning to the same native DSH tab retains its exact unsent draft',
           await nativeComposer.textContent(), nativeDraft)
+        const observedVisibility = await nativePage.evaluate(() =>
+          (window as Window & { __lanyardVisibilityEvents?: string[] }).__lanyardVisibilityEvents ?? [])
+        const hiddenEvent = observedVisibility.indexOf('hidden')
+        check('real DSH tab dispatches hidden then visible visibilitychange events',
+          hiddenEvent >= 0 && observedVisibility.slice(hiddenEvent + 1).includes('visible'), true)
         check('foregrounded native DSH tab still completes a real Host RPC',
           await recheckRealSessionList(nativePage, nativeListed, 'lanyard-native-foreground'), true)
         const nativeCookieAfter = (await nativeContext.cookies(origin)).find(
