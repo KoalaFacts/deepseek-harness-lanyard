@@ -40,4 +40,11 @@ describe('isUpstreamGraphIncomplete', () => {
   it('does not excuse an unrelated failure', () => {
     expect(isUpstreamGraphIncomplete('Error: network unreachable', CLI_PACKAGE)).toBe(false)
   })
+
+  it('does not mistake an unrelated missing dependency for a partial DSH release', () => {
+    const thirdParty = 'ERR_PNPM_NO_MATCHING_VERSION No matching version found for other-package@99.0.0 while installing @deepseek-ai/dsh'
+    const otherDeepseek = 'ERR_PNPM_NO_MATCHING_VERSION No matching version found for @deepseek-ai/schemastery@99.0.0 while installing @deepseek-ai/dsh'
+    expect(isUpstreamGraphIncomplete(thirdParty, CLI_PACKAGE)).toBe(false)
+    expect(isUpstreamGraphIncomplete(otherDeepseek, CLI_PACKAGE)).toBe(false)
+  })
 })

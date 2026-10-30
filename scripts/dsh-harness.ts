@@ -114,9 +114,21 @@ export function unresolvedDependency(reported: string): string | undefined {
  * @param reported - the failing command's combined output.
  * @param requested - the package this suite asked to install.
  */
-export function isUpstreamGraphIncomplete(reported: string, requested: string): boolean {
+/**
+ * A missing DSH release-wave member can mean that upstream is mid-publish.
+ * Missing third-party packages (or unrelated @deepseek-ai packages) are real
+ * install failures, even when they occur under the DSH dependency graph.
+ * Do not misclassify those failures as an incomplete DSH publish.
+ */
+export function isMissingDshWaveDependency(reported: string, requested: readonly string[]): boolean {
   const unresolved = unresolvedDependency(reported)
-  return unresolved !== undefined && unresolved !== requested
+  return unresolved !== undefined
+    && unresolved.startsWith('@deepseek-ai/dsh-')
+    && !requested.includes(unresolved)
+}
+
+export function isUpstreamGraphIncomplete(reported: string, requested: string): boolean {
+  return isMissingDshWaveDependency(reported, [requested])
 }
 
 /**

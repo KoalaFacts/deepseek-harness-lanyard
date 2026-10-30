@@ -16,4 +16,11 @@ describe('installing next for the contract job', () => {
   it('keeps any other failure a real failure', () => {
     expect(isWaveIncomplete('ERR_PNPM_FETCH_500 Internal Server Error', NEXT_PACKAGES)).toBe(false)
   })
+
+  it('does not skip a real missing third-party or unrelated DeepSeek dependency', () => {
+    for (const dependency of ['other-package@99.0.0', '@deepseek-ai/schemastery@99.0.0']) {
+      const failure = `ERR_PNPM_NO_MATCHING_VERSION No matching version found for ${dependency} while installing @deepseek-ai/dsh`
+      expect(isWaveIncomplete(failure, NEXT_PACKAGES)).toBe(false)
+    }
+  })
 })
