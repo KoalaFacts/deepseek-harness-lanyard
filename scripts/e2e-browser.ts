@@ -59,13 +59,22 @@ async function upstreamAuthCookies(context: BrowserContext) {
  * A first-match/root-only check would silently accept an insecure duplicate
  * scoped to /api, or a substituted cookie in a profile that still works.
  */
-async function oneUpstreamAuthCookie(context: BrowserContext) {
-  const cookies = await upstreamAuthCookies(context)
-  if (cookies.length !== 1 || !cookies[0]?.secure || !cookies[0].httpOnly) {
-    throw new Error('expected exactly one upstream Secure HttpOnly session cookie; found '
-      + String(cookies.length) + ' candidate(s)')
+type BrowserCookie = Awaited<ReturnType<BrowserContext['cookies']>>[number]
+
+/** Require the full upstream browser-session policy, not merely a valid bearer. */
+function requireUpstreamAuthCookie(cookies: BrowserCookie[]): BrowserCookie {
+  const auth = cookies.filter(cookie => cookie.name.startsWith('dsh-auth-'))
+  const session = auth[0]
+  if (auth.length !== 1 || !session || !session.secure || !session.httpOnly
+    || session.sameSite !== 'Strict') {
+    throw new Error('expected exactly one upstream Secure HttpOnly SameSite=Strict cookie; found '
+      + String(auth.length) + ' candidate(s)')
   }
-  return cookies[0]
+  return session
+}
+
+async function oneUpstreamAuthCookie(context: BrowserContext) {
+  return requireUpstreamAuthCookie(await context.cookies())
 }
 
 /**
@@ -838,9 +847,23 @@ try {
         }
         const nativeCookiesBefore = await nativeAuthCookies()
         const nativeCookieBefore = nativeCookiesBefore[0]
-        check('native phone has exactly one upstream Secure HttpOnly session',
+        check('native phone has exactly one upstream Secure HttpOnly SameSite=Strict session',
           nativeCookiesBefore.length === 1 && nativeCookieBefore !== undefined
-          && nativeCookieBefore.secure && nativeCookieBefore.httpOnly, true)
+          && nativeCookieBefore.secure && nativeCookieBefore.httpOnly
+          && nativeCookieBefore.sameSite === 'Strict', true)
+        // Negative control: a session downgraded to SameSite=Lax must fail the
+        // SAME guard used in the recovery flow, even with a correct bearer.
+        // Change a copy, never the real HttpOnly cookie in this paired profile.
+        let laxCookieRejected = false
+        try {
+          requireUpstreamAuthCookie(nativeCookiesBefore.map(cookie => ({
+            ...cookie, sameSite: 'Lax' as const,
+          })))
+        } catch (error) {
+          laxCookieRejected = error instanceof Error && error.message.includes('SameSite=Strict')
+        }
+        check('phone recovery rejects a downgraded SameSite=Lax session',
+          laxCookieRejected, true)
 
         // This default-context browser is attached with noDefaults:true; the
         // blank-page control proved that a real tab switch triggers visibility.
