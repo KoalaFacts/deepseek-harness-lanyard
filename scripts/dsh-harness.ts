@@ -421,7 +421,7 @@ export interface ReadinessLines {
 }
 
 /** Parse each readiness signal separately, since startup can interleave noisy logs. */
-function readinessParts(output: string): Partial<ReadinessLines> {
+function readinessParts(output: string): Record<keyof ReadinessLines, string | undefined> {
   return {
     pairingLink: /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1],
     fingerprint: /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1],
