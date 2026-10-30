@@ -420,11 +420,18 @@ export interface ReadinessLines {
   localUrl: string
 }
 
+/** Parse each readiness signal separately, since startup can interleave noisy logs. */
+function readinessParts(output: string): Partial<ReadinessLines> {
+  return {
+    pairingLink: /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1],
+    fingerprint: /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1],
+    localUrl: /^dsh web: (https?:\/\/\S+)(?:[ \t]+[^\r\n]*)?\r?\n/m.exec(output)?.[1],
+  }
+}
+
 /** Ignore diagnostic lines sharing the runtime prefix; only an actual URL signals readiness. */
 export function readinessLines(output: string): ReadinessLines | undefined {
-  const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
-  const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
-  const localUrl = /^dsh web: (https?:\/\/\S+)(?:[ \t]+[^\r\n]*)?\r?\n/m.exec(output)?.[1]
+  const { pairingLink, fingerprint, localUrl } = readinessParts(output)
   if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return undefined
   return { pairingLink, fingerprint, localUrl }
 }
@@ -443,9 +450,16 @@ export function redactReadinessOutput(output: string): string {
  * Loader settles, in either order. The fingerprint line is lanyard's last on a
  * pipe, where no QR code is drawn, so waiting for it waits for the whole block.
  */
+const MAX_STARTUP_LOG_CHARS = 64 * 1024
+
 export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
   return new Promise((resolve, reject) => {
     let output = ''
+    let omitted = 0
+    const observed: Partial<ReadinessLines> = {}
+    const diagnostic = (): string =>
+      (omitted === 0 ? '' : '[omitted ' + String(omitted) + ' earlier startup log characters]\n')
+      + redactReadinessOutput(output)
     let settled = false
     const cleanup = (): void => {
       clearTimeout(timer)
@@ -471,18 +485,36 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
       reject(error)
     }
     const timer = setTimeout(() => {
-      fail(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${redactReadinessOutput(output)}`))
+      fail(new Error('no readiness lines within ' + String(BOOT_TIMEOUT_MS) + 'ms:\n' + diagnostic()))
     }, BOOT_TIMEOUT_MS)
     const read = (chunk: Buffer | string): void => {
       output += String(chunk)
-      const lines = readinessLines(output)
-      if (lines !== undefined) succeed(lines)
+      // Retain complete signals even when many later log lines push them out
+      // of the bounded failure-diagnostics buffer.
+      const parts = readinessParts(output)
+      if (parts.localUrl !== undefined) observed.localUrl = parts.localUrl
+      if (parts.pairingLink !== undefined) observed.pairingLink = parts.pairingLink
+      if (parts.fingerprint !== undefined) observed.fingerprint = parts.fingerprint
+      const { localUrl, pairingLink, fingerprint } = observed
+      if (localUrl !== undefined && pairingLink !== undefined && fingerprint !== undefined) {
+        succeed({ localUrl, pairingLink, fingerprint })
+        return
+      }
+      // Discard a truncated partial line too: cutting a ?token= URL at an
+      // arbitrary offset could leave a bare credential fragment in diagnostics.
+      if (output.length > MAX_STARTUP_LOG_CHARS) {
+        const tail = output.slice(-MAX_STARTUP_LOG_CHARS)
+        const newline = tail.indexOf('\n')
+        const kept = newline === -1 ? '' : tail.slice(newline + 1)
+        omitted += output.length - kept.length
+        output = kept
+      }
     }
     const exited = (code: number | null): void => {
-      fail(new Error(`dsh exited (${String(code)}) before serving:\n${redactReadinessOutput(output)}`))
+      fail(new Error('dsh exited (' + String(code) + ') before serving:\n' + diagnostic()))
     }
     const failed = (error: Error): void => {
-      fail(new Error(`dsh could not start: ${error.message}\n${redactReadinessOutput(output)}`, { cause: error }))
+      fail(new Error('dsh could not start: ' + error.message + '\n' + diagnostic(), { cause: error }))
     }
     server.stdout.on('data', read)
     server.stderr.on('data', read)

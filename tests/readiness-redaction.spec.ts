@@ -39,6 +39,44 @@ describe('DSH readiness failure diagnostics', () => {
     expect(child.stderr.listenerCount('data')).toBe(0)
   })
 
+  it('retains early readiness across noisy startup and bounds redacted failure logs', async () => {
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = Object.assign(new EventEmitter(), { stdout, stderr }) as unknown as Parameters<typeof awaitReadiness>[0]
+    const ready = awaitReadiness(child)
+    stdout.write('dsh web: http://127.0.0.1:3080/?token=early-secret\n')
+    stderr.write('noisy upstream startup\n' + 'x'.repeat(180_000) + '\n')
+    stderr.write('lanyard: pair a device by opening https://192.168.1.5:3443/?token=late-secret once\n')
+    stderr.write('lanyard: the phone should show certificate SHA-256 AB:CD — verify before trusting\n')
+    // A lost early signal must reject now rather than wait for the long timeout.
+    child.emit('exit', 1)
+    expect((await ready).localUrl).toContain('early-secret')
+    stdout.end()
+    stderr.end()
+
+    const failedOut = new PassThrough()
+    const failedErr = new PassThrough()
+    const failing = Object.assign(new EventEmitter(), {
+      stdout: failedOut, stderr: failedErr,
+    }) as unknown as Parameters<typeof awaitReadiness>[0]
+    const pending = awaitReadiness(failing)
+    failedOut.write('noise\n' + 'y'.repeat(180_000))
+    failedErr.write('lanyard: pair a device by opening https://192.168.1.5:3443/?token=late-secret once\n')
+    failing.emit('exit', 1)
+    let message = ''
+    try {
+      await pending
+    } catch (error) {
+      message = String(error)
+    }
+    expect(message).toContain('omitted')
+    expect(message.length).toBeLessThan(70_000)
+    expect(message).not.toContain('late-secret')
+    expect(message).toContain('?token=[REDACTED]')
+    failedOut.end()
+    failedErr.end()
+  })
+
   it('detaches readiness listeners after success instead of retaining every later log', async () => {
     const stdout = new PassThrough()
     const stderr = new PassThrough()
