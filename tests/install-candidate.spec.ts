@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { verifyInstallCandidate, verifyInstalledModule } from '../scripts/verify-install-candidate.ts'
+import { verifyInstallCandidate, verifyInstalledExportMap, verifyInstalledModule } from '../scripts/verify-install-candidate.ts'
 
 const sha = 'a'.repeat(40)
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -86,6 +86,27 @@ it('executes the installed ESM exports, rejecting empty and syntactically broken
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+it('rejects swapped-but-loadable module and locale export targets in a clean consumer', () => {
+  const reviewed = {
+    '.': { types: './lib/types/index.d.ts', default: './lib/index.js' },
+    './tls': { types: './lib/types/tls.d.ts', default: './lib/tls.js' },
+    './locale/*.json': './locale/*.json',
+  }
+  expect(() => verifyInstalledExportMap(structuredClone(reviewed), reviewed)).not.toThrow()
+
+  // Both JS files can exist and export values, so loading them alone is not
+  // enough to prove the installed plugin wires the intended TLS service.
+  const swapped = structuredClone(reviewed)
+  swapped['./tls'].default = './lib/index.js'
+  expect(() => verifyInstalledExportMap(swapped, reviewed))
+    .toThrow(/installed export targets differ from reviewed source/)
+
+  const redirectedLocale = structuredClone(reviewed)
+  redirectedLocale['./locale/*.json'] = './locale/webserver/*.json'
+  expect(() => verifyInstalledExportMap(redirectedLocale, reviewed))
+    .toThrow(/installed export targets differ from reviewed source/)
 })
 
 it('the main candidate consumer downloads this run artifact only after all main gates', () => {

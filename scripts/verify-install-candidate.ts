@@ -55,6 +55,15 @@ export async function verifyInstalledModule(resolved: string, specifier: string)
   assert.ok(Object.keys(loaded).length > 0, 'installed module exported nothing: ' + specifier)
 }
 
+/** A loadable export is still wrong when it points to a different module.
+ * Compare the entire installed map, including JS/types targets and wildcards.
+ */
+export function verifyInstalledExportMap(
+  installed: PackageManifest['exports'], reviewed: PackageManifest['exports'],
+): void {
+  assert.deepEqual(installed, reviewed, 'installed export targets differ from reviewed source')
+}
+
 async function installCandidate(tarball: string): Promise<void> {
   const workspace = mkdtempSync(join(tmpdir(), 'lanyard-candidate-consumer-'))
   try {
@@ -78,7 +87,7 @@ async function installCandidate(tarball: string): Promise<void> {
     const installed = JSON.parse(readFileSync(manifestPath, 'utf8')) as PackageManifest
     assert.equal(installed.name, source.name)
     assert.equal(installed.version, source.version)
-    assert.deepEqual(Object.keys(installed.exports).sort(), Object.keys(source.exports).sort(), 'installed exports differ from reviewed source')
+    verifyInstalledExportMap(installed.exports, source.exports)
     let modules = 0
     for (const [subpath, target] of Object.entries(installed.exports)) {
       if (typeof target === 'string') continue
