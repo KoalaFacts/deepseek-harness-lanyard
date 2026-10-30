@@ -185,7 +185,22 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # A rehearsal must never enter the production environment or obtain an
+      # OIDC token. This checks the already-built package and chosen dist-tag;
+      # only a separately authorized real publish can verify registry auth.
+      - name: Rehearse npm package publication without credentials
+        if: inputs.dry_run == true
+        env:
+          DIST_TAG: ${{ steps.resolve.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          npm publish --tag "$DIST_TAG" --ignore-scripts --dry-run
+          echo "dry run only — no production environment or OIDC credentials were used"
+
   publish:
+    # A dry run uses only the unprivileged verify job above. In particular it
+    # must not request approval for `production` or receive id-token: write.
+    if: inputs.dry_run == false
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -271,11 +286,3 @@ jobs:
           DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
         run: npm publish --provenance --tag "$DIST_TAG" --ignore-scripts
 
-      - name: Report what a dry run would have done
-        if: inputs.dry_run != false
-        env:
-          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
-        run: |
-          set -euo pipefail
-          npm publish --provenance --tag "$DIST_TAG" --ignore-scripts --dry-run
-          echo "dry run only — nothing was published"
