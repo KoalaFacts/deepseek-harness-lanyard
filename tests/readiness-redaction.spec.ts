@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { awaitReadiness, readinessLines, redactReadinessOutput, stopDshProcess } from '../scripts/dsh-harness.ts'
 
 describe('DSH readiness failure diagnostics', () => {
@@ -59,5 +59,52 @@ describe('DSH readiness failure diagnostics', () => {
     expect(stderr.readableLength).toBe(0)
     stdout.end()
     stderr.end()
+  })
+})
+
+describe('DSH cleanup after a non-responsive child', () => {
+  it('only settles after a graceful SIGTERM exit and releases its listeners', async () => {
+    const signals: NodeJS.Signals[] = []
+    const emitter = new EventEmitter()
+    const child = Object.assign(emitter, {
+      pid: 12345,
+      exitCode: null,
+      signalCode: null,
+      kill(signal: NodeJS.Signals): boolean {
+        signals.push(signal)
+        queueMicrotask(() => { emitter.emit('exit', 0, signal) })
+        return true
+      },
+    }) as unknown as Parameters<typeof stopDshProcess>[0]
+
+    await expect(stopDshProcess(child, 10)).resolves.toBeUndefined()
+    expect(signals).toEqual(['SIGTERM'])
+    expect(child.listenerCount('exit')).toBe(0)
+    expect(child.listenerCount('error')).toBe(0)
+  })
+
+  it('does not settle on SIGKILL alone, and treats a forced exit as a failure', async () => {
+    const signals: NodeJS.Signals[] = []
+    const emitter = new EventEmitter()
+    const child = Object.assign(emitter, {
+      pid: 12346,
+      exitCode: null,
+      signalCode: null,
+      kill(signal: NodeJS.Signals): boolean {
+        signals.push(signal)
+        return true
+      },
+    }) as unknown as Parameters<typeof stopDshProcess>[0]
+
+    const stopping = stopDshProcess(child, 10)
+    let settled = false
+    void stopping.then(() => { settled = true }, () => { settled = true })
+    await vi.waitFor(() => { expect(signals).toEqual(['SIGTERM', 'SIGKILL']) }, { interval: 5, timeout: 1_000 })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    child.emit('exit', null, 'SIGKILL')
+    await expect(stopping).rejects.toThrow(/required SIGKILL/)
+    expect(child.listenerCount('exit')).toBe(0)
+    expect(child.listenerCount('error')).toBe(0)
   })
 })

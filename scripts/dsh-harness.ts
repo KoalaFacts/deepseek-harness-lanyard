@@ -364,23 +364,52 @@ type DshProcess = ChildProcessByStdio<null, Readable, Readable>
  * otherwise the final cleanup can delete a live server's files underneath it,
  * or fail with an in-use directory on other platforms.
  */
-export async function stopDshProcess(server: DshProcess): Promise<void> {
+export async function stopDshProcess(server: DshProcess, gracefulTimeoutMs = 15_000): Promise<void> {
   // Failed spawn has no process to signal and may emit 'error' without 'exit'.
   if (server.pid === undefined || server.exitCode !== null || server.signalCode !== null) return
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      server.kill('SIGKILL')
-      reject(new Error('lanyard e2e: dsh did not stop within 15 seconds'))
-    }, 15_000)
-    server.once('exit', () => {
-      clearTimeout(timeout)
-      resolve()
-    })
-    server.once('error', (error) => {
-      clearTimeout(timeout)
+    let forced = false
+    let forceTimeout: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      clearTimeout(graceTimeout)
+      if (forceTimeout !== undefined) clearTimeout(forceTimeout)
+      server.off('exit', exited)
+      server.off('error', failed)
+    }
+    const exited = (): void => {
+      cleanup()
+      // A SIGKILL means the graceful-stop contract failed. Do not quietly
+      // count this as a clean shutdown, or erase the workspace in finally.
+      if (forced) reject(new Error('lanyard e2e: dsh ignored SIGTERM and required SIGKILL'))
+      else resolve()
+    }
+    const failed = (error: Error): void => {
+      cleanup()
       reject(error)
-    })
-    server.kill('SIGTERM')
+    }
+    const graceTimeout = setTimeout(() => {
+      forced = true
+      // Keep the promise pending until the child actually exits. A signal
+      // request alone must never allow the runner to delete a live DSH_HOME.
+      forceTimeout = setTimeout(() => {
+        cleanup()
+        reject(new Error('lanyard e2e: dsh did not exit within 5 seconds after SIGKILL'))
+      }, 5_000)
+      try {
+        server.kill('SIGKILL')
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }, gracefulTimeoutMs)
+    server.once('exit', exited)
+    server.once('error', failed)
+    try {
+      server.kill('SIGTERM')
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
   })
 }
 
