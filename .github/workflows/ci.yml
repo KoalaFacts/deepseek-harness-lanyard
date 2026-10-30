@@ -123,6 +123,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Install consumer smoke harness dependencies on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: pnpm install --frozen-lockfile
       - name: Prepare ephemeral PR consumer tarball (never uploaded)
         if: github.event_name == 'pull_request'
         run: |

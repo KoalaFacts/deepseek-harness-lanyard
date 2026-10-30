@@ -1,5 +1,5 @@
 /**
- * Install the CI-downloaded main artifact, not a freshly packed checkout.
+ * Verify a CI candidate: main downloads its artifact; PRs pack ephemerally in the job.
  * LANYARD_CANDIDATE_DIR and LANYARD_EXPECTED_SHA are required.
  * Use --verify-only to check archive identity without a registry connection.
  */
@@ -98,11 +98,36 @@ async function installCandidate(tarball: string): Promise<void> {
       assert.ok(inside !== '..' && !inside.startsWith('..' + sep) && !isAbsolute(inside), 'module escapes installed package: ' + subpath)
       assert.ok(resolved.endsWith('.js'), 'not executable JS: ' + subpath)
       assert.ok(existsSync(join(installedRoot, target.types)), 'missing installed declaration: ' + subpath)
-      await verifyInstalledModule(resolved, specifier)
+      // Optional DSH/Cordis peers are supplied by the running carrier's
+      // composition, not by the standalone profile's module resolver. A raw
+      // Node import of those exports incorrectly fails with ERR_MODULE_NOT_FOUND.
+      // Import the dependency-free admission export directly; below, boot
+      // the exact verified tarball in real DSH to exercise every plugin row.
+      if (subpath === './admission') await verifyInstalledModule(resolved, specifier)
       modules++
     }
     assert.equal(modules, 7, 'expected seven consumer module exports')
-    console.log('lanyard candidate: PASS; real dsh installed downloaded ' + source.name + '@' + source.version + ' with ' + modules + ' loaded modules')
+    console.log('lanyard candidate: all seven installed JS/type exports resolve inside the installed package')
+
+    // An ordinary Node import cannot resolve the carrier-provided optional
+    // Cordis/DSH peer packages in this clean plugin profile. Test the actual
+    // supported load path instead: a fresh real DSH composition loading the
+    // *same* SHA-verified tarball, with a live TLS listener and upstream login.
+    const { withDshDeployment, probe, rpcCall, refused, sessionCookie, sessionCookieSecure } = await import('./dsh-harness.ts')
+    await withDshDeployment(async ({ bundles, packageName, pairingLink, port, ca }) => {
+      assert.equal(packageName, source.name)
+      assert.ok(bundles.includes(source.name), 'candidate bundle did not join the real DSH profile')
+      const url = new URL(pairingLink)
+      assert.equal(url.protocol, 'https:', 'pairing did not use TLS')
+      const denied = await probe(url.hostname, port, '/api/session/list', rpcCall('session/list', { _request: {} }), ca)
+      assert.equal(refused(denied), true, 'unauthenticated LAN request was not denied by the gate')
+      const paired = await probe(url.hostname, port, url.pathname + url.search, {}, ca)
+      assert.equal(paired.status, 303, 'upstream launch-token exchange did not redirect')
+      assert.ok(sessionCookie(paired), 'upstream did not issue a session cookie')
+      assert.equal(sessionCookieSecure(paired), true, 'TLS session cookie was not Secure')
+    }, { tarball })
+    console.log('lanyard candidate: PASS; verified ' + source.name + '@' + source.version
+      + ' installed with seven exports, booted in real DSH, denied anonymous LAN traffic and completed TLS pairing')
   } finally {
     rmSync(workspace, { recursive: true, force: true })
   }

@@ -19,7 +19,7 @@ import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
@@ -410,6 +410,8 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
 export interface DeploymentOptions {
   overlay?: string
   env?: Readonly<Record<string, string>>
+  /** Already-verified install candidate; otherwise pack this checkout. */
+  tarball?: string
 }
 
 export async function withDshDeployment<T>(
@@ -421,10 +423,18 @@ export async function withDshDeployment<T>(
   let server: DshProcess | undefined
   try {
     console.log(`lanyard e2e: workspace ${workspace}`)
-    console.log('lanyard e2e: packing the plugin as a publishable tarball')
-    run('pnpm', ['pack', '--pack-destination', workspace], { cwd: ROOT })
     const { name, version } = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Manifest
-    const tarball = join(workspace, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
+    const expectedTarball = join(workspace, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
+    const tarball = options.tarball ?? expectedTarball
+    if (options.tarball === undefined) {
+      console.log('lanyard e2e: packing the plugin as a publishable tarball')
+      run('pnpm', ['pack', '--pack-destination', workspace], { cwd: ROOT })
+    } else {
+      if (!isAbsolute(tarball) || basename(tarball) !== basename(expectedTarball) || !existsSync(tarball)) {
+        throw new Error('lanyard e2e: candidate tarball must be an existing absolute path with the reviewed package name')
+      }
+      console.log('lanyard e2e: installing the externally verified candidate tarball (not repacking)')
+    }
 
     console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${CLI_SPEC}`)
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
