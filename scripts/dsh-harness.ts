@@ -400,6 +400,15 @@ export function readinessLines(output: string): ReadinessLines | undefined {
 }
 
 /**
+ * Strip the upstream per-process launch token from failed startup diagnostics.
+ * Readiness parsing still sees the original output; printing it verbatim after
+ * a timeout could publish a live pairing credential in public CI logs.
+ */
+export function redactReadinessOutput(output: string): string {
+  return output.replace(/([?&]token=)[^&#\\s]+/gi, '$1[REDACTED]')
+}
+
+/**
  * Wait for every readiness line; lanyard's and upstream's print after the
  * Loader settles, in either order. The fingerprint line is lanyard's last on a
  * pipe, where no QR code is drawn, so waiting for it waits for the whole block.
@@ -408,7 +417,7 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
   return new Promise((resolve, reject) => {
     let output = ''
     const timer = setTimeout(() => {
-      reject(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${output}`))
+      reject(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${redactReadinessOutput(output)}`))
     }, BOOT_TIMEOUT_MS)
     const read = (chunk: Buffer | string): void => {
       output += String(chunk)
@@ -421,7 +430,7 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
     server.stderr.on('data', read)
     server.once('exit', (code) => {
       clearTimeout(timer)
-      reject(new Error(`dsh exited (${String(code)}) before serving:\n${output}`))
+      reject(new Error(`dsh exited (${String(code)}) before serving:\n${redactReadinessOutput(output)}`))
     })
   })
 }
