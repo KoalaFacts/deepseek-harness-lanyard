@@ -35,7 +35,20 @@ pnpm pack --pack-destination .
 dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz"
 ```
 
-The tarball filename above corresponds to this checkout's current `package.json` version (`0.2.0`); if that version changes, use the `.tgz` filename printed by `pnpm pack`. On Windows PowerShell, give `dsh plugin ... add` the absolute path to the generated `.tgz` instead of the POSIX `$PWD/...` expression. Keep `git rev-parse HEAD` with your test results so the installed source is identifiable.
+The tarball filename above corresponds to this checkout's current `package.json` version (`0.2.0`); if that version changes, use the `.tgz` filename printed by `pnpm pack`. Keep `git rev-parse HEAD` with your test results so the installed source is identifiable.
+
+On **Windows PowerShell**, run the same clone, frozen install, check and `pnpm pack` steps above, but replace only the final `dsh plugin ... add` line with this command sequence. It reads the actual package version rather than guessing a filename or accidentally selecting an older tarball:
+
+```powershell
+$version = (Get-Content -LiteralPath .\package.json -Raw | ConvertFrom-Json).version
+$tarball = Join-Path (Get-Location) "koalafacts-deepseek-harness-lanyard-$version.tgz"
+if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) {
+  throw "Missing local tarball: $tarball. Run pnpm pack first."
+}
+dsh plugin --profile web add $tarball
+```
+
+This is a local tarball install on the DSH computer, not an npm registry release or a change to LAN binding.
 
 This **does not publish anything to npm** or open the LAN automatically. The existing real-DSH e2e installs this same kind of local tarball into a clean profile; that is not a substitute for an official npm release or a physical phone test. Once installed, start dsh with an explicit trusted-LAN address as described below, and follow the TLS certificate/fingerprint pairing instructions.
 

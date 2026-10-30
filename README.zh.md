@@ -35,7 +35,20 @@ pnpm pack --pack-destination .
 dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz"
 ```
 
-上面的 `.tgz` 文件名对应当前 `package.json` 的 `0.2.0` 版本；以后版本号变了，就以 `pnpm pack` 生成的实际文件名为准。在 Windows PowerShell 中，最后一条命令请改用生成的 `.tgz` 文件的绝对路径，不要照抄 POSIX Shell 的 `$PWD/...` 写法。建议同时记录 `git rev-parse HEAD`，方便日后确认自己安装的是哪一个源码提交。
+上面的 `.tgz` 文件名对应当前 `package.json` 的 `0.2.0` 版本；以后版本号变了，就以 `pnpm pack` 生成的实际文件名为准。建议同时记录 `git rev-parse HEAD`，方便日后确认自己安装的是哪一个源码提交。
+
+如果使用 **Windows PowerShell**，先照常运行前面的 `git clone`、冻结依赖安装、`npm run check` 和 `pnpm pack`，然后**只替换最后一条** `dsh plugin ... add` 命令。下面会从 `package.json` 读取实际版本，避免猜测文件名或误装目录里更旧的安装包：
+
+```powershell
+$version = (Get-Content -LiteralPath .\package.json -Raw | ConvertFrom-Json).version
+$tarball = Join-Path (Get-Location) "koalafacts-deepseek-harness-lanyard-$version.tgz"
+if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) {
+  throw "Missing local tarball: $tarball. Run pnpm pack first."
+}
+dsh plugin --profile web add $tarball
+```
+
+这仍然只在运行 DSH 的电脑上安装本地打包产物，不代表 npm 已正式发布，也不会自动开放局域网监听。
 
 这种方式**不会向 npm 发布任何东西，也不会自动开放局域网**。项目现有的真实 DSH 端到端测试采用同类本地 tarball 在干净环境安装，但这不代表正式 npm 发布或实体手机测试已经完成。安装之后仍要按照下文指定可信局域网地址启动 dsh，并遵循 TLS 证书指纹核对和配对步骤。
 
