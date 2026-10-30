@@ -424,6 +424,10 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
       server.stderr.off('data', read)
       server.off('exit', exited)
       server.off('error', failed)
+      // No readiness parser must keep accumulating logs, but the child's
+      // piped stdout/stderr must still be drained or the DSH process can stall.
+      server.stdout.resume()
+      server.stderr.resume()
     }
     const succeed = (lines: ReadinessLines): void => {
       if (settled) return
