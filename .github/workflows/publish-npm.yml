@@ -227,16 +227,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # The npm bundled with Node 22 predates trusted publishing, which landed
-      # in 11.5.1; without this the publish fails on authentication with an
-      # error that does not mention the version at all. Pinned to the 11 line
-      # rather than `@latest`, which would be the one unreviewed thing running
-      # beside the credential.
-      - name: Install an npm that speaks trusted publishing
+      # npm 11.5.1 first supported OIDC trusted publishing; 11.21.0 added
+      # trusted-publisher dist-tag support, required for prerelease --tag next.
+      # This job can mint an OIDC token, so do not resolve a floating npm range
+      # or silently run a new npm CLI release alongside that credential.
+      - name: Install a reviewed npm CLI for trusted publishing
         run: |
           set -euo pipefail
-          npm install -g npm@^11.5.1
-          npm --version
+          npm install -g --ignore-scripts npm@11.21.1
+          test "$(npm --version)" = "11.21.1"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
