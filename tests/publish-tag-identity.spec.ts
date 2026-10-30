@@ -1,5 +1,6 @@
-/** The publish job must never resolve a mutable release tag after verifying it.
- * Execute its real tag-identity guard against a disposable local Git remote:
+/** The credential-bearing publish job must never resolve a mutable release tag
+ * after verifying it. A dry run must stop in the unprivileged verify job.
+ * Execute the real tag-identity guard against a disposable local Git remote:
  * both an extra commit on main and a tag force-move are deliberately realistic.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -13,19 +14,24 @@ import { parse } from 'yaml'
 interface WorkflowStep {
   id?: string
   name?: string
+  if?: string
   uses?: string
   with?: { ref?: string }
   run?: string
 }
 
 interface WorkflowJob {
+  if?: string
   needs?: string
+  environment?: string
+  permissions?: Record<string, string>
   outputs?: Record<string, string>
   steps: WorkflowStep[]
 }
 
 const workflowPath = fileURLToPath(new URL('../.github/workflows/publish-npm.yml', import.meta.url))
-const { jobs } = parse(readFileSync(workflowPath, 'utf8')) as {
+const { jobs, permissions } = parse(readFileSync(workflowPath, 'utf8')) as {
+  permissions: Record<string, string>
   jobs: { verify: WorkflowJob; publish: WorkflowJob }
 }
 const tagGuard = jobs.publish.steps.find(step => step.name === 'Refuse a release tag changed after verification')
@@ -35,12 +41,26 @@ const git = (cwd: string, ...args: string[]): string => execFileSync('git', args
 }).trim()
 
 describe('publish-npm commit identity', () => {
-  it('pins publish checkout to the verified SHA and checks the tag before either publish action', () => {
+  it('pins real publication to the verified SHA and keeps dry runs out of production', () => {
     const pin = jobs.verify.steps.find(step => step.id === 'pin')
     expect(pin?.run).toContain('tag_sha=$TAG_SHA')
     expect(jobs.verify.outputs?.tag_sha).toBe('${{ steps.pin.outputs.tag_sha }}')
     expect(jobs.publish.needs).toBe('verify')
 
+    // The rehearsal is deliberately unprivileged, even though it runs npm publish --dry-run.
+    expect(permissions).toEqual({ contents: 'read' })
+    expect(jobs.verify.environment).toBeUndefined()
+    expect(jobs.verify.permissions?.['id-token']).not.toBe('write')
+    const rehearsals = jobs.verify.steps.filter(step => step.run?.includes('npm publish '))
+    expect(rehearsals).toHaveLength(1)
+    expect(rehearsals[0]?.if).toBe('inputs.dry_run == true')
+    expect(rehearsals[0]?.run).toContain('--dry-run')
+    expect(rehearsals[0]?.run).toContain('--ignore-scripts')
+
+    // The credential-bearing job cannot execute during a dry run.
+    expect(jobs.publish.if).toBe('inputs.dry_run == false')
+    expect(jobs.publish.environment).toBe('production')
+    expect(jobs.publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' })
     const checkout = jobs.publish.steps.find(step => step.uses?.startsWith('actions/checkout@'))
     expect(checkout?.with?.ref).toBe('${{ needs.verify.outputs.tag_sha }}')
 
@@ -49,8 +69,12 @@ describe('publish-npm commit identity', () => {
       .map((step, index) => step.run?.includes('npm publish ') ? index : -1)
       .filter(index => index >= 0)
     expect(guardIndex).toBeGreaterThan(0)
-    expect(publishIndexes).toHaveLength(2)
-    for (const index of publishIndexes) expect(guardIndex).toBeLessThan(index)
+    expect(publishIndexes).toHaveLength(1)
+    for (const index of publishIndexes) {
+      expect(guardIndex).toBeLessThan(index)
+      expect(jobs.publish.steps[index]?.run).toContain('--provenance')
+      expect(jobs.publish.steps[index]?.run).not.toContain('--dry-run')
+    }
     expect(tagGuard?.run).toContain('FETCH_HEAD^{commit}')
     expect(tagGuard?.run).toContain('git rev-parse HEAD')
   })
