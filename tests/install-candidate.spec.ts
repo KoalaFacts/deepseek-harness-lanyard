@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { verifyInstallCandidate } from '../scripts/verify-install-candidate.ts'
+import { verifyInstallCandidate, verifyInstalledModule } from '../scripts/verify-install-candidate.ts'
 
 const sha = 'a'.repeat(40)
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -66,6 +66,26 @@ describe('downloaded main install candidate identity', () => {
       }
     })
   })
+})
+
+it('executes the installed ESM exports, rejecting empty and syntactically broken modules', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lanyard-candidate-modules-'))
+  try {
+    const valid = join(directory, 'valid.mjs')
+    const empty = join(directory, 'empty.mjs')
+    const broken = join(directory, 'broken.mjs')
+    writeFileSync(valid, 'export const works = true\\n')
+    writeFileSync(empty, '// resolves, but exports nothing\\n')
+    writeFileSync(broken, 'export const broken = ;\\n')
+    await expect(verifyInstalledModule(valid, 'test-valid')).resolves.toBeUndefined()
+    // Removing the nonempty-export guard must make this negative control fail.
+    await expect(verifyInstalledModule(empty, 'test-empty')).rejects
+      .toThrow(/installed module exported nothing/)
+    // Merely resolving a malformed file passed the old consumer gate.
+    await expect(verifyInstalledModule(broken, 'test-broken')).rejects.toThrow()
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 it('the main candidate consumer downloads this run artifact only after all main gates', () => {

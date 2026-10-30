@@ -10,7 +10,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 interface PackageManifest {
@@ -49,7 +49,13 @@ function run(command: string, args: string[], cwd: string, env: NodeJS.ProcessEn
   assert.equal(result.status, 0, command + ' ' + args.join(' ') + ' failed:\n' + result.stdout + '\n' + result.stderr)
 }
 
-function installCandidate(tarball: string): void {
+/** A resolved filename is not sufficient: exercise its installed ESM entrypoint. */
+export async function verifyInstalledModule(resolved: string, specifier: string): Promise<void> {
+  const loaded = await import(pathToFileURL(resolved).href) as Record<string, unknown>
+  assert.ok(Object.keys(loaded).length > 0, 'installed module exported nothing: ' + specifier)
+}
+
+async function installCandidate(tarball: string): Promise<void> {
   const workspace = mkdtempSync(join(tmpdir(), 'lanyard-candidate-consumer-'))
   try {
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-candidate-consumer","private":true}\n')
@@ -83,10 +89,11 @@ function installCandidate(tarball: string): void {
       assert.ok(inside !== '..' && !inside.startsWith('..' + sep) && !isAbsolute(inside), 'module escapes installed package: ' + subpath)
       assert.ok(resolved.endsWith('.js'), 'not executable JS: ' + subpath)
       assert.ok(existsSync(join(installedRoot, target.types)), 'missing installed declaration: ' + subpath)
+      await verifyInstalledModule(resolved, specifier)
       modules++
     }
     assert.equal(modules, 7, 'expected seven consumer module exports')
-    console.log('lanyard candidate: PASS; real dsh installed downloaded ' + source.name + '@' + source.version + ' with ' + modules + ' modules')
+    console.log('lanyard candidate: PASS; real dsh installed downloaded ' + source.name + '@' + source.version + ' with ' + modules + ' loaded modules')
   } finally {
     rmSync(workspace, { recursive: true, force: true })
   }
@@ -98,5 +105,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   assert.ok(directory && expectedSha, 'set LANYARD_CANDIDATE_DIR and LANYARD_EXPECTED_SHA')
   const tarball = verifyInstallCandidate(directory, expectedSha)
   console.log('lanyard candidate: download members, commit identity and SHA-256 verified')
-  if (!process.argv.includes('--verify-only')) installCandidate(tarball)
+  if (!process.argv.includes('--verify-only')) await installCandidate(tarball)
 }
