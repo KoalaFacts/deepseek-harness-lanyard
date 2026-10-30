@@ -113,7 +113,7 @@ async function installCandidate(tarball: string): Promise<void> {
     // Cordis/DSH peer packages in this clean plugin profile. Test the actual
     // supported load path instead: a fresh real DSH composition loading the
     // *same* SHA-verified tarball, with a live TLS listener and upstream login.
-    const { withDshDeployment, probe, rpcCall, refused, sessionCookie, sessionCookieSecure } = await import('./dsh-harness.ts')
+    const { withDshDeployment, probe, rpcCall, refused, sessionCookie, sessionCookieSecure, succeeded } = await import('./dsh-harness.ts')
     await withDshDeployment(async ({ bundles, packageName, pairingLink, port, ca }) => {
       assert.equal(packageName, source.name)
       assert.ok(bundles.includes(source.name), 'candidate bundle did not join the real DSH profile')
@@ -123,8 +123,16 @@ async function installCandidate(tarball: string): Promise<void> {
       assert.equal(refused(denied), true, 'unauthenticated LAN request was not denied by the gate')
       const paired = await probe(url.hostname, port, url.pathname + url.search, {}, ca)
       assert.equal(paired.status, 303, 'upstream launch-token exchange did not redirect')
-      assert.ok(sessionCookie(paired), 'upstream did not issue a session cookie')
+      const cookie = sessionCookie(paired)
+      assert.ok(cookie, 'upstream did not issue a session cookie')
       assert.equal(sessionCookieSecure(paired), true, 'TLS session cookie was not Secure')
+      // A successful token exchange alone does not prove that the downloaded
+      // candidate can actually use the authenticated API. Exercise the real
+      // installed bundle with the newly issued cookie, not a fresh checkout.
+      const request = rpcCall('session/list', { _request: {} })
+      const authenticated = await probe(url.hostname, port, '/api/session/list',
+        { ...request, headers: { ...request.headers, cookie } }, ca)
+      assert.equal(succeeded(authenticated), true, 'paired candidate could not execute the authenticated session RPC')
     }, { tarball })
     console.log('lanyard candidate: PASS; verified ' + source.name + '@' + source.version
       + ' installed with seven exports, booted in real DSH, denied anonymous LAN traffic and completed TLS pairing')
