@@ -74,9 +74,9 @@ it('executes the installed ESM exports, rejecting empty and syntactically broken
     const valid = join(directory, 'valid.mjs')
     const empty = join(directory, 'empty.mjs')
     const broken = join(directory, 'broken.mjs')
-    writeFileSync(valid, 'export const works = true\\n')
-    writeFileSync(empty, '// resolves, but exports nothing\\n')
-    writeFileSync(broken, 'export const broken = ;\\n')
+    writeFileSync(valid, 'export const works = true')
+    writeFileSync(empty, '// resolves, but exports nothing')
+    writeFileSync(broken, 'export const broken = ;')
     await expect(verifyInstalledModule(valid, 'test-valid')).resolves.toBeUndefined()
     // Removing the nonempty-export guard must make this negative control fail.
     await expect(verifyInstalledModule(empty, 'test-empty')).rejects
