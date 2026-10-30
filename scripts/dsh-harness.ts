@@ -454,17 +454,22 @@ const MAX_STARTUP_LOG_CHARS = 64 * 1024
 
 export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
   return new Promise((resolve, reject) => {
-    let output = ''
-    let omitted = 0
+    // These pipes can interleave in the middle of a ?token= URL. Combining
+    // their chunks invents a readiness URL and can expose the real token's
+    // remaining fragment when a failed start prints diagnostics.
+    const outputByStream = { stdout: '', stderr: '' }
+    const omittedByStream = { stdout: 0, stderr: 0 }
     const observed: Partial<ReadinessLines> = {}
-    const diagnostic = (): string =>
-      (omitted === 0 ? '' : '[omitted ' + String(omitted) + ' earlier startup log characters]\n')
-      + redactReadinessOutput(output)
+    const diagnostic = (): string => (['stdout', 'stderr'] as const).map(stream =>
+      '[' + stream + ']\n'
+      + (omittedByStream[stream] === 0 ? '' : '[omitted ' + String(omittedByStream[stream]) + ' earlier startup log characters]\n')
+      + redactReadinessOutput(outputByStream[stream]),
+    ).join('\n')
     let settled = false
     const cleanup = (): void => {
       clearTimeout(timer)
-      server.stdout.off('data', read)
-      server.stderr.off('data', read)
+      server.stdout.off('data', readStdout)
+      server.stderr.off('data', readStderr)
       server.off('exit', exited)
       server.off('error', failed)
       // No readiness parser must keep accumulating logs, but the child's
@@ -487,11 +492,11 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
     const timer = setTimeout(() => {
       fail(new Error('no readiness lines within ' + String(BOOT_TIMEOUT_MS) + 'ms:\n' + diagnostic()))
     }, BOOT_TIMEOUT_MS)
-    const read = (chunk: Buffer | string): void => {
-      output += String(chunk)
-      // Retain complete signals even when many later log lines push them out
-      // of the bounded failure-diagnostics buffer.
-      const parts = readinessParts(output)
+    const read = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
+      outputByStream[stream] += String(chunk)
+      // Parse each pipe independently: neither readiness nor log redaction may
+      // splice together chunks from different OS streams.
+      const parts = readinessParts(outputByStream[stream])
       if (parts.localUrl !== undefined) observed.localUrl = parts.localUrl
       if (parts.pairingLink !== undefined) observed.pairingLink = parts.pairingLink
       if (parts.fingerprint !== undefined) observed.fingerprint = parts.fingerprint
@@ -502,22 +507,24 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
       }
       // Discard a truncated partial line too: cutting a ?token= URL at an
       // arbitrary offset could leave a bare credential fragment in diagnostics.
-      if (output.length > MAX_STARTUP_LOG_CHARS) {
-        const tail = output.slice(-MAX_STARTUP_LOG_CHARS)
+      if (outputByStream[stream].length > MAX_STARTUP_LOG_CHARS / 2) {
+        const tail = outputByStream[stream].slice(-(MAX_STARTUP_LOG_CHARS / 2))
         const newline = tail.indexOf('\n')
         const kept = newline === -1 ? '' : tail.slice(newline + 1)
-        omitted += output.length - kept.length
-        output = kept
+        omittedByStream[stream] += outputByStream[stream].length - kept.length
+        outputByStream[stream] = kept
       }
     }
+    const readStdout = (chunk: Buffer | string): void => { read('stdout', chunk) }
+    const readStderr = (chunk: Buffer | string): void => { read('stderr', chunk) }
     const exited = (code: number | null): void => {
       fail(new Error('dsh exited (' + String(code) + ') before serving:\n' + diagnostic()))
     }
     const failed = (error: Error): void => {
       fail(new Error('dsh could not start: ' + error.message + '\n' + diagnostic(), { cause: error }))
     }
-    server.stdout.on('data', read)
-    server.stderr.on('data', read)
+    server.stdout.on('data', readStdout)
+    server.stderr.on('data', readStderr)
     server.once('exit', exited)
     server.once('error', failed)
   })

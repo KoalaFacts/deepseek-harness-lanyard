@@ -94,6 +94,44 @@ describe('DSH readiness failure diagnostics', () => {
     failedErr.end()
   })
 
+
+  it('keeps interleaved stdout/stderr token fragments intact for readiness and redacted diagnostics', async () => {
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = Object.assign(new EventEmitter(), { stdout, stderr }) as unknown as Parameters<typeof awaitReadiness>[0]
+    const ready = awaitReadiness(child)
+    stdout.write('dsh web: http://127.0.0.1:3080/?token=local-')
+    stderr.write('unrelated stderr during stdout URL\n')
+    stdout.write('token\n')
+    stderr.write('lanyard: pair a device by opening https://192.168.1.5:3443/?token=lan-')
+    stdout.write('unrelated stdout during stderr URL\n')
+    stderr.write('token once\n')
+    stderr.write('lanyard: the phone should show certificate SHA-256 AB:CD — verify before trusting\n')
+    const result = await ready
+    expect(result.localUrl).toBe('http://127.0.0.1:3080/?token=local-token')
+    expect(result.pairingLink).toBe('https://192.168.1.5:3443/?token=lan-token')
+    stdout.end()
+    stderr.end()
+
+    const failedOut = new PassThrough()
+    const failedErr = new PassThrough()
+    const failing = Object.assign(new EventEmitter(), {
+      stdout: failedOut, stderr: failedErr,
+    }) as unknown as Parameters<typeof awaitReadiness>[0]
+    const pending = awaitReadiness(failing)
+    failedOut.write('dsh web: http://127.0.0.1:3080/?token=split-')
+    failedErr.write('stderr between token chunks\n')
+    failedOut.write('hidden-secret\n')
+    failing.emit('exit', 1)
+    const message = await pending.then(() => '', (error: unknown) => String(error))
+    expect(message).toContain('?token=[REDACTED]')
+    expect(message).toContain('stderr between token chunks')
+    expect(message).not.toContain('split-')
+    expect(message).not.toContain('hidden-secret')
+    failedOut.end()
+    failedErr.end()
+  })
+
   it('detaches readiness listeners after success instead of retaining every later log', async () => {
     const stdout = new PassThrough()
     const stderr = new PassThrough()
