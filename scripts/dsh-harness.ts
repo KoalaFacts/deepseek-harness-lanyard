@@ -528,6 +528,18 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
  * @param body - receives the live deployment facts.
  * @returns whatever `body` returned.
  */
+/** Test-only environment must never redirect a disposable DSH to the caller's real profile. */
+export function isolatedDshEnvironment(
+  home: string,
+  overrides: Readonly<Record<string, string>> = {},
+  inherited: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (Object.hasOwn(overrides, 'DSH_HOME')) {
+    throw new Error('lanyard e2e: DSH_HOME cannot be overridden for an isolated deployment')
+  }
+  return { ...inherited, ...overrides, DSH_HOME: home }
+}
+
 /** Test-only Host configuration. The overlay is applied after the shipped bundles. */
 export interface DeploymentOptions {
   overlay?: string
@@ -544,6 +556,8 @@ export async function withDshDeployment<T>(
   const home = join(workspace, 'home')
   let server: DshProcess | undefined
   try {
+    // Fail before packing or installing anything if a caller targets a real profile.
+    const env = isolatedDshEnvironment(home, options.env)
     console.log(`lanyard e2e: workspace ${workspace}`)
     const { name, version } = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Manifest
     const expectedTarball = join(workspace, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
@@ -562,7 +576,7 @@ export async function withDshDeployment<T>(
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
     installCli(workspace, CLI_SPEC)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
-    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home, ...options.env }
+
 
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })

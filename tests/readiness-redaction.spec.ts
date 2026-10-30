@@ -6,7 +6,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
-import { awaitReadiness, readinessLines, redactReadinessOutput, stopDshProcess } from '../scripts/dsh-harness.ts'
+import { awaitReadiness, isolatedDshEnvironment, readinessLines, redactReadinessOutput, stopDshProcess } from '../scripts/dsh-harness.ts'
+
+describe('Disposable DSH profile isolation', () => {
+  it('pins DSH_HOME even when inherited from a real profile and rejects explicit overrides', () => {
+    const realHome = join(tmpdir(), 'lanyard-real-home-must-not-be-used')
+    const testHome = join(tmpdir(), 'lanyard-isolated-home')
+    const env = isolatedDshEnvironment(testHome, { LANYARD_TEST_FLAG: 'ok' }, {
+      DSH_HOME: realHome, PATH: '/safe/test/path',
+    })
+    expect(env.DSH_HOME).toBe(testHome)
+    expect(env.PATH).toBe('/safe/test/path')
+    expect(env.LANYARD_TEST_FLAG).toBe('ok')
+    expect(() => isolatedDshEnvironment(testHome, { DSH_HOME: realHome }))
+      .toThrow(/DSH_HOME cannot be overridden/)
+    expect(() => isolatedDshEnvironment(testHome, { DSH_HOME: '' }))
+      .toThrow(/DSH_HOME cannot be overridden/)
+  })
+})
 
 describe('DSH readiness failure diagnostics', () => {
   it('redacts both real-format pairing URLs without altering readiness parsing or useful context', () => {
