@@ -121,7 +121,11 @@ async function probe(noDefaults) {
       // Never hold this diagnostic open on inherited helper stderr handles.
       child.stderr.destroy()
       if (!stopped) throw new Error(`owned browser did not exit; retained temporary profile ${profile}`)
-      await rm(profile, { recursive: true, force: true })
+      // Chromium helper processes may finish updating the profile shortly after
+      // the owned browser PID exits. Node's recursive rm retries transient
+      // ENOTEMPTY races only when maxRetries is nonzero. Keep retries bounded
+      // and surface a persistent failure instead of declaring cleanup passed.
+      await rm(profile, { recursive: true, force: true, maxRetries: 12, retryDelay: 100 })
     }
   }
 }
