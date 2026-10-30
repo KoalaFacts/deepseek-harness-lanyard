@@ -364,8 +364,9 @@ type DshProcess = ChildProcessByStdio<null, Readable, Readable>
  * otherwise the final cleanup can delete a live server's files underneath it,
  * or fail with an in-use directory on other platforms.
  */
-async function stopDshProcess(server: DshProcess): Promise<void> {
-  if (server.exitCode !== null || server.signalCode !== null) return
+export async function stopDshProcess(server: DshProcess): Promise<void> {
+  // Failed spawn has no process to signal and may emit 'error' without 'exit'.
+  if (server.pid === undefined || server.exitCode !== null || server.signalCode !== null) return
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       server.kill('SIGKILL')
@@ -413,25 +414,47 @@ export function redactReadinessOutput(output: string): string {
  * Loader settles, in either order. The fingerprint line is lanyard's last on a
  * pipe, where no QR code is drawn, so waiting for it waits for the whole block.
  */
-function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
+export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
   return new Promise((resolve, reject) => {
     let output = ''
+    let settled = false
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      server.stdout.off('data', read)
+      server.stderr.off('data', read)
+      server.off('exit', exited)
+      server.off('error', failed)
+    }
+    const succeed = (lines: ReadinessLines): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(lines)
+    }
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
     const timer = setTimeout(() => {
-      reject(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${redactReadinessOutput(output)}`))
+      fail(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${redactReadinessOutput(output)}`))
     }, BOOT_TIMEOUT_MS)
     const read = (chunk: Buffer | string): void => {
       output += String(chunk)
       const lines = readinessLines(output)
-      if (lines === undefined) return
-      clearTimeout(timer)
-      resolve(lines)
+      if (lines !== undefined) succeed(lines)
+    }
+    const exited = (code: number | null): void => {
+      fail(new Error(`dsh exited (${String(code)}) before serving:\n${redactReadinessOutput(output)}`))
+    }
+    const failed = (error: Error): void => {
+      fail(new Error(`dsh could not start: ${error.message}\n${redactReadinessOutput(output)}`, { cause: error }))
     }
     server.stdout.on('data', read)
     server.stderr.on('data', read)
-    server.once('exit', (code) => {
-      clearTimeout(timer)
-      reject(new Error(`dsh exited (${String(code)}) before serving:\n${redactReadinessOutput(output)}`))
-    })
+    server.once('exit', exited)
+    server.once('error', failed)
   })
 }
 
