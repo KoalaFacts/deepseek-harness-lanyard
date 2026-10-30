@@ -358,6 +358,31 @@ export const admitted = (answer: Answer): boolean => !refused(answer)
 /** The spawned CLI: stdin is ignored, both output streams are piped. */
 type DshProcess = ChildProcessByStdio<null, Readable, Readable>
 
+/**
+ * Stop a disposable DSH and await its actual exit before reusing ports or
+ * removing its DSH_HOME. Signalling alone does not mean the process has left:
+ * otherwise the final cleanup can delete a live server's files underneath it,
+ * or fail with an in-use directory on other platforms.
+ */
+async function stopDshProcess(server: DshProcess): Promise<void> {
+  if (server.exitCode !== null || server.signalCode !== null) return
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      server.kill('SIGKILL')
+      reject(new Error('lanyard e2e: dsh did not stop within 15 seconds'))
+    }, 15_000)
+    server.once('exit', () => {
+      clearTimeout(timeout)
+      resolve()
+    })
+    server.once('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
+    server.kill('SIGTERM')
+  })
+}
+
 /** The readiness lines under test: lanyard's pairing link and fingerprint, and upstream's own URL line. */
 export interface ReadinessLines {
   pairingLink: string
@@ -484,24 +509,9 @@ export async function withDshDeployment<T>(
       if (previous === undefined || previous.exitCode !== null || previous.signalCode !== null) {
         throw new Error('lanyard e2e: cannot restart a dsh process that is no longer running')
       }
-      // Wait for the old process to release BOTH ports before spawning a new
-      // one. Merely sending SIGTERM would race the new carrier against it.
-      const exited = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          previous.kill('SIGKILL')
-          reject(new Error('lanyard e2e: dsh did not stop within 15 seconds'))
-        }, 15_000)
-        previous.once('exit', () => {
-          clearTimeout(timeout)
-          resolve()
-        })
-        previous.once('error', (error) => {
-          clearTimeout(timeout)
-          reject(error)
-        })
-      })
-      previous.kill('SIGTERM')
-      await exited
+      // Both restart and final teardown must wait for the actual process
+      // exit; otherwise a live DSH can retain ports or read deleted files.
+      await stopDshProcess(previous)
       console.log('lanyard e2e: restarting dsh in the same workspace and on the same ports')
       server = boot()
       return await awaitReadiness(server)
@@ -512,7 +522,10 @@ export async function withDshDeployment<T>(
       bundles: profile.dsh?.profile?.bundles ?? [], restart,
     })
   } finally {
-    server?.kill('SIGTERM')
+    // Do not unlink an in-use profile or TLS private key while the child is
+    // still shutting down. A failed stop deliberately leaves the workspace
+    // intact for diagnosis rather than deleting a live process's state.
+    if (server !== undefined) await stopDshProcess(server)
     if (process.env.DSH_E2E_KEEP === undefined) rmSync(workspace, { recursive: true, force: true })
     else console.log(`lanyard e2e: kept ${workspace}`)
   }
