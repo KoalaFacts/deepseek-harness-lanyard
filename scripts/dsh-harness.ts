@@ -405,7 +405,7 @@ export function readinessLines(output: string): ReadinessLines | undefined {
  * a timeout could publish a live pairing credential in public CI logs.
  */
 export function redactReadinessOutput(output: string): string {
-  return output.replace(/([?&]token=)[^&#\\s]+/gi, '$1[REDACTED]')
+  return output.replace(/([?&]token=)[^&#\s]+/gi, '$1[REDACTED]')
 }
 
 /**

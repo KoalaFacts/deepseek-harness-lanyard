@@ -9,7 +9,7 @@ describe('DSH readiness failure diagnostics', () => {
       'lanyard: pair a device by opening https://192.168.1.5:3443/?token=synthetic-lan-secret&source=phone once',
       'lanyard: the phone should show certificate SHA-256 AB:CD — verify before trusting',
       '',
-    ].join('\\n')
+    ].join('\n')
     const ready = readinessLines(output)
     expect(ready?.localUrl).toContain('synthetic-local-secret')
     expect(ready?.pairingLink).toContain('synthetic-lan-secret')
