@@ -289,10 +289,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   )
   ctx.effect(() => async () => {
     disposed = true
-    held.terminate()
-    const released = await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))
-    if (!released) {
-      ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor did not exit within teardown; ${command} may keep the host awake until it is killed`)
+    // The subprocess may have exited just before terminate(): even if the
+    // signal fails, still check its exit instead of aborting Cordis teardown.
+    let terminationError: unknown
+    try {
+      held.terminate()
+    } catch (error) {
+      terminationError = error
+    }
+    const terminationDetail = terminationError === undefined ? '' : `; terminate failed (${String(terminationError)})`
+    try {
+      const released = await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))
+      if (!released) {
+        ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor did not exit within teardown${terminationDetail}; ${command} may keep the host awake until it is killed`)
+      }
+    } catch (error) {
+      ctx.logger.warn(`lanyard-keep-awake: could not confirm sleep inhibitor exit during teardown (${String(error)}${terminationDetail}); ${command} may keep the host awake until it is killed`)
     }
   }, 'lanyard-keep-awake: sleep inhibitor')
 }

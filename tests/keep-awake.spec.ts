@@ -175,6 +175,60 @@ describe('the keep-awake row', () => {
     expect(spawned[0]?.terminated).toBe(true)
   })
 
+  it('still reaps a disappeared helper when terminate throws during shutdown', async () => {
+    // Regression: throwing terminate() used to skip waitForExit and reject
+    // Cordis disposal even if the helper had already exited.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let checkedExit = false
+    const seam = {
+      spawn: () => ({
+        done: new Promise(() => {}),
+        collected: { stdout: { readFrom: () => ({
+          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\\n' : '', lossy: false,
+        }) } },
+        terminate: () => { throw new Error('ESRCH') },
+        waitForExit: async (signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal)
+          checkedExit = true
+          return true
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await ctx.plugin(KeepAwake, { enabled: true }).await()
+    await ctx.fiber.dispose()
+    ctx = undefined
+    expect(checkedExit).toBe(true)
+    expect(warnings).toEqual([])
+  })
+
+  it('warns but does not reject shutdown if signaling and exit observation both fail', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    const seam = {
+      spawn: () => ({
+        done: new Promise(() => {}),
+        collected: { stdout: { readFrom: () => ({
+          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\\n' : '', lossy: false,
+        }) } },
+        terminate: () => { throw new Error('EPERM') },
+        waitForExit: async (_signal: AbortSignal) => { throw new Error('wait failed') },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await ctx.plugin(KeepAwake, { enabled: true }).await()
+    await ctx.fiber.dispose()
+    ctx = undefined
+    expect(warnings).toEqual([
+      expect.stringMatching(/could not confirm sleep inhibitor exit.*wait failed.*terminate failed.*EPERM/),
+    ])
+  })
+
   it('rejects its load when the platform binary is not on PATH, rather than serving without the inhibitor', async () => {
     // The seam reports a failed spawn only through `done`, after the load has
     // finished; the missing binary is decided before anything runs instead.
