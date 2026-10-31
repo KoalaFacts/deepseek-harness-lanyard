@@ -471,6 +471,9 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
     // remaining fragment when a failed start prints diagnostics.
     const outputByStream = { stdout: '', stderr: '' }
     const omittedByStream = { stdout: 0, stderr: 0 }
+    // Once a long line is dropped, its later chunks may be raw credential
+    // fragments without a `?token=` prefix. Discard through its newline.
+    const discardingPartialLine = { stdout: false, stderr: false }
     const observed: Partial<ReadinessLines> = {}
     const diagnostic = (): string => (['stdout', 'stderr'] as const).map(stream =>
       '[' + stream + ']\n'
@@ -505,7 +508,18 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
       fail(new Error('no readiness lines within ' + String(BOOT_TIMEOUT_MS) + 'ms:\n' + diagnostic()))
     }, BOOT_TIMEOUT_MS)
     const read = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
-      outputByStream[stream] += String(chunk)
+      let retainedChunk = String(chunk)
+      if (discardingPartialLine[stream]) {
+        const lineEnd = retainedChunk.indexOf('\n')
+        if (lineEnd === -1) {
+          omittedByStream[stream] += retainedChunk.length
+          return
+        }
+        omittedByStream[stream] += lineEnd + 1
+        retainedChunk = retainedChunk.slice(lineEnd + 1)
+        discardingPartialLine[stream] = false
+      }
+      outputByStream[stream] += retainedChunk
       // Parse each pipe independently: neither readiness nor log redaction may
       // splice together chunks from different OS streams.
       const parts = readinessParts(outputByStream[stream])
@@ -525,6 +539,7 @@ export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
         const kept = newline === -1 ? '' : tail.slice(newline + 1)
         omittedByStream[stream] += outputByStream[stream].length - kept.length
         outputByStream[stream] = kept
+        discardingPartialLine[stream] = newline === -1
       }
     }
     const readStdout = (chunk: Buffer | string): void => { read('stdout', chunk) }

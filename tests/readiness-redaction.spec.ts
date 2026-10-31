@@ -132,6 +132,27 @@ describe('DSH readiness failure diagnostics', () => {
     failedErr.end()
   })
 
+  it('drops continuation fragments of a truncated launch-token line from failed-start diagnostics', async () => {
+    // An oversized unterminated token line crosses the bounded log window.
+    // Older code dropped the prefix, then printed the next chunk's raw token
+    // suffix as a separate line with nothing for ?token= redaction to match.
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    const child = Object.assign(new EventEmitter(), { stdout, stderr }) as unknown as Parameters<typeof awaitReadiness>[0]
+    const pending = awaitReadiness(child)
+    stdout.write('dsh web: http://127.0.0.1:3080/?token=' + 'x'.repeat(33_000))
+    stderr.write('independent stderr diagnostic\n')
+    stdout.write('credential-tail-must-stay-hidden\nsafe next line\n')
+    child.emit('exit', 1)
+    const message = await pending.then(() => '', (error: unknown) => String(error))
+    expect(message).toContain('omitted')
+    expect(message).not.toContain('credential-tail-must-stay-hidden')
+    expect(message).toContain('safe next line')
+    expect(message).toContain('independent stderr diagnostic')
+    stdout.end()
+    stderr.end()
+  })
+
   it('detaches readiness listeners after success instead of retaining every later log', async () => {
     const stdout = new PassThrough()
     const stderr = new PassThrough()
