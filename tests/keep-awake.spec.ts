@@ -1,4 +1,5 @@
 /** The sleep inhibitor: which facility each platform holds, and how it fails. */
+import { spawn } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, relative } from 'node:path'
@@ -227,4 +228,64 @@ describe('the keep-awake row', () => {
     await new Promise(resolve => setImmediate(resolve))
     expect(warnings).toEqual([expect.stringMatching(/sleep inhibitor exited \(code 1, signal null\); the host may sleep again/)])
   })
+})
+
+
+describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecycle', () => {
+  it('acquires a real PowerShell hold and releases it after the watched process is force-killed', async () => {
+    // Earlier argv tests did not execute Add-Type / SetThreadExecutionState or
+    // Wait-Process. This Windows-only check exercises both on a disposable PID.
+    // It does not attempt to make the CI host actually enter sleep.
+    const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore', windowsHide: true,
+    })
+    owner.on('error', () => {}) // An absent executable is checked via owner.pid.
+    let holder: ReturnType<typeof spawn> | undefined
+    try {
+      if (owner.pid === undefined) throw new Error('could not spawn watched process')
+      const { command, args } = resolveInhibitor('win32')
+      const executable = findOnPath(command)
+      if (!executable) throw new Error('Windows PowerShell was not found on PATH')
+      const original = args.at(-1) ?? ''
+      const pidLookup = `Get-Process -Id ${process.pid} -ErrorAction Stop`
+      const wait = 'Wait-Process -InputObject $dsh -ErrorAction Stop'
+      if (!original.includes(pidLookup) || !original.includes(wait))
+        throw new Error('the Windows keep-awake command changed; update this native acceptance test')
+
+      // The production command uses process.pid. Only this disposable test
+      // substitutes its own target and emits a marker after the Win32 call has
+      // returned successfully (a zero result throws before this point).
+      const marker = 'LANYARD_HOLD_READY'
+      const script = original
+        .replace(pidLookup, `Get-Process -Id ${owner.pid} -ErrorAction Stop`)
+        .replace(wait, `[Console]::Out.WriteLine('${marker}'); ${wait}`)
+      const powerShell = spawn(executable, [...args.slice(0, -1), script], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      holder = powerShell
+      let output = ''
+      let errors = ''
+      let startError: Error | undefined
+      powerShell.on('error', error => { startError = error })
+      powerShell.stdout?.on('data', chunk => { output += String(chunk) })
+      powerShell.stderr?.on('data', chunk => { errors = (errors + String(chunk)).slice(-2_000) })
+
+      await vi.waitFor(() => {
+        if (startError) throw startError
+        if (powerShell.exitCode !== null || powerShell.signalCode !== null) {
+          throw new Error(`PowerShell exited before holding (code ${String(powerShell.exitCode)}): ${errors}`)
+        }
+        expect(output).toContain(marker)
+      }, { timeout: 20_000, interval: 50 })
+
+      expect(owner.kill('SIGKILL')).toBe(true)
+      await vi.waitFor(() => {
+        if (startError) throw startError
+        expect(powerShell.exitCode, errors).toBe(0)
+      }, { timeout: 7_000, interval: 50 })
+    } finally {
+      owner.kill('SIGKILL')
+      holder?.kill('SIGKILL')
+    }
+  }, 30_000)
 })

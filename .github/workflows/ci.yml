@@ -62,6 +62,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  windows-keep-awake:
+    # Execute the actual Win32 hold and forced-parent-exit cleanup, not just
+    # source/argv assertions made on Linux. This is not a physical sleep test.
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run tests/keep-awake.spec.ts
+
   e2e:
     # Installs the published dsh CLI and boots it with this plugin installed,
     # then drives the gate from the runner's own LAN address over real TLS.
@@ -110,7 +127,7 @@ jobs:
     # Main: independently download/install the artifact a user receives.
     # The PR checkout is GitHub's tested merge ref (github.sha), not head.sha.
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    needs: [check, e2e, browser]
+    needs: [check, e2e, browser, windows-keep-awake]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
