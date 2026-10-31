@@ -217,7 +217,9 @@ describe('the keep-awake row', () => {
     const { seam } = fakeSubprocess(Promise.resolve({ exitCode: 1, signal: null }), false)
     ctx = new Context()
     ctx.provide('subprocess', seam)
-    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/exited at once \(code 1, signal null\)/)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(process.platform === 'win32'
+      ? /exited before confirming the hold \(code 1, signal null\)/
+      : /exited at once \(code 1, signal null\)/)
   })
 
   it.skipIf(process.platform !== 'win32')('rejects a Windows assertion failure after the old 250 ms guess', async () => {
