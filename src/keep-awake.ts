@@ -54,7 +54,9 @@ const WINDOWS_HOLD = [
   // Wait-Process then watches that instance, not a potentially reused PID.
   `$dsh = Get-Process -Id ${process.pid} -ErrorAction Stop;`,
   'Add-Type -MemberDefinition \'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);\' -Name PowerState -Namespace DshKeepAwake | Out-Null;',
-  '$state = [DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001);',
+  // Windows PowerShell 5.1 parses 0x80000001 as a negative Int32; the P/Invoke
+  // expects UInt32. Use the positive decimal value with an explicit cast.
+  '$state = [DshKeepAwake.PowerState]::SetThreadExecutionState([uint32]2147483649);',
   'if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" };',
   'Wait-Process -InputObject $dsh -ErrorAction Stop',
 ].join(' ')

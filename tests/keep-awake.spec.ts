@@ -64,7 +64,13 @@ describe('resolveInhibitor', () => {
     expect(script).not.toContain('Start-Sleep')
     // Win32 returns zero on failure without throwing. Do not wait forever
     // under a false belief that the sleep assertion was acquired.
-    expect(script).toContain('$state = [DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001)')
+    // Windows PowerShell 5.1 treats 0x80000001 as negative. Check the
+    // unsigned argument and the actual ES_CONTINUOUS | ES_SYSTEM_REQUIRED bits.
+    expect(script).toContain('SetThreadExecutionState(uint esFlags)')
+    const flags = script.match(/SetThreadExecutionState\(\[uint32\](\d+)\)/)?.[1]
+    expect(flags).toBeDefined()
+    expect(BigInt(flags ?? '0')).toBe(0x80000001n)
+    expect(script).not.toContain('SetThreadExecutionState(0x80000001)')
     expect(script).toContain('if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" }')
     expect(script).not.toContain('::SetThreadExecutionState(0x80000001) | Out-Null')
     expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('$state ='))
