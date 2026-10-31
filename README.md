@@ -94,6 +94,8 @@ Ignore the `(LAN: …)` link on dsh's own `dsh web:` line: it is plain http and 
 | `--keep-awake` | hold the machine awake so sleep cannot cut the phone off mid-session |
 | `--port`, `--no-open`, `--trusted-host` | as shipped; `--port` stays this machine's own |
 
+On macOS, `--keep-awake` uses `caffeinate -i -w` to release its idle-sleep hold when the dsh process ends, even if dsh is killed without cleanup. On Linux and Windows, an abrupt kill can still leave the external sleep inhibitor running; check for a leftover inhibitor if the machine unexpectedly stays awake afterward. This does not prevent deliberate sleep or guarantee a closed laptop will keep serving.
+
 Needs dsh 0.1.5-rc.3 or later, and is tested against dsh's newest release. From 0.1.7, dsh checks that minimum itself and will neither install nor load the bundle below it, so `--host 0.0.0.0` is refused as usual. An older dsh does not check; one without its own browser sign-in (before 0.1.2) makes this fail loudly at startup and refuse every device on the network, rather than serve it without one.
 
 ## On the phone

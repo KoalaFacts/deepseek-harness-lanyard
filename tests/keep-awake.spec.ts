@@ -47,8 +47,10 @@ describe('resolveInhibitor', () => {
     expect(resolveInhibitor(platform).command).toBe(command)
   })
 
-  it('inhibits idle sleep only on macOS, leaving the display free to sleep', () => {
-    expect(resolveInhibitor('darwin').args).toEqual(['-i'])
+  it('inhibits macOS idle sleep only until the owning dsh process exits', () => {
+    // The PID watch also releases caffeinate after SIGKILL, when no disposer runs.
+    // -i must remain present so the screen can still sleep normally.
+    expect(resolveInhibitor('darwin').args).toEqual(['-i', '-w', String(process.pid)])
   })
 
   it('passes the Windows hold as argv, never as a shell string', () => {

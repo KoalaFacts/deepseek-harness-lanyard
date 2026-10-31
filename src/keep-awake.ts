@@ -4,9 +4,10 @@
  * paired LAN devices. The inhibitor is the platform's own facility —
  * `caffeinate -i` on macOS, `systemd-inhibit` on Linux, a PowerShell
  * `SetThreadExecutionState` holder on Windows — so the OS drops the lock when
- * that child exits, and disposal is what ends it. A dsh killed abruptly
- * (`SIGKILL`, power loss) runs no disposer and orphans the child, which holds
- * the inhibitor until it is killed or the machine restarts. An inhibitor that
+ * that child exits. On macOS `caffeinate -w` also watches the owning dsh PID:
+ * an abrupt dsh exit releases the idle-sleep assertion without a disposer.
+ * On Linux/Windows an abrupt kill can still orphan the inhibitor child until
+ * it is killed or the machine restarts. An inhibitor that
  * is not on PATH rejects activation: a deployment that asked to stay awake
  * must never silently serve without it. A child that dies later logs a warning
  * and serving continues.
@@ -99,7 +100,10 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
   switch (platform) {
     case 'darwin':
       // -i inhibits idle system sleep only; the display may still sleep.
-      return { command: 'caffeinate', args: ['-i'] }
+      // Stop the idle-sleep assertion when dsh exits even if SIGKILL prevents
+      // the Cordis disposer from terminating this helper. No utility argument:
+      // caffeinate's -w PID applies only when it owns the assertion itself.
+      return { command: 'caffeinate', args: ['-i', '-w', String(process.pid)] }
     case 'win32':
       return { command: 'powershell', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_HOLD] }
     default:
