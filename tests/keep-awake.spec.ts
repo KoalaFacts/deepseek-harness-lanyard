@@ -332,13 +332,17 @@ describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecyc
     let output = ''
     let errors = ''
     let launchError: Error | undefined
+    let closed = false
     holder.on('error', error => { launchError = error })
+    holder.on('close', () => { closed = true })
     holder.stdout?.on('data', data => { output += String(data) })
     holder.stderr?.on('data', data => { errors = (errors + String(data)).slice(-4_000) })
     try {
+      // 'exit' can precede final pipe delivery; wait for close before
+      // asserting the injected error and absence of a success marker.
       await vi.waitFor(() => {
         if (launchError) throw launchError
-        expect(holder.exitCode).not.toBeNull()
+        expect(closed).toBe(true)
       }, { timeout: 15_000, interval: 50 })
       expect(holder.exitCode).not.toBe(0)
       expect(errors).toContain('lanyard synthetic helper failure')
