@@ -102,6 +102,8 @@ Needs dsh 0.1.5-rc.3 or later, and is tested against dsh's newest release. From 
 
 Point the camera at the QR code in the terminal. That is the whole pairing step — the link carries dsh's launch token, 43 random characters nobody should be typing on a phone keyboard. (The link is printed too, if you would rather send it to yourself.)
 
+Lanyard prints a pairing link or QR code only when its TLS listener supplies a complete SHA-256 certificate fingerprint. If that identity is missing or malformed, it logs an error and prints no token-bearing link; do not construct one manually.
+
 The first time, the phone warns that the certificate is not trusted: it is self-signed, made on your machine. Open the certificate's details and compare its SHA-256 fingerprint with the one on the startup line before you accept — all of it, or at least the first and last eight pairs, since a look-alike matching only a few is cheap to make. That comparison is the only check a self-signed certificate has, so make it every time the phone asks — and if the two ever differ, stop. Nothing is sent before you accept, not even the token in the link.
 
 Opening the link signs the phone in: dsh swaps the token for a session cookie and redirects to the plain address, so the token leaves the address bar at once. From then on `https://192.168.1.5:3443` just works, across restarts, until the session expires — 30 days by default. Add it to your home screen if you want it to open like an app.

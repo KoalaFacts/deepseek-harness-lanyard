@@ -10,6 +10,8 @@ import * as Pairing from '../src/pairing.ts'
 
 /** A launch token of the length upstream mints: 32 random bytes, base64url. */
 const LAUNCH_TOKEN = 'nWXNEOWudT5Vfz4m2-h1bY2lU-pBvOB2oHCufgtaH2E'
+/** The SHA-256 identity a phone must compare before opening the token link. */
+const CERT_FINGERPRINT = '7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3'
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
@@ -276,21 +278,43 @@ describe('the pairing row', () => {
     expect(errors).toEqual([expect.stringMatching(/^lanyard: stop dsh now .*without lanyard's TLS carrier.*in the clear/)])
   })
 
+  it('refuses to print a token link when the TLS carrier has no certificate fingerprint', async () => {
+    const errors: string[] = []
+    const printed = await mount({}, {
+      server: { scheme: 'https', port: 3080, networkPort: 3443 },
+      onError: line => { errors.push(line) },
+    })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/stop dsh now.*no valid SHA-256 certificate fingerprint.*no pairing link/)])
+  })
+
+  it.each(['', 'AB:CD:EF', 'not-a-fingerprint'])(
+    'refuses a malformed TLS SHA-256 fingerprint (%s) instead of announcing a token', async (invalid) => {
+      const errors: string[] = []
+      const printed = await mount({}, {
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: invalid },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toEqual([])
+      expect(errors).toEqual([expect.stringMatching(/no valid SHA-256 certificate fingerprint.*no pairing link/)])
+    },
+  )
+
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
     // `port` is this machine's plaintext listener, bound to loopback; a link
     // naming it sends the phone to a port nothing on the network answers.
-    const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' } })
+    const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT } })
     expect(printed).toEqual([
       'lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token',
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
-      'lanyard: the phone should show certificate SHA-256 AB:CD:EF — if it ever shows another, do not continue',
+      `lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`,
     ])
   })
 
   it('pairs over the likeliest address, and offers a link for each other one a phone could share', async () => {
     const printed = await mount({}, {
       lanAddresses: ['10.8.0.2', '192.168.1.5'],
-      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
     })
     expect(printed.slice(1, 3)).toEqual([
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
@@ -304,7 +328,7 @@ describe('the pairing row', () => {
     vi.spyOn(Pairing.internals, 'networkInterfaces').mockReturnValue(interfaces({ docker0: '172.17.0.1', virbr0: '192.168.122.1' }))
     const printed = await mount({}, {
       lanAddresses: ['172.17.0.1', '192.168.122.1'],
-      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
     })
     expect(printed).toEqual([
       'lanyard: no network a phone can join — 192.168.122.1, 172.17.0.1 are container or virtual-machine bridges inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh',

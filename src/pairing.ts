@@ -386,6 +386,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       console.log(`lanyard: no network a phone can join — ${ranked.join(', ')} ${ranked.length === 1 ? 'is a container or virtual-machine bridge' : 'are container or virtual-machine bridges'} inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh`)
       return
     }
+    // The certificate is self-signed. Without a complete fingerprint there is
+    // no identity a phone can verify before presenting the launch token.
+    // Refuse to advertise a pairing URL if the TLS carrier contract drifts.
+    if (certificateFingerprint === undefined
+      || !/^(?:[0-9a-f]{2}:){31}[0-9a-f]{2}$/i.test(certificateFingerprint)) {
+      ctx.logger.error(
+        'lanyard: stop dsh now — the TLS carrier supplied no valid SHA-256 certificate fingerprint; '
+        + 'no pairing link or QR code is printed because the phone cannot verify the self-signed certificate',
+      )
+      return
+    }
     const reachable = networkPort ?? port
     const link = pairingLink(issuer, scheme, reachable, lanAddress)
     if (link === undefined) return
@@ -404,9 +415,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
     // The certificate is self-signed, so the phone's warning is the only check
     // there is; this is what makes it a check rather than a formality.
-    if (certificateFingerprint !== undefined) {
-      console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
-    }
+    console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
     const code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))
