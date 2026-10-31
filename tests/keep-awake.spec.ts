@@ -253,6 +253,59 @@ describe('the keep-awake row', () => {
     expect(terminated).toBe(true)
   })
 
+  it('waits for failed-start helper termination before rejecting activation', async () => {
+    // A late/failed inhibitor may already hold the machine awake. The old
+    // path called terminate() but rejected immediately, abandoning cleanup.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let terminated = false
+    let cleanupStarted = false
+    let release: ((exited: boolean) => void) | undefined
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EACCES')),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
+        terminate: () => { terminated = true },
+        waitForExit: (signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal)
+          cleanupStarted = true
+          return new Promise<boolean>(resolve => { release = resolve })
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const activation = ctx.plugin(KeepAwake, { enabled: true }).await()
+    let settled = false
+    void activation.then(() => { settled = true }, () => { settled = true })
+    await vi.waitFor(() => { expect(cleanupStarted).toBe(true) }, { timeout: 1_000, interval: 10 })
+    expect(terminated).toBe(true)
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    release?.(true)
+    await expect(activation).rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
+  })
+
+  it('preserves the startup failure if an unconfirmed inhibitor cannot be reaped', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    const warnings: string[] = []
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EAGAIN')),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
+        terminate: () => {},
+        waitForExit: async () => false,
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => {
+      warnings.push(String(message))
+    }) as never)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
+      .rejects.toThrow(/could not start \(Error: spawn EAGAIN\)/)
+    expect(warnings).toEqual([expect.stringMatching(/orphan sleep inhibitor may remain/)])
+  })
+
   it('warns, and keeps serving, when a running inhibitor dies later', async () => {
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
     let exit = (_outcome: { exitCode: number; signal: string | null }): void => {}

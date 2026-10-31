@@ -239,6 +239,21 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     stdio: { stdin: 'ignore', stdout: DISCARD_OUTPUT, stderr: DISCARD_OUTPUT },
     graceMs: TERMINATE_GRACE_MS,
   })
+  // The startup gate must not abandon an asynchronously terminating child.
+  // If confirmation fails after the inhibitor acquired a hold, merely issuing
+  // terminate() can leave the host awake while the load has already failed.
+  // Bound cleanup just like the normal disposer, without hiding the real
+  // startup failure when the helper is unkillable or its seam rejects.
+  const releaseUnconfirmedHold = async (): Promise<void> => {
+    try {
+      held.terminate()
+      if (!await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))) {
+        ctx.logger.warn(`lanyard-keep-awake: unconfirmed ${command} did not exit after termination; an orphan sleep inhibitor may remain`)
+      }
+    } catch (cleanupError) {
+      ctx.logger.warn(`lanyard-keep-awake: could not confirm cleanup of unconfirmed ${command} (${String(cleanupError)})`)
+    }
+  }
   // Unlike short-lived Unix startup checks, Windows must confirm the actual
   // Win32 hold after PowerShell's potentially slow Add-Type initialization.
   let early: string | undefined
@@ -257,11 +272,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       confirmation.abort()
     }
   } catch (error) {
-    held.terminate()
+    await releaseUnconfirmedHold()
     throw new Error(`lanyard-keep-awake: failed to verify ${command} startup (${String(error)})`)
   }
   if (early !== undefined) {
-    held.terminate()
+    await releaseUnconfirmedHold()
     throw new Error(`lanyard-keep-awake: ${command} ${early}, so --keep-awake cannot hold this host awake`)
   }
   let disposed = false
