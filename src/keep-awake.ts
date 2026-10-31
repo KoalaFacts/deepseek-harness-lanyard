@@ -14,7 +14,7 @@
  */
 
 import { accessSync, constants, statSync } from 'node:fs'
-import { delimiter, resolve } from 'node:path'
+import { delimiter, isAbsolute, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -166,8 +166,9 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
 
 /**
  * Where an executable name resolves on PATH, the way the platform's spawn
- * would find it: each PATH entry in order, restricted to native `.exe`
- * programs on Windows because the subprocess seam does not invoke a shell.
+ * would find it, except relative/empty PATH entries are ignored: resolving
+ * those against the working directory could launch a project-controlled shim.
+ * Windows uses only native `.exe` files because the seam has no shell.
  * @param command - a bare executable name.
  * @param path - the PATH value to search.
  * @param extensions - candidate suffixes; `['']` outside Windows.
@@ -175,7 +176,9 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
  */
 export function findOnPath(command: string, path = process.env.PATH ?? '', extensions = pathExtensions()): string | undefined {
   for (const dir of path.split(delimiter)) {
-    if (dir === '') continue
+    // An entry such as `.` or `bin` is relative to the working directory,
+    // which can be a project checkout. Never run a sleep-inhibitor helper from it.
+    if (!isAbsolute(dir)) continue
     for (const extension of extensions) {
       const candidate = resolve(dir, `${command}${extension}`)
       try {

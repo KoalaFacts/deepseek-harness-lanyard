@@ -122,13 +122,22 @@ describe.skipIf(process.platform === 'win32')('findOnPath', () => {
     expect(findOnPath('inhibitor', dir, [''])).toBeUndefined()
   })
 
-  it('resolves relative PATH entries to absolute executable paths', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'lanyard-relative-path-'))
-    const executable = join(dir, 'inhibitor')
-    writeFileSync(executable, '#!/bin/sh\n')
-    chmodSync(executable, 0o755)
-    const relativeDir = relative(process.cwd(), dir)
-    expect(findOnPath('inhibitor', ['', relativeDir].join(delimiter), [''])).toBe(executable)
+  it('rejects working-directory PATH shims and chooses a later absolute helper', () => {
+    const relativeTarget = mkdtempSync(join(tmpdir(), 'lanyard-relative-path-'))
+    const relativeExecutable = join(relativeTarget, 'inhibitor')
+    writeFileSync(relativeExecutable, '#!/bin/sh\n')
+    chmodSync(relativeExecutable, 0o755)
+    const relativeDir = relative(process.cwd(), relativeTarget)
+    expect(relativeDir).not.toBe('')
+    // Mutation control: removing the isAbsolute guard selects this shim,
+    // so both expectations must fail against the previous implementation.
+    expect(findOnPath('inhibitor', ['', relativeDir].join(delimiter), [''])).toBeUndefined()
+    const trustedDir = mkdtempSync(join(tmpdir(), 'lanyard-absolute-path-'))
+    const trustedExecutable = join(trustedDir, 'inhibitor')
+    writeFileSync(trustedExecutable, '#!/bin/sh\n')
+    chmodSync(trustedExecutable, 0o755)
+    expect(findOnPath('inhibitor', [relativeDir, trustedDir].join(delimiter), ['']))
+      .toBe(trustedExecutable)
   })
 
   it('tries the explicitly supplied executable extensions in order', () => {
