@@ -300,6 +300,18 @@ describe('the pairing row', () => {
     },
   )
 
+  it.each([undefined, 0, -1, 65_536, 3443.5, Number.NaN])(
+    'refuses pairing when the TLS carrier has no valid LAN port (%s)', async (networkPort) => {
+      const errors: string[] = []
+      const printed = await mount({}, {
+        server: { scheme: 'https', port: 3080, networkPort, certificateFingerprint: CERT_FINGERPRINT },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toEqual([])
+      expect(errors).toEqual([expect.stringMatching(/stop dsh now.*no valid networkPort.*no pairing link/)])
+    },
+  )
+
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
     // `port` is this machine's plaintext listener, bound to loopback; a link
     // naming it sends the phone to a port nothing on the network answers.

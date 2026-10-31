@@ -368,7 +368,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // somewhere a phone can reach; the gated carrier reports the TLS port as
     // `networkPort`. A shipped carrier has neither that nor a scheme, and is
     // refused just below.
-    const { scheme = 'http', port, networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
+    const { scheme = 'http', networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
     // A LAN address with a plaintext carrier means lanyard's is not the one
     // serving — say, upstream renamed the row this bundle disables — so the
     // network is meeting a carrier without this gate, over plaintext. A link
@@ -397,7 +397,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       )
       return
     }
-    const reachable = networkPort ?? port
+    // 'port' is the desktop's plaintext loopback listener, never a fallback
+    // for the LAN TLS front. If the carrier no longer reports a usable
+    // networkPort, advertising a token link at 'port' would misdirect pairing.
+    if (networkPort === undefined || !Number.isSafeInteger(networkPort)
+      || networkPort < 1 || networkPort > 65_535) {
+      ctx.logger.error(
+        'lanyard: stop dsh now — the TLS carrier supplied no valid networkPort for its LAN listener; '
+        + 'no pairing link or QR code is printed',
+      )
+      return
+    }
+    const reachable = networkPort
     const link = pairingLink(issuer, scheme, reachable, lanAddress)
     if (link === undefined) return
     // The shipped line's `(LAN: …)` link pairs the plaintext loopback port with
