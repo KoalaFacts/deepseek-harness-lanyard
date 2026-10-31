@@ -1,7 +1,7 @@
 /** The sleep inhibitor: which facility each platform holds, and how it fails. */
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, relative } from 'node:path'
 import { describe, expect, it, afterEach, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import * as KeepAwake from '../src/keep-awake.ts'
@@ -109,6 +109,15 @@ describe.skipIf(process.platform === 'win32')('findOnPath', () => {
     expect(findOnPath('inhibitor', dir, [''])).toBeUndefined()
   })
 
+  it('resolves relative PATH entries to absolute executable paths', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lanyard-relative-path-'))
+    const executable = join(dir, 'inhibitor')
+    writeFileSync(executable, '#!/bin/sh\n')
+    chmodSync(executable, 0o755)
+    const relativeDir = relative(process.cwd(), dir)
+    expect(findOnPath('inhibitor', ['', relativeDir].join(delimiter), [''])).toBe(executable)
+  })
+
   it('tries each extension it is given, as Windows resolves PATHEXT', () => {
     const path = pathWith({ 'inhibitor.exe': 0o755 })
     expect(findOnPath('inhibitor', path, ['', '.com', '.exe'])).toMatch(/inhibitor\.exe$/)
@@ -124,14 +133,18 @@ describe('the keep-awake row', () => {
     expect(spawned).toEqual([])
   })
 
-  it('holds the inhibitor while it lives and releases it on disposal', async () => {
-    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+  it('holds only the checked inhibitor and helper paths, releasing them on disposal', async () => {
+    vi.spyOn(internals, 'findOnPath').mockImplementation(command => `/trusted/${command}`)
     const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await ctx.plugin(KeepAwake, { enabled: true }).await()
     expect(spawned).toHaveLength(1)
-    expect(spawned[0]?.argv[0]).toBe(resolveInhibitor(process.platform).command)
+    expect(spawned[0]?.argv[0]).toBe(`/trusted/${resolveInhibitor(process.platform).command}`)
+    if (process.platform === 'linux') {
+      expect(spawned[0]?.argv).toContain('/trusted/tail')
+      expect(spawned[0]?.argv).not.toContain('tail')
+    }
     expect(spawned[0]?.terminated).toBe(false)
     await ctx.fiber.dispose()
     ctx = undefined

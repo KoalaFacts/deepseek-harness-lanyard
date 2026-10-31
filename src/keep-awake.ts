@@ -14,7 +14,7 @@
  */
 
 import { accessSync, constants, statSync } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import { delimiter, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -131,13 +131,13 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
  * @param command - a bare executable name.
  * @param path - the PATH value to search.
  * @param extensions - candidate suffixes; `['']` outside Windows.
- * @returns the first match, or undefined when nothing on PATH answers to it.
+ * @returns the first match as an absolute path, or undefined when no PATH entry matches.
  */
 export function findOnPath(command: string, path = process.env.PATH ?? '', extensions = pathExtensions()): string | undefined {
   for (const dir of path.split(delimiter)) {
     if (dir === '') continue
     for (const extension of extensions) {
-      const candidate = join(dir, `${command}${extension}`)
+      const candidate = resolve(dir, `${command}${extension}`)
       try {
         accessSync(candidate, constants.X_OK)
         if (statSync(candidate).isFile()) return candidate
@@ -177,13 +177,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Catch a missing helper before spawning the inhibitor, not as an opaque
   // exit status from systemd-inhibit after startup has already begun.
   const requiredExecutables = process.platform === 'linux' ? [command, 'tail'] : [command]
+  // Pass the checked absolute paths to spawn. A bare command would trigger a
+  // *second* PATH lookup, potentially executing a same-named file from cwd
+  // when PATH has an empty/relative segment before the checked executable.
+  const checkedPaths = new Map<string, string>()
   for (const executable of requiredExecutables) {
-    if (internals.findOnPath(executable) === undefined) {
+    const checkedPath = internals.findOnPath(executable)
+    if (checkedPath === undefined) {
       throw new Error(`lanyard-keep-awake: ${executable} is not on PATH, so --keep-awake cannot hold this host awake`)
     }
+    checkedPaths.set(executable, checkedPath)
   }
+  const pinnedArgs = process.platform === 'linux'
+    ? args.map(arg => arg === 'tail' ? checkedPaths.get('tail')! : arg)
+    : args
   const held = ctx.subprocess.spawn({
-    argv: [command, ...args],
+    argv: [checkedPaths.get(command)!, ...pinnedArgs],
     cwd: process.cwd(),
     stdio: { stdin: 'ignore', stdout: DISCARD_OUTPUT, stderr: DISCARD_OUTPUT },
     graceMs: TERMINATE_GRACE_MS,
