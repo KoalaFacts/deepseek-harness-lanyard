@@ -339,6 +339,60 @@ describe('the keep-awake row', () => {
     await expect(activation).rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
   })
 
+
+  it('observes failed-start helper exit even when termination signals ESRCH', async () => {
+    // The older failed-start cleanup caught terminate() and skipped the exit
+    // check. An already-gone helper should not produce a false orphan warning.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let observed = false
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EACCES')),
+        collected: { stdout: { readFrom: () => ({ text: '', lossy: false }) } },
+        terminate: () => { throw new Error('ESRCH') },
+        waitForExit: async (signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal)
+          observed = true
+          return true
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
+      .rejects.toThrow(/could not start \\(Error: spawn EACCES\\)/)
+    expect(observed).toBe(true)
+    expect(warnings).toEqual([])
+  })
+
+  it('preserves the start failure and warns if signal and exit observation both fail', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let observed = false
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EAGAIN')),
+        collected: { stdout: { readFrom: () => ({ text: '', lossy: false }) } },
+        terminate: () => { throw new Error('EPERM') },
+        waitForExit: async (_signal: AbortSignal) => {
+          observed = true
+          throw new Error('wait failed')
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
+      .rejects.toThrow(/could not start \\(Error: spawn EAGAIN\\)/)
+    expect(observed).toBe(true)
+    expect(warnings).toEqual([
+      expect.stringMatching(/could not confirm cleanup.*wait failed.*terminate failed.*EPERM.*orphan sleep inhibitor may remain/),
+    ])
+  })
+
   it('preserves the startup failure if an unconfirmed inhibitor cannot be reaped', async () => {
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
     const warnings: string[] = []

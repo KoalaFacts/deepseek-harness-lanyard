@@ -245,13 +245,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Bound cleanup just like the normal disposer, without hiding the real
   // startup failure when the helper is unkillable or its seam rejects.
   const releaseUnconfirmedHold = async (): Promise<void> => {
+    // A failed signal may mean the helper already exited (ESRCH), or that it
+    // is still holding the host awake (EPERM). Observe exit in either case.
+    let terminationError: unknown
     try {
       held.terminate()
+    } catch (error) {
+      terminationError = error
+    }
+    const terminationDetail = terminationError === undefined
+      ? '' : `; terminate failed (${String(terminationError)})`
+    try {
       if (!await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))) {
-        ctx.logger.warn(`lanyard-keep-awake: unconfirmed ${command} did not exit after termination; an orphan sleep inhibitor may remain`)
+        ctx.logger.warn(`lanyard-keep-awake: unconfirmed ${command} exit was not observed${terminationDetail}; an orphan sleep inhibitor may remain`)
       }
     } catch (cleanupError) {
-      ctx.logger.warn(`lanyard-keep-awake: could not confirm cleanup of unconfirmed ${command} (${String(cleanupError)})`)
+      ctx.logger.warn(`lanyard-keep-awake: could not confirm cleanup of unconfirmed ${command} (${String(cleanupError)}${terminationDetail}); an orphan sleep inhibitor may remain`)
     }
   }
   // Unlike short-lived Unix startup checks, Windows must confirm the actual
