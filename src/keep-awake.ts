@@ -172,8 +172,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The common failure — a platform without the inhibitor — is decided before
   // anything runs, so it gets a message naming the fix. The confirmation
   // window below catches every other way the inhibitor fails to take hold.
-  if (internals.findOnPath(command) === undefined) {
-    throw new Error(`lanyard-keep-awake: ${command} is not on PATH, so --keep-awake cannot hold this host awake`)
+  // On Linux systemd-inhibit launches GNU tail as its PID-bound watcher.
+  // Catch a missing helper before spawning the inhibitor, not as an opaque
+  // exit status from systemd-inhibit after startup has already begun.
+  const requiredExecutables = process.platform === 'linux' ? [command, 'tail'] : [command]
+  for (const executable of requiredExecutables) {
+    if (internals.findOnPath(executable) === undefined) {
+      throw new Error(`lanyard-keep-awake: ${executable} is not on PATH, so --keep-awake cannot hold this host awake`)
+    }
   }
   const held = ctx.subprocess.spawn({
     argv: [command, ...args],

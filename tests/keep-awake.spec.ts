@@ -143,6 +143,16 @@ describe('the keep-awake row', () => {
     expect(spawned).toEqual([])
   })
 
+  it.skipIf(process.platform !== 'linux')('rejects when GNU tail is missing before spawning systemd-inhibit', async () => {
+    const found = vi.spyOn(internals, 'findOnPath').mockImplementation(command => command === 'tail' ? undefined : '/usr/bin/inhibitor')
+    const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/tail is not on PATH/)
+    expect(found.mock.calls.map(([command]) => command)).toEqual(['systemd-inhibit', 'tail'])
+    expect(spawned).toEqual([])
+  })
+
   it('rejects its load when the inhibitor cannot start, though it was on PATH', async () => {
     // A missing interpreter, a permission lost since the check, EAGAIN: the
     // seam rejects `done` within a tick, before the load has resolved.
