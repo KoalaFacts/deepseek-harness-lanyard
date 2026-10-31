@@ -184,7 +184,7 @@ describe('the keep-awake row', () => {
       spawn: () => ({
         done: new Promise(() => {}),
         collected: { stdout: { readFrom: () => ({
-          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\\n' : '', lossy: false,
+          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\n' : '', lossy: false,
         }) } },
         terminate: () => { throw new Error('ESRCH') },
         waitForExit: async (signal: AbortSignal) => {
@@ -211,7 +211,7 @@ describe('the keep-awake row', () => {
       spawn: () => ({
         done: new Promise(() => {}),
         collected: { stdout: { readFrom: () => ({
-          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\\n' : '', lossy: false,
+          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\n' : '', lossy: false,
         }) } },
         terminate: () => { throw new Error('EPERM') },
         waitForExit: async (_signal: AbortSignal) => { throw new Error('wait failed') },
