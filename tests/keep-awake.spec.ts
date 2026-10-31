@@ -81,8 +81,8 @@ describe('resolveInhibitor', () => {
     expect(script).toContain('if ($null -eq $state -or $state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" }')
     expect(script).not.toContain('::SetThreadExecutionState(0x80000001) | Out-Null')
     expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('$state ='))
-    expect(script.indexOf('$state =')).toBeLessThan(script.indexOf('if ($state -eq 0)'))
-    expect(script.indexOf('if ($state -eq 0)')).toBeLessThan(script.indexOf('Wait-Process -InputObject'))
+    expect(script.indexOf('$state =')).toBeLessThan(script.indexOf('if ($null -eq $state -or $state -eq 0)'))
+    expect(script.indexOf('if ($null -eq $state -or $state -eq 0)')).toBeLessThan(script.indexOf('Wait-Process -InputObject'))
   })
 
   it('blocks sleep on Linux and watches the owning dsh PID rather than sleeping forever', () => {
