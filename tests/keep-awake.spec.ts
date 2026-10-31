@@ -362,7 +362,7 @@ describe('the keep-awake row', () => {
     const warnings: string[] = []
     vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
     await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
-      .rejects.toThrow(/could not start \\(Error: spawn EACCES\\)/)
+      .rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
     expect(observed).toBe(true)
     expect(warnings).toEqual([])
   })
@@ -386,7 +386,7 @@ describe('the keep-awake row', () => {
     const warnings: string[] = []
     vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
     await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
-      .rejects.toThrow(/could not start \\(Error: spawn EAGAIN\\)/)
+      .rejects.toThrow(/could not start \(Error: spawn EAGAIN\)/)
     expect(observed).toBe(true)
     expect(warnings).toEqual([
       expect.stringMatching(/could not confirm cleanup.*wait failed.*terminate failed.*EPERM.*orphan sleep inhibitor may remain/),
