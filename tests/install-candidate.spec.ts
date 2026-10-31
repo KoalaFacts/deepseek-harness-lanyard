@@ -114,7 +114,7 @@ it('the main candidate consumer downloads this run artifact only after all main 
     jobs: { 'candidate-consumer': { needs: string[]; if: string; steps: Array<{ uses?: string; with?: { name?: string; 'persist-credentials'?: boolean }; env?: Record<string, string>; run?: string }> } }
   }
   const job = workflow.jobs['candidate-consumer']
-  expect(job.needs).toEqual(['check', 'e2e', 'browser'])
+  expect(job.needs).toEqual(['check', 'e2e', 'browser', 'windows-keep-awake'])
   const checkout = job.steps.find(step => step.uses?.startsWith('actions/checkout@'))
   expect(checkout?.with?.['persist-credentials']).toBe(false)
   expect(job.if).toContain("github.ref == 'refs/heads/main'")
