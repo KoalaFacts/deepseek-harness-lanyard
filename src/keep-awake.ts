@@ -4,9 +4,9 @@
  * paired LAN devices. The inhibitor is the platform's own facility —
  * `caffeinate -i -w` on macOS, `systemd-inhibit` with a GNU `tail --pid`
  * watcher on Linux, and a PowerShell `SetThreadExecutionState` holder on
- * Windows. On macOS and Linux, the watcher drops the idle-sleep assertion
- * after an abrupt dsh exit even without a disposer. On Windows an abrupt
- * kill can still orphan the inhibitor child until it dies or is terminated. An inhibitor that
+ * Windows. All three platform helpers now watch the dsh process lifetime,
+ * so their idle-sleep assertions can be released after an abrupt dsh exit
+ * even when the Cordis disposer cannot run. An inhibitor that
  * is not on PATH rejects activation: a deployment that asked to stay awake
  * must never silently serve without it. A child that dies later logs a warning
  * and serving continues.
@@ -50,9 +50,12 @@ export interface InhibitorCommand {
  * release call exists or is needed.
  */
 const WINDOWS_HOLD = [
+  // Capture the original process object before taking a sleep assertion.
+  // Wait-Process then watches that instance, not a potentially reused PID.
+  `$dsh = Get-Process -Id ${process.pid} -ErrorAction Stop;`,
   'Add-Type -MemberDefinition \'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);\' -Name PowerState -Namespace DshKeepAwake | Out-Null;',
   '[DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001) | Out-Null;',
-  'while ($true) { Start-Sleep -Seconds 3600 }',
+  'Wait-Process -InputObject $dsh -ErrorAction Stop',
 ].join(' ')
 
 /** SIGTERM-to-SIGKILL window the seam escalates through at teardown. */

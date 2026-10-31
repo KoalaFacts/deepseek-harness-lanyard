@@ -56,7 +56,14 @@ describe('resolveInhibitor', () => {
   it('passes the Windows hold as argv, never as a shell string', () => {
     const { args } = resolveInhibitor('win32')
     expect(args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-Command'])
-    expect(args.at(-1)).toContain('SetThreadExecutionState')
+    const script = args.at(-1) ?? ''
+    expect(script).toContain('SetThreadExecutionState')
+    // The holder must not survive an abrupt parent exit as a forever-sleeping orphan.
+    expect(script).toContain(`Get-Process -Id ${process.pid} -ErrorAction Stop`)
+    expect(script).toContain('Wait-Process -InputObject $dsh -ErrorAction Stop')
+    expect(script).not.toContain('Start-Sleep')
+    expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('::SetThreadExecutionState'))
+    expect(script.indexOf('::SetThreadExecutionState')).toBeLessThan(script.indexOf('Wait-Process -InputObject'))
   })
 
   it('blocks sleep on Linux and watches the owning dsh PID rather than sleeping forever', () => {
