@@ -63,6 +63,8 @@ describe('resolveInhibitor', () => {
     expect(args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-Command'])
     const script = args.at(-1) ?? ''
     expect(script).toContain('SetThreadExecutionState')
+    expect(script).toContain("$ErrorActionPreference = 'Stop';")
+    expect(script.indexOf('$ErrorActionPreference')).toBeLessThan(script.indexOf('Add-Type -MemberDefinition'))
     // The holder must not survive an abrupt parent exit as a forever-sleeping orphan.
     expect(script).toContain(`Get-Process -Id ${process.pid} -ErrorAction Stop`)
     expect(script).toContain('Wait-Process -InputObject $dsh -ErrorAction Stop')
@@ -76,7 +78,7 @@ describe('resolveInhibitor', () => {
     expect(flags).toBeDefined()
     expect(BigInt(flags ?? '0')).toBe(0x80000001n)
     expect(script).not.toContain('SetThreadExecutionState(0x80000001)')
-    expect(script).toContain('if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" }')
+    expect(script).toContain('if ($null -eq $state -or $state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" }')
     expect(script).not.toContain('::SetThreadExecutionState(0x80000001) | Out-Null')
     expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('$state ='))
     expect(script.indexOf('$state =')).toBeLessThan(script.indexOf('if ($state -eq 0)'))
@@ -312,4 +314,37 @@ describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecyc
       holder?.kill('SIGKILL')
     }
   }, 30_000)
+
+  it('rejects a non-terminating PowerShell error before printing the ready marker', async () => {
+    // The Win32 assertion itself is valid; inject an error AFTER that call.
+    // With PowerShell's default Continue it would emit READY anyway and wait
+    // forever for this test process. Startup must fail closed instead.
+    const { command, args } = resolveInhibitor('win32')
+    const executable = findOnPath(command)
+    if (!executable) throw new Error('Windows PowerShell was not found on PATH')
+    const original = args.at(-1) ?? ''
+    const ready = "[Console]::Out.WriteLine('LANYARD_HOLD_READY')"
+    if (!original.includes(ready)) throw new Error('Windows success marker changed')
+    const script = original.replace(ready, `Write-Error 'lanyard synthetic helper failure'; ${ready}`)
+    const holder = spawn(executable, [...args.slice(0, -1), script], {
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+    let output = ''
+    let errors = ''
+    let launchError: Error | undefined
+    holder.on('error', error => { launchError = error })
+    holder.stdout?.on('data', data => { output += String(data) })
+    holder.stderr?.on('data', data => { errors = (errors + String(data)).slice(-4_000) })
+    try {
+      await vi.waitFor(() => {
+        if (launchError) throw launchError
+        expect(holder.exitCode).not.toBeNull()
+      }, { timeout: 15_000, interval: 50 })
+      expect(holder.exitCode).not.toBe(0)
+      expect(errors).toContain('lanyard synthetic helper failure')
+      expect(output).not.toContain('LANYARD_HOLD_READY')
+    } finally {
+      holder.kill('SIGKILL')
+    }
+  }, 20_000)
 })

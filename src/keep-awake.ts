@@ -52,6 +52,9 @@ export interface InhibitorCommand {
 const WINDOWS_READY = 'LANYARD_HOLD_READY'
 
 const WINDOWS_HOLD = [
+  // PowerShell's default Continue permits non-terminating Add-Type failures.
+  // Never print a success marker after failed helper initialization.
+  "$ErrorActionPreference = 'Stop';",
   // Capture the original process object before taking a sleep assertion.
   // Wait-Process then watches that instance, not a potentially reused PID.
   `$dsh = Get-Process -Id ${process.pid} -ErrorAction Stop;`,
@@ -59,7 +62,7 @@ const WINDOWS_HOLD = [
   // Windows PowerShell 5.1 parses 0x80000001 as a negative Int32; the P/Invoke
   // expects UInt32. Use the positive decimal value with an explicit cast.
   '$state = [DshKeepAwake.PowerState]::SetThreadExecutionState([uint32]2147483649);',
-  'if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" };',
+  'if ($null -eq $state -or $state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" };',
   // Acknowledge only after Win32 accepts the actual sleep assertion.
   ` [Console]::Out.WriteLine('${WINDOWS_READY}');`,
   'Wait-Process -InputObject $dsh -ErrorAction Stop',
