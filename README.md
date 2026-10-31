@@ -35,7 +35,20 @@ pnpm pack --pack-destination .
 dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz"
 ```
 
-The tarball filename above corresponds to this checkout's current `package.json` version (`0.2.0`); if that version changes, use the `.tgz` filename printed by `pnpm pack`. On Windows PowerShell, give `dsh plugin ... add` the absolute path to the generated `.tgz` instead of the POSIX `$PWD/...` expression. Keep `git rev-parse HEAD` with your test results so the installed source is identifiable.
+The tarball filename above corresponds to this checkout's current `package.json` version (`0.2.0`); if that version changes, use the `.tgz` filename printed by `pnpm pack`. Keep `git rev-parse HEAD` with your test results so the installed source is identifiable.
+
+On **Windows PowerShell**, run the same clone, frozen install, check and `pnpm pack` steps above, but replace only the final `dsh plugin ... add` line with this command sequence. It reads the actual package version rather than guessing a filename or accidentally selecting an older tarball:
+
+```powershell
+$version = (Get-Content -LiteralPath .\package.json -Raw | ConvertFrom-Json).version
+$tarball = Join-Path (Get-Location) "koalafacts-deepseek-harness-lanyard-$version.tgz"
+if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) {
+  throw "Missing local tarball: $tarball. Run pnpm pack first."
+}
+dsh plugin --profile web add $tarball
+```
+
+This is a local tarball install on the DSH computer, not an npm registry release or a change to LAN binding.
 
 This **does not publish anything to npm** or open the LAN automatically. The existing real-DSH e2e installs this same kind of local tarball into a clean profile; that is not a substitute for an official npm release or a physical phone test. Once installed, start dsh with an explicit trusted-LAN address as described below, and follow the TLS certificate/fingerprint pairing instructions.
 
@@ -80,6 +93,8 @@ Ignore the `(LAN: …)` link on dsh's own `dsh web:` line: it is plain http and 
 | `--network-port <port>` | the port devices on the network reach; 3443 unless you name one |
 | `--keep-awake` | hold the machine awake so sleep cannot cut the phone off mid-session |
 | `--port`, `--no-open`, `--trusted-host` | as shipped; `--port` stays this machine's own |
+
+On macOS, `--keep-awake` uses `caffeinate -i -w` to release its idle-sleep hold when dsh ends, even after an unclean kill. On Linux, `systemd-inhibit` now runs GNU `tail --pid` watching dsh, releasing the lock shortly after dsh exits without cleanup (GNU `tail` is required; if it is absent, `--keep-awake` fails at startup with an explicit missing-helper error). On Windows, the PowerShell inhibitor passes the sleep flags as an explicit UInt32 (avoiding Windows PowerShell 5.1's signed-hex conversion), captures the dsh process, treats helper initialization/runtime errors as fatal (rather than continuing to a false success marker), checks that Windows returned a non-null, non-zero sleep assertion result, and then waits for that process to exit. A rejected assertion terminates the helper instead of silently waiting with no protection; startup waits for an explicit success marker after the Win32 assertion (up to 20 seconds), refusing to serve with a requested hold if PowerShell never confirms it; an unexpected later exit is still warned about. If startup confirmation fails, Lanyard attempts to terminate the unconfirmed helper and checks its exit for up to seven seconds even if the termination signal fails; if cleanup cannot be confirmed, it warns about a possible orphan inhibitor. On normal teardown, a failed termination signal does not prevent the bounded exit check; if that check also fails, Lanyard warns instead of rejecting its own cleanup (the upstream subprocess layer has separate shutdown rules). This is intended to release the hold after a forced kill; Windows host verification is still pending. Only absolute directories in `PATH` are eligible for the checked inhibitor executable (and Linux `tail`); relative entries (including `.`) are ignored so a working-directory shim cannot be selected. The selected executable is launched by its absolute path without a second `PATH` search. If none is eligible, `--keep-awake` refuses startup. On Windows only the native `powershell.exe` is eligible: a `.cmd`/`.bat` shim cannot be launched by DSH's shell-free subprocess and is not treated as a working inhibitor. This does not prevent deliberate sleep or guarantee a closed laptop will keep serving.
 
 Needs dsh 0.1.5-rc.3 or later, and is tested against dsh's newest release. From 0.1.7, dsh checks that minimum itself and will neither install nor load the bundle below it, so `--host 0.0.0.0` is refused as usual. An older dsh does not check; one without its own browser sign-in (before 0.1.2) makes this fail loudly at startup and refuse every device on the network, rather than serve it without one.
 

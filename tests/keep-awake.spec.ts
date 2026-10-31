@@ -1,7 +1,8 @@
 /** The sleep inhibitor: which facility each platform holds, and how it fails. */
+import { spawn } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, relative } from 'node:path'
 import { describe, expect, it, afterEach, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import * as KeepAwake from '../src/keep-awake.ts'
@@ -18,7 +19,7 @@ interface Spawned { argv: string[]; terminated: boolean }
  * handle: no pid, a `done` that settles on exit, and termination.
  * @param done - the outcome the spawn settles to.
  */
-function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null }>): {
+function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null }>, ready = true): {
   seam: unknown
   spawned: Spawned[]
 } {
@@ -29,6 +30,10 @@ function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null 
       spawned.push(record)
       return {
         done,
+        collected: { stdout: { readFrom: () => ({
+          text: ready && process.platform === 'win32' ? 'LANYARD_HOLD_READY\n' : '',
+          nextOffset: 0, lossy: false,
+        }) } },
         terminate: () => { record.terminated = true },
         waitForExit: () => Promise.resolve(true),
       }
@@ -47,18 +52,48 @@ describe('resolveInhibitor', () => {
     expect(resolveInhibitor(platform).command).toBe(command)
   })
 
-  it('inhibits idle sleep only on macOS, leaving the display free to sleep', () => {
-    expect(resolveInhibitor('darwin').args).toEqual(['-i'])
+  it('inhibits macOS idle sleep only until the owning dsh process exits', () => {
+    // The PID watch also releases caffeinate after SIGKILL, when no disposer runs.
+    // -i must remain present so the screen can still sleep normally.
+    expect(resolveInhibitor('darwin').args).toEqual(['-i', '-w', String(process.pid)])
   })
 
   it('passes the Windows hold as argv, never as a shell string', () => {
     const { args } = resolveInhibitor('win32')
     expect(args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-Command'])
-    expect(args.at(-1)).toContain('SetThreadExecutionState')
+    const script = args.at(-1) ?? ''
+    expect(script).toContain('SetThreadExecutionState')
+    expect(script).toContain("$ErrorActionPreference = 'Stop';")
+    expect(script.indexOf('$ErrorActionPreference')).toBeLessThan(script.indexOf('Add-Type -MemberDefinition'))
+    // The holder must not survive an abrupt parent exit as a forever-sleeping orphan.
+    expect(script).toContain(`Get-Process -Id ${process.pid} -ErrorAction Stop`)
+    expect(script).toContain('Wait-Process -InputObject $dsh -ErrorAction Stop')
+    expect(script).not.toContain('Start-Sleep')
+    // Win32 returns zero on failure without throwing. Do not wait forever
+    // under a false belief that the sleep assertion was acquired.
+    // Windows PowerShell 5.1 treats 0x80000001 as negative. Check the
+    // unsigned argument and the actual ES_CONTINUOUS | ES_SYSTEM_REQUIRED bits.
+    expect(script).toContain('SetThreadExecutionState(uint esFlags)')
+    const flags = script.match(/SetThreadExecutionState\(\[uint32\](\d+)\)/)?.[1]
+    expect(flags).toBeDefined()
+    expect(BigInt(flags ?? '0')).toBe(0x80000001n)
+    expect(script).not.toContain('SetThreadExecutionState(0x80000001)')
+    expect(script).toContain('if ($null -eq $state -or $state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" }')
+    expect(script).not.toContain('::SetThreadExecutionState(0x80000001) | Out-Null')
+    expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('$state ='))
+    expect(script.indexOf('$state =')).toBeLessThan(script.indexOf('if ($null -eq $state -or $state -eq 0)'))
+    expect(script.indexOf('if ($null -eq $state -or $state -eq 0)')).toBeLessThan(script.indexOf('Wait-Process -InputObject'))
   })
 
-  it('blocks sleep on Linux for the process lifetime', () => {
-    expect(resolveInhibitor('linux').args).toContain('--mode=block')
+  it('blocks sleep on Linux and watches the owning dsh PID rather than sleeping forever', () => {
+    const { args } = resolveInhibitor('linux')
+    expect(args).toContain('--mode=block')
+    expect(args.slice(-4)).toEqual(['tail', `--pid=${process.pid}`, '-f', '/dev/null'])
+    expect(args).not.toContain('infinity')
+  })
+
+  it('does not change the legacy non-Linux fallback command', () => {
+    expect(resolveInhibitor('freebsd').args.slice(-2)).toEqual(['sleep', 'infinity'])
   })
 })
 
@@ -87,9 +122,38 @@ describe.skipIf(process.platform === 'win32')('findOnPath', () => {
     expect(findOnPath('inhibitor', dir, [''])).toBeUndefined()
   })
 
-  it('tries each extension it is given, as Windows resolves PATHEXT', () => {
+  it('rejects working-directory PATH shims and chooses a later absolute helper', () => {
+    const relativeTarget = mkdtempSync(join(tmpdir(), 'lanyard-relative-path-'))
+    const relativeExecutable = join(relativeTarget, 'inhibitor')
+    writeFileSync(relativeExecutable, '#!/bin/sh\n')
+    chmodSync(relativeExecutable, 0o755)
+    const relativeDir = relative(process.cwd(), relativeTarget)
+    expect(relativeDir).not.toBe('')
+    // Mutation control: removing the isAbsolute guard selects this shim,
+    // so both expectations must fail against the previous implementation.
+    expect(findOnPath('inhibitor', ['', relativeDir].join(delimiter), [''])).toBeUndefined()
+    const trustedDir = mkdtempSync(join(tmpdir(), 'lanyard-absolute-path-'))
+    const trustedExecutable = join(trustedDir, 'inhibitor')
+    writeFileSync(trustedExecutable, '#!/bin/sh\n')
+    chmodSync(trustedExecutable, 0o755)
+    expect(findOnPath('inhibitor', [relativeDir, trustedDir].join(delimiter), ['']))
+      .toBe(trustedExecutable)
+  })
+
+  it('tries the explicitly supplied executable extensions in order', () => {
     const path = pathWith({ 'inhibitor.exe': 0o755 })
     expect(findOnPath('inhibitor', path, ['', '.com', '.exe'])).toMatch(/inhibitor\.exe$/)
+  })
+
+  it('chooses native PowerShell over a PATHEXT .cmd shim, and rejects a shim alone', () => {
+    // DSH spawns argv without cmd.exe: selecting a .cmd/.bat wrapper fails
+    // even if an actual powershell.exe exists later in PATH.
+    const extensions = internals.pathExtensions('win32')
+    expect(extensions).toEqual(['.exe'])
+    const withNative = pathWith({ 'powershell.cmd': 0o755, 'powershell.exe': 0o755 })
+    expect(findOnPath('powershell', withNative, extensions)).toMatch(/powershell\.exe$/)
+    const onlyShim = pathWith({ 'powershell.cmd': 0o755 })
+    expect(findOnPath('powershell', onlyShim, extensions)).toBeUndefined()
   })
 })
 
@@ -102,18 +166,76 @@ describe('the keep-awake row', () => {
     expect(spawned).toEqual([])
   })
 
-  it('holds the inhibitor while it lives and releases it on disposal', async () => {
-    vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
+  it('holds only the checked inhibitor and helper paths, releasing them on disposal', async () => {
+    vi.spyOn(internals, 'findOnPath').mockImplementation(command => `/trusted/${command}`)
     const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await ctx.plugin(KeepAwake, { enabled: true }).await()
     expect(spawned).toHaveLength(1)
-    expect(spawned[0]?.argv[0]).toBe(resolveInhibitor(process.platform).command)
+    expect(spawned[0]?.argv[0]).toBe(`/trusted/${resolveInhibitor(process.platform).command}`)
+    if (process.platform === 'linux') {
+      expect(spawned[0]?.argv).toContain('/trusted/tail')
+      expect(spawned[0]?.argv).not.toContain('tail')
+    }
     expect(spawned[0]?.terminated).toBe(false)
     await ctx.fiber.dispose()
     ctx = undefined
     expect(spawned[0]?.terminated).toBe(true)
+  })
+
+  it('still reaps a disappeared helper when terminate throws during shutdown', async () => {
+    // Regression: throwing terminate() used to skip waitForExit and reject
+    // Cordis disposal even if the helper had already exited.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let checkedExit = false
+    const seam = {
+      spawn: () => ({
+        done: new Promise(() => {}),
+        collected: { stdout: { readFrom: () => ({
+          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\n' : '', lossy: false,
+        }) } },
+        terminate: () => { throw new Error('ESRCH') },
+        waitForExit: async (signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal)
+          checkedExit = true
+          return true
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await ctx.plugin(KeepAwake, { enabled: true }).await()
+    await ctx.fiber.dispose()
+    ctx = undefined
+    expect(checkedExit).toBe(true)
+    expect(warnings).toEqual([])
+  })
+
+  it('warns but does not reject shutdown if signaling and exit observation both fail', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    const seam = {
+      spawn: () => ({
+        done: new Promise(() => {}),
+        collected: { stdout: { readFrom: () => ({
+          text: process.platform === 'win32' ? 'LANYARD_HOLD_READY\n' : '', lossy: false,
+        }) } },
+        terminate: () => { throw new Error('EPERM') },
+        waitForExit: async (_signal: AbortSignal) => { throw new Error('wait failed') },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await ctx.plugin(KeepAwake, { enabled: true }).await()
+    await ctx.fiber.dispose()
+    ctx = undefined
+    expect(warnings).toEqual([
+      expect.stringMatching(/could not confirm sleep inhibitor exit.*wait failed.*terminate failed.*EPERM/),
+    ])
   })
 
   it('rejects its load when the platform binary is not on PATH, rather than serving without the inhibitor', async () => {
@@ -127,11 +249,21 @@ describe('the keep-awake row', () => {
     expect(spawned).toEqual([])
   })
 
+  it.skipIf(process.platform !== 'linux')('rejects when GNU tail is missing before spawning systemd-inhibit', async () => {
+    const found = vi.spyOn(internals, 'findOnPath').mockImplementation(command => command === 'tail' ? undefined : '/usr/bin/inhibitor')
+    const { seam, spawned } = fakeSubprocess(new Promise(() => {}))
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/tail is not on PATH/)
+    expect(found.mock.calls.map(([command]) => command)).toEqual(['systemd-inhibit', 'tail'])
+    expect(spawned).toEqual([])
+  })
+
   it('rejects its load when the inhibitor cannot start, though it was on PATH', async () => {
     // A missing interpreter, a permission lost since the check, EAGAIN: the
     // seam rejects `done` within a tick, before the load has resolved.
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
-    const { seam, spawned } = fakeSubprocess(Promise.reject(new Error('spawn EACCES')))
+    const { seam, spawned } = fakeSubprocess(Promise.reject(new Error('spawn EACCES')), false)
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
@@ -145,6 +277,7 @@ describe('the keep-awake row', () => {
     const seam = {
       spawn: () => ({
         done: new Promise((_resolve, reject) => { setTimeout(() => { reject(new Error('spawn EAGAIN')) }, 20) }),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
         terminate: () => {},
         waitForExit: () => Promise.resolve(true),
       }),
@@ -157,10 +290,137 @@ describe('the keep-awake row', () => {
   it('rejects its load when the inhibitor exits at once, having never taken hold', async () => {
     // systemd-inhibit with no logind to ask exits within milliseconds.
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
-    const { seam } = fakeSubprocess(Promise.resolve({ exitCode: 1, signal: null }))
+    const { seam } = fakeSubprocess(Promise.resolve({ exitCode: 1, signal: null }), false)
     ctx = new Context()
     ctx.provide('subprocess', seam)
-    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/exited at once \(code 1, signal null\)/)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(process.platform === 'win32'
+      ? /exited before confirming the hold \(code 1, signal null\)/
+      : /exited at once \(code 1, signal null\)/)
+  })
+
+  it.skipIf(process.platform !== 'win32')('rejects a Windows assertion failure after the old 250 ms guess', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/powershell.exe')
+    let terminated = false
+    const seam = {
+      spawn: () => ({
+        done: new Promise<{ exitCode: number; signal: null }>(resolve =>
+          setTimeout(() => resolve({ exitCode: 1, signal: null }), 450)),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
+        terminate: () => { terminated = true },
+        waitForExit: async () => true,
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/exited before confirming the hold/)
+    expect(terminated).toBe(true)
+  })
+
+  it('waits for failed-start helper termination before rejecting activation', async () => {
+    // A late/failed inhibitor may already hold the machine awake. The old
+    // path called terminate() but rejected immediately, abandoning cleanup.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let terminated = false
+    let cleanupStarted = false
+    let release: ((exited: boolean) => void) | undefined
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EACCES')),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
+        terminate: () => { terminated = true },
+        waitForExit: (signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal)
+          cleanupStarted = true
+          return new Promise<boolean>(resolve => { release = resolve })
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const activation = ctx.plugin(KeepAwake, { enabled: true }).await()
+    let settled = false
+    void activation.then(() => { settled = true }, () => { settled = true })
+    await vi.waitFor(() => { expect(cleanupStarted).toBe(true) }, { timeout: 1_000, interval: 10 })
+    expect(terminated).toBe(true)
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    release?.(true)
+    await expect(activation).rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
+  })
+
+
+  it('observes failed-start helper exit even when termination signals ESRCH', async () => {
+    // The older failed-start cleanup caught terminate() and skipped the exit
+    // check. An already-gone helper should not produce a false orphan warning.
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let observed = false
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EACCES')),
+        collected: { stdout: { readFrom: () => ({ text: '', lossy: false }) } },
+        terminate: () => { throw new Error('ESRCH') },
+        waitForExit: async (signal: AbortSignal) => {
+          expect(signal).toBeInstanceOf(AbortSignal)
+          observed = true
+          return true
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
+      .rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
+    expect(observed).toBe(true)
+    expect(warnings).toEqual([])
+  })
+
+  it('preserves the start failure and warns if signal and exit observation both fail', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    let observed = false
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EAGAIN')),
+        collected: { stdout: { readFrom: () => ({ text: '', lossy: false }) } },
+        terminate: () => { throw new Error('EPERM') },
+        waitForExit: async (_signal: AbortSignal) => {
+          observed = true
+          throw new Error('wait failed')
+        },
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => { warnings.push(String(message)) }) as never)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
+      .rejects.toThrow(/could not start \(Error: spawn EAGAIN\)/)
+    expect(observed).toBe(true)
+    expect(warnings).toEqual([
+      expect.stringMatching(/could not confirm cleanup.*wait failed.*terminate failed.*EPERM.*orphan sleep inhibitor may remain/),
+    ])
+  })
+
+  it('preserves the startup failure if an unconfirmed inhibitor cannot be reaped', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/inhibitor')
+    const warnings: string[] = []
+    const seam = {
+      spawn: () => ({
+        done: Promise.reject(new Error('spawn EAGAIN')),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
+        terminate: () => {},
+        waitForExit: async () => false,
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(((message: unknown) => {
+      warnings.push(String(message))
+    }) as never)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await())
+      .rejects.toThrow(/could not start \(Error: spawn EAGAIN\)/)
+    expect(warnings).toEqual([expect.stringMatching(/orphan sleep inhibitor may remain/)])
   })
 
   it('warns, and keeps serving, when a running inhibitor dies later', async () => {
@@ -176,4 +436,100 @@ describe('the keep-awake row', () => {
     await new Promise(resolve => setImmediate(resolve))
     expect(warnings).toEqual([expect.stringMatching(/sleep inhibitor exited \(code 1, signal null\); the host may sleep again/)])
   })
+})
+
+
+describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecycle', () => {
+  it('acquires a real PowerShell hold and releases it after the watched process is force-killed', async () => {
+    // Earlier argv tests did not execute Add-Type / SetThreadExecutionState or
+    // Wait-Process. This Windows-only check exercises both on a disposable PID.
+    // It does not attempt to make the CI host actually enter sleep.
+    const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore', windowsHide: true,
+    })
+    owner.on('error', () => {}) // An absent executable is checked via owner.pid.
+    let holder: ReturnType<typeof spawn> | undefined
+    try {
+      if (owner.pid === undefined) throw new Error('could not spawn watched process')
+      const { command, args } = resolveInhibitor('win32')
+      const executable = findOnPath(command)
+      if (!executable) throw new Error('Windows PowerShell was not found on PATH')
+      const original = args.at(-1) ?? ''
+      const pidLookup = `Get-Process -Id ${process.pid} -ErrorAction Stop`
+      const wait = 'Wait-Process -InputObject $dsh -ErrorAction Stop'
+      if (!original.includes(pidLookup) || !original.includes(wait))
+        throw new Error('the Windows keep-awake command changed; update this native acceptance test')
+
+      // The production command emits readiness after Win32 succeeds. This test
+      // substitutes only the disposable watched PID, not a synthetic marker.
+      const marker = 'LANYARD_HOLD_READY'
+      if (!original.includes(`[Console]::Out.WriteLine('${marker}')`))
+        throw new Error('production Windows helper did not emit its successful-hold marker')
+      const script = original.replace(pidLookup, `Get-Process -Id ${owner.pid} -ErrorAction Stop`)
+      const powerShell = spawn(executable, [...args.slice(0, -1), script], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      holder = powerShell
+      let output = ''
+      let errors = ''
+      let startError: Error | undefined
+      powerShell.on('error', error => { startError = error })
+      powerShell.stdout?.on('data', chunk => { output += String(chunk) })
+      powerShell.stderr?.on('data', chunk => { errors = (errors + String(chunk)).slice(-2_000) })
+
+      await vi.waitFor(() => {
+        if (startError) throw startError
+        if (powerShell.exitCode !== null || powerShell.signalCode !== null) {
+          throw new Error(`PowerShell exited before holding (code ${String(powerShell.exitCode)}): ${errors}`)
+        }
+        expect(output).toContain(marker)
+      }, { timeout: 20_000, interval: 50 })
+
+      expect(owner.kill('SIGKILL')).toBe(true)
+      await vi.waitFor(() => {
+        if (startError) throw startError
+        expect(powerShell.exitCode, errors).toBe(0)
+      }, { timeout: 7_000, interval: 50 })
+    } finally {
+      owner.kill('SIGKILL')
+      holder?.kill('SIGKILL')
+    }
+  }, 30_000)
+
+  it('rejects a non-terminating PowerShell error before printing the ready marker', async () => {
+    // The Win32 assertion itself is valid; inject an error AFTER that call.
+    // With PowerShell's default Continue it would emit READY anyway and wait
+    // forever for this test process. Startup must fail closed instead.
+    const { command, args } = resolveInhibitor('win32')
+    const executable = findOnPath(command)
+    if (!executable) throw new Error('Windows PowerShell was not found on PATH')
+    const original = args.at(-1) ?? ''
+    const ready = "[Console]::Out.WriteLine('LANYARD_HOLD_READY')"
+    if (!original.includes(ready)) throw new Error('Windows success marker changed')
+    const script = original.replace(ready, `Write-Error 'lanyard synthetic helper failure'; ${ready}`)
+    const holder = spawn(executable, [...args.slice(0, -1), script], {
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+    let output = ''
+    let errors = ''
+    let launchError: Error | undefined
+    let closed = false
+    holder.on('error', error => { launchError = error })
+    holder.on('close', () => { closed = true })
+    holder.stdout?.on('data', data => { output += String(data) })
+    holder.stderr?.on('data', data => { errors = (errors + String(data)).slice(-4_000) })
+    try {
+      // 'exit' can precede final pipe delivery; wait for close before
+      // asserting the injected error and absence of a success marker.
+      await vi.waitFor(() => {
+        if (launchError) throw launchError
+        expect(closed).toBe(true)
+      }, { timeout: 15_000, interval: 50 })
+      expect(holder.exitCode).not.toBe(0)
+      expect(errors).toContain('lanyard synthetic helper failure')
+      expect(output).not.toContain('LANYARD_HOLD_READY')
+    } finally {
+      holder.kill('SIGKILL')
+    }
+  }, 20_000)
 })

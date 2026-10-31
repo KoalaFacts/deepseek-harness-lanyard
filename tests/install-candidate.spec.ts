@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { verifyInstallCandidate } from '../scripts/verify-install-candidate.ts'
+import { verifyInstallCandidate, verifyInstalledExportMap, verifyInstalledModule } from '../scripts/verify-install-candidate.ts'
 
 const sha = 'a'.repeat(40)
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -68,12 +68,53 @@ describe('downloaded main install candidate identity', () => {
   })
 })
 
+it('executes the installed ESM exports, rejecting empty and syntactically broken modules', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lanyard-candidate-modules-'))
+  try {
+    const valid = join(directory, 'valid.mjs')
+    const empty = join(directory, 'empty.mjs')
+    const broken = join(directory, 'broken.mjs')
+    writeFileSync(valid, 'export const works = true')
+    writeFileSync(empty, '// resolves, but exports nothing')
+    writeFileSync(broken, 'export const broken = ;')
+    await expect(verifyInstalledModule(valid, 'test-valid')).resolves.toBeUndefined()
+    // Removing the nonempty-export guard must make this negative control fail.
+    await expect(verifyInstalledModule(empty, 'test-empty')).rejects
+      .toThrow(/installed module exported nothing/)
+    // Merely resolving a malformed file passed the old consumer gate.
+    await expect(verifyInstalledModule(broken, 'test-broken')).rejects.toThrow()
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+it('rejects swapped-but-loadable module and locale export targets in a clean consumer', () => {
+  const reviewed = {
+    '.': { types: './lib/types/index.d.ts', default: './lib/index.js' },
+    './tls': { types: './lib/types/tls.d.ts', default: './lib/tls.js' },
+    './locale/*.json': './locale/*.json',
+  }
+  expect(() => verifyInstalledExportMap(structuredClone(reviewed), reviewed)).not.toThrow()
+
+  // Both JS files can exist and export values, so loading them alone is not
+  // enough to prove the installed plugin wires the intended TLS service.
+  const swapped = structuredClone(reviewed)
+  swapped['./tls'].default = './lib/index.js'
+  expect(() => verifyInstalledExportMap(swapped, reviewed))
+    .toThrow(/installed export targets differ from reviewed source/)
+
+  const redirectedLocale = structuredClone(reviewed)
+  redirectedLocale['./locale/*.json'] = './locale/webserver/*.json'
+  expect(() => verifyInstalledExportMap(redirectedLocale, reviewed))
+    .toThrow(/installed export targets differ from reviewed source/)
+})
+
 it('the main candidate consumer downloads this run artifact only after all main gates', () => {
   const workflow = parse(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')) as {
     jobs: { 'candidate-consumer': { needs: string[]; if: string; steps: Array<{ uses?: string; with?: { name?: string; 'persist-credentials'?: boolean }; env?: Record<string, string>; run?: string }> } }
   }
   const job = workflow.jobs['candidate-consumer']
-  expect(job.needs).toEqual(['check', 'e2e', 'browser'])
+  expect(job.needs).toEqual(['check', 'e2e', 'browser', 'windows-keep-awake'])
   const checkout = job.steps.find(step => step.uses?.startsWith('actions/checkout@'))
   expect(checkout?.with?.['persist-credentials']).toBe(false)
   expect(job.if).toContain("github.ref == 'refs/heads/main'")

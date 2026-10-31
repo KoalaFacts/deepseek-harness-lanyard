@@ -2,11 +2,11 @@
  * The host sleep inhibitor: while enabled, holds a platform keep-awake child
  * for the dsh process lifetime so idle sleep cannot cut off running sessions or
  * paired LAN devices. The inhibitor is the platform's own facility —
- * `caffeinate -i` on macOS, `systemd-inhibit` on Linux, a PowerShell
- * `SetThreadExecutionState` holder on Windows — so the OS drops the lock when
- * that child exits, and disposal is what ends it. A dsh killed abruptly
- * (`SIGKILL`, power loss) runs no disposer and orphans the child, which holds
- * the inhibitor until it is killed or the machine restarts. An inhibitor that
+ * `caffeinate -i -w` on macOS, `systemd-inhibit` with a GNU `tail --pid`
+ * watcher on Linux, and a PowerShell `SetThreadExecutionState` holder on
+ * Windows. All three platform helpers now watch the dsh process lifetime,
+ * so their idle-sleep assertions can be released after an abrupt dsh exit
+ * even when the Cordis disposer cannot run. An inhibitor that
  * is not on PATH rejects activation: a deployment that asked to stay awake
  * must never silently serve without it. A child that dies later logs a warning
  * and serving continues.
@@ -14,7 +14,7 @@
  */
 
 import { accessSync, constants, statSync } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import { delimiter, isAbsolute, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -49,10 +49,23 @@ export interface InhibitorCommand {
  * clears the state automatically when the holding process dies, so no
  * release call exists or is needed.
  */
+const WINDOWS_READY = 'LANYARD_HOLD_READY'
+
 const WINDOWS_HOLD = [
+  // PowerShell's default Continue permits non-terminating Add-Type failures.
+  // Never print a success marker after failed helper initialization.
+  "$ErrorActionPreference = 'Stop';",
+  // Capture the original process object before taking a sleep assertion.
+  // Wait-Process then watches that instance, not a potentially reused PID.
+  `$dsh = Get-Process -Id ${process.pid} -ErrorAction Stop;`,
   'Add-Type -MemberDefinition \'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);\' -Name PowerState -Namespace DshKeepAwake | Out-Null;',
-  '[DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001) | Out-Null;',
-  'while ($true) { Start-Sleep -Seconds 3600 }',
+  // Windows PowerShell 5.1 parses 0x80000001 as a negative Int32; the P/Invoke
+  // expects UInt32. Use the positive decimal value with an explicit cast.
+  '$state = [DshKeepAwake.PowerState]::SetThreadExecutionState([uint32]2147483649);',
+  'if ($null -eq $state -or $state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" };',
+  // Acknowledge only after Win32 accepts the actual sleep assertion.
+  ` [Console]::Out.WriteLine('${WINDOWS_READY}');`,
+  'Wait-Process -InputObject $dsh -ErrorAction Stop',
 ].join(' ')
 
 /** SIGTERM-to-SIGKILL window the seam escalates through at teardown. */
@@ -83,12 +96,43 @@ const RELEASE_TIMEOUT_MS = TERMINATE_GRACE_MS + 2_000
  */
 const HOLD_CONFIRM_MS = 250
 
+// Add-Type initialization may take longer than the Unix failure-detection window.
+const WINDOWS_CONFIRM_TIMEOUT_MS = 20_000
+
 /**
  * The inhibitors print nothing in normal operation. Collecting a small bound
  * keeps whatever a broken one does say off the URL readiness line, without
  * leaving an unread pipe the child could block on.
  */
 const DISCARD_OUTPUT = { maxBytes: 4096 } as const
+
+/** Require a live helper to acknowledge the Win32 assertion before serving. */
+async function confirmWindowsHold(held: {
+  collected: { stdout?: { readFrom(fromByte: number): { text: string; lossy: boolean } } }
+  done: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>
+}): Promise<string | undefined> {
+  const output = held.collected.stdout
+  if (!output) return 'did not expose a readiness output stream'
+  let stopped: string | undefined
+  void held.done.then(
+    outcome => { stopped = 'exited before confirming the hold (code ' + String(outcome.exitCode) + ', signal ' + String(outcome.signal) + ')' },
+    (error: unknown) => { stopped = 'could not start (' + String(error) + ')' },
+  )
+  const deadline = Date.now() + WINDOWS_CONFIRM_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (stopped !== undefined) return stopped
+    const read = output.readFrom(0)
+    if (read.lossy) return 'readiness output exceeded its safety bound'
+    if (read.text.split(/\r?\n/).includes(WINDOWS_READY)) {
+      // An exit in the same turn as the marker is not a live hold.
+      await Promise.resolve()
+      return stopped
+    }
+    await delay(50)
+  }
+  return 'did not confirm a Windows sleep assertion within 20 seconds'
+}
+
 
 /**
  * Resolve the platform's sleep-inhibitor invocation.
@@ -99,31 +143,44 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
   switch (platform) {
     case 'darwin':
       // -i inhibits idle system sleep only; the display may still sleep.
-      return { command: 'caffeinate', args: ['-i'] }
+      // Stop the idle-sleep assertion when dsh exits even if SIGKILL prevents
+      // the Cordis disposer from terminating this helper. No utility argument:
+      // caffeinate's -w PID applies only when it owns the assertion itself.
+      return { command: 'caffeinate', args: ['-i', '-w', String(process.pid)] }
     case 'win32':
       return { command: 'powershell', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_HOLD] }
-    default:
+    default: {
+      // GNU tail stops following /dev/null once this dsh PID disappears,
+      // even after SIGKILL. This releases systemd-inhibit's lock without
+      // depending on Cordis' disposer. Keep the legacy fallback off Linux.
+      const lifetime = platform === 'linux'
+        ? ['tail', `--pid=${process.pid}`, '-f', '/dev/null']
+        : ['sleep', 'infinity']
       return {
         command: 'systemd-inhibit',
-        args: ['--what=sleep:idle', '--who=dsh', '--why=Serving the DSH web GUI', '--mode=block', 'sleep', 'infinity'],
+        args: ['--what=sleep:idle', '--who=dsh', '--why=Serving the DSH web GUI', '--mode=block', ...lifetime],
       }
+    }
   }
 }
 
 /**
  * Where an executable name resolves on PATH, the way the platform's spawn
- * would find it: each PATH entry in order, and on Windows each `PATHEXT`
- * extension within it.
+ * would find it, except relative/empty PATH entries are ignored: resolving
+ * those against the working directory could launch a project-controlled shim.
+ * Windows uses only native `.exe` files because the seam has no shell.
  * @param command - a bare executable name.
  * @param path - the PATH value to search.
  * @param extensions - candidate suffixes; `['']` outside Windows.
- * @returns the first match, or undefined when nothing on PATH answers to it.
+ * @returns the first match as an absolute path, or undefined when no PATH entry matches.
  */
 export function findOnPath(command: string, path = process.env.PATH ?? '', extensions = pathExtensions()): string | undefined {
   for (const dir of path.split(delimiter)) {
-    if (dir === '') continue
+    // An entry such as `.` or `bin` is relative to the working directory,
+    // which can be a project checkout. Never run a sleep-inhibitor helper from it.
+    if (!isAbsolute(dir)) continue
     for (const extension of extensions) {
-      const candidate = join(dir, `${command}${extension}`)
+      const candidate = resolve(dir, `${command}${extension}`)
       try {
         accessSync(candidate, constants.X_OK)
         if (statSync(candidate).isFile()) return candidate
@@ -135,10 +192,12 @@ export function findOnPath(command: string, path = process.env.PATH ?? '', exten
   return undefined
 }
 
-/** `PATHEXT` on Windows, where a bare name resolves through it; nothing elsewhere. */
-function pathExtensions(): string[] {
-  if (process.platform !== 'win32') return ['']
-  return ['', ...(process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(extension => extension !== '')]
+/** The native executable suffix supported by the shell-free Windows subprocess. */
+function pathExtensions(platform: NodeJS.Platform = process.platform): string[] {
+  // PATHEXT may put .CMD/.BAT shims before .EXE, but DSH's argv-based
+  // subprocess does not invoke cmd.exe. Resolve the actual PowerShell binary
+  // instead of accepting an unusable script wrapper as the checked helper.
+  return platform === 'win32' ? ['.exe'] : ['']
 }
 
 /**
@@ -146,7 +205,7 @@ function pathExtensions(): string[] {
  * suite must not depend on whether the machine running it has
  * `systemd-inhibit`.
  */
-export const internals = { findOnPath }
+export const internals = { findOnPath, pathExtensions }
 
 /**
  * Hold the sleep inhibitor while this plugin lives.
@@ -159,29 +218,77 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // The common failure — a platform without the inhibitor — is decided before
   // anything runs, so it gets a message naming the fix. The confirmation
   // window below catches every other way the inhibitor fails to take hold.
-  if (internals.findOnPath(command) === undefined) {
-    throw new Error(`lanyard-keep-awake: ${command} is not on PATH, so --keep-awake cannot hold this host awake`)
+  // On Linux systemd-inhibit launches GNU tail as its PID-bound watcher.
+  // Catch a missing helper before spawning the inhibitor, not as an opaque
+  // exit status from systemd-inhibit after startup has already begun.
+  const requiredExecutables = process.platform === 'linux' ? [command, 'tail'] : [command]
+  // Pass the checked absolute paths to spawn. A bare command would trigger a
+  // *second* PATH lookup, potentially executing a same-named file from cwd
+  // when PATH has an empty/relative segment before the checked executable.
+  const checkedPaths = new Map<string, string>()
+  for (const executable of requiredExecutables) {
+    const checkedPath = internals.findOnPath(executable)
+    if (checkedPath === undefined) {
+      throw new Error(`lanyard-keep-awake: ${executable} is not on PATH, so --keep-awake cannot hold this host awake`)
+    }
+    checkedPaths.set(executable, checkedPath)
   }
+  const pinnedArgs = process.platform === 'linux'
+    ? args.map(arg => arg === 'tail' ? checkedPaths.get('tail')! : arg)
+    : args
   const held = ctx.subprocess.spawn({
-    argv: [command, ...args],
+    argv: [checkedPaths.get(command)!, ...pinnedArgs],
     cwd: process.cwd(),
     stdio: { stdin: 'ignore', stdout: DISCARD_OUTPUT, stderr: DISCARD_OUTPUT },
     graceMs: TERMINATE_GRACE_MS,
   })
-  // An inhibitor that settles inside the window never held: fail the load
-  // rather than serve without what this invocation asked for.
-  const confirmation = new AbortController()
-  const early = await Promise.race([
-    held.done.then(
-      outcome => `exited at once (code ${String(outcome.exitCode)}, signal ${String(outcome.signal)})`,
-      (error: unknown) => `could not start (${String(error)})`,
-    ),
-    // Aborted once the race is decided, so no timer outlives it.
-    delay(HOLD_CONFIRM_MS, undefined, { signal: confirmation.signal }).catch(() => undefined),
-  ])
-  confirmation.abort()
+  // The startup gate must not abandon an asynchronously terminating child.
+  // If confirmation fails after the inhibitor acquired a hold, merely issuing
+  // terminate() can leave the host awake while the load has already failed.
+  // Bound cleanup just like the normal disposer, without hiding the real
+  // startup failure when the helper is unkillable or its seam rejects.
+  const releaseUnconfirmedHold = async (): Promise<void> => {
+    // A failed signal may mean the helper already exited (ESRCH), or that it
+    // is still holding the host awake (EPERM). Observe exit in either case.
+    let terminationError: unknown
+    try {
+      held.terminate()
+    } catch (error) {
+      terminationError = error
+    }
+    const terminationDetail = terminationError === undefined
+      ? '' : `; terminate failed (${String(terminationError)})`
+    try {
+      if (!await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))) {
+        ctx.logger.warn(`lanyard-keep-awake: unconfirmed ${command} exit was not observed${terminationDetail}; an orphan sleep inhibitor may remain`)
+      }
+    } catch (cleanupError) {
+      ctx.logger.warn(`lanyard-keep-awake: could not confirm cleanup of unconfirmed ${command} (${String(cleanupError)}${terminationDetail}); an orphan sleep inhibitor may remain`)
+    }
+  }
+  // Unlike short-lived Unix startup checks, Windows must confirm the actual
+  // Win32 hold after PowerShell's potentially slow Add-Type initialization.
+  let early: string | undefined
+  try {
+    if (process.platform === 'win32') {
+      early = await confirmWindowsHold(held)
+    } else {
+      const confirmation = new AbortController()
+      early = await Promise.race([
+        held.done.then(
+          outcome => `exited at once (code ${String(outcome.exitCode)}, signal ${String(outcome.signal)})`,
+          (error: unknown) => `could not start (${String(error)})`,
+        ),
+        delay(HOLD_CONFIRM_MS, undefined, { signal: confirmation.signal }).catch(() => undefined),
+      ])
+      confirmation.abort()
+    }
+  } catch (error) {
+    await releaseUnconfirmedHold()
+    throw new Error(`lanyard-keep-awake: failed to verify ${command} startup (${String(error)})`)
+  }
   if (early !== undefined) {
-    held.terminate()
+    await releaseUnconfirmedHold()
     throw new Error(`lanyard-keep-awake: ${command} ${early}, so --keep-awake cannot hold this host awake`)
   }
   let disposed = false
@@ -194,10 +301,22 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   )
   ctx.effect(() => async () => {
     disposed = true
-    held.terminate()
-    const released = await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))
-    if (!released) {
-      ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor did not exit within teardown; ${command} may keep the host awake until it is killed`)
+    // The subprocess may have exited just before terminate(): even if the
+    // signal fails, still check its exit instead of aborting Cordis teardown.
+    let terminationError: unknown
+    try {
+      held.terminate()
+    } catch (error) {
+      terminationError = error
+    }
+    const terminationDetail = terminationError === undefined ? '' : `; terminate failed (${String(terminationError)})`
+    try {
+      const released = await held.waitForExit(AbortSignal.timeout(RELEASE_TIMEOUT_MS))
+      if (!released) {
+        ctx.logger.warn(`lanyard-keep-awake: sleep inhibitor did not exit within teardown${terminationDetail}; ${command} may keep the host awake until it is killed`)
+      }
+    } catch (error) {
+      ctx.logger.warn(`lanyard-keep-awake: could not confirm sleep inhibitor exit during teardown (${String(error)}${terminationDetail}); ${command} may keep the host awake until it is killed`)
     }
   }, 'lanyard-keep-awake: sleep inhibitor')
 }

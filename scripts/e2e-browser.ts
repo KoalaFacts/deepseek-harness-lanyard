@@ -10,7 +10,8 @@
  * but this gate pins shows up here as a failure rather than as a phone that
  * quietly cannot do something.
  *
- * Usage:  node scripts/e2e-browser.ts
+ * Usage:  node scripts/e2e-browser.ts (with a desktop display)
+ *         xvfb-run -a node scripts/e2e-browser.ts (Linux CI)
  *         LANYARD_CHROMIUM=/path/to/chrome node scripts/e2e-browser.ts
  *
  * Playwright normally resolves its own matching Chromium build. Set
@@ -19,11 +20,15 @@
  * so the suite runs there without downloading a second browser.
  */
 
+import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
 import { hasNoPluginEntries, hasPluginListEntries } from './tool-result-assertions.ts'
 import { join } from 'node:path'
-import type { BrowserType, Page, Response } from 'playwright'
+import type { Browser, BrowserContext, BrowserType, Page, Response } from 'playwright'
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
 import { REFUSAL_BODY } from '../src/webserver.ts'
 
@@ -31,12 +36,156 @@ const lan = requireLan()
 const { check, report } = recorder()
 
 let chromium: BrowserType
+let nativePhoneUserAgent: string
 try {
-  ({ chromium } = await import('playwright'))
+  const playwright = await import('playwright')
+  chromium = playwright.chromium
+  // Match a real mobile browser's user agent as well as its touch/viewport:
+  // CDP device metrics alone leave navigator.userAgent identifying desktop Linux.
+  nativePhoneUserAgent = playwright.devices['Pixel 7'].userAgent
 } catch {
   console.error('lanyard e2e: playwright is not installed, so the browser half cannot be exercised.')
   console.error('lanyard e2e: SKIPPED (not passed) — run `pnpm install` then `npx playwright install chromium`.')
   process.exit(2)
+}
+
+/** All upstream auth cookies in a profile, including path-scoped variants. */
+async function upstreamAuthCookies(context: BrowserContext) {
+  return (await context.cookies()).filter(cookie => cookie.name.startsWith('dsh-auth-'))
+}
+
+/**
+ * Keep the phone's one upstream Secure/HttpOnly session through recovery.
+ * A first-match/root-only check would silently accept an insecure duplicate
+ * scoped to /api, or a substituted cookie in a profile that still works.
+ */
+type BrowserCookie = Awaited<ReturnType<BrowserContext['cookies']>>[number]
+
+/** Require the full upstream browser-session policy, not merely a valid bearer. */
+function requireUpstreamAuthCookie(cookies: BrowserCookie[]): BrowserCookie {
+  const auth = cookies.filter(cookie => cookie.name.startsWith('dsh-auth-'))
+  const session = auth[0]
+  if (auth.length !== 1 || !session || !session.secure || !session.httpOnly
+    || session.sameSite !== 'Strict') {
+    throw new Error('expected exactly one upstream Secure HttpOnly SameSite=Strict cookie; found '
+      + String(auth.length) + ' candidate(s)')
+  }
+  return session
+}
+
+async function oneUpstreamAuthCookie(context: BrowserContext) {
+  return requireUpstreamAuthCookie(await context.cookies())
+}
+
+/**
+ * Wait for a subprocess/transport result or a bounded timeout. Cancel the
+ * losing timer on success, otherwise each completed race keeps Node alive for
+ * five more seconds even after the owned browser has exited.
+ */
+async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([work, new Promise<T>(resolve => {
+      timer = setTimeout(() => resolve(fallback), ms)
+    })])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/**
+ * Real background/foreground tab lifecycle needs a native Chromium default
+ * context. Playwright-managed contexts force tabs to report focus even when
+ * their CDP focus-emulation setting is later disabled. The separate blank-page
+ * probe proves that only connectOverCDP({ noDefaults: true }) reliably produces
+ * hidden -> visible on the CI browser; here that context visits the REAL DSH.
+ *
+ * Own one disposable Chrome process/profile per call. CDP is localhost-only;
+ * --no-sandbox and certificate trust bypass apply ONLY to the CI test fixture,
+ * just as in the existing browser and native visibility tests. No production
+ * settings, networking or certificates are touched.
+ */
+async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
+  const profile = await mkdtemp(join(tmpdir(), 'lanyard-dsh-native-tab-'))
+  const owned = spawn(process.env.LANYARD_CHROMIUM ?? chromium.executablePath(), [
+    '--no-sandbox',
+    `--user-data-dir=${profile}`,
+    '--remote-debugging-port=0',
+    '--remote-debugging-address=127.0.0.1',
+    '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--no-proxy-server',
+    '--ignore-certificate-errors', 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+  let launchError: Error | undefined
+  let spawned = false
+  owned.once('spawn', () => { spawned = true })
+  // Drain stderr so child processes cannot block on a full inherited pipe;
+  // do not print a diagnostic potentially containing browser profile details.
+  owned.stderr?.on('data', () => {})
+  // Failed spawn emits 'error' and 'close', but not 'exit'. Only that
+  // pre-spawn error proves no browser could hold a session-bearing profile;
+  // an error on an already running child must not permit early cleanup.
+  const exited = new Promise<void>(resolve => {
+    owned.once('exit', () => resolve())
+    owned.once('error', (error: Error) => {
+      launchError = error
+      if (!spawned) resolve()
+    })
+  })
+  let nativeBrowser: Browser | undefined
+  try {
+    let port: number | undefined
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (launchError) throw launchError
+      if (owned.exitCode !== null || owned.signalCode !== null)
+        throw new Error('native DSH browser exited before CDP became ready')
+      try {
+        const first = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]
+        if (first !== undefined && /^\d+$/.test(first) && Number(first) > 0 && Number(first) <= 65535) {
+          port = Number(first)
+          break
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      await delay(100)
+    }
+    if (port === undefined) throw new Error('native DSH browser CDP readiness timed out')
+    nativeBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { noDefaults: true })
+    const context = nativeBrowser.contexts()[0]
+    const page = context?.pages()[0]
+    if (!context || !page) throw new Error('native Chrome default context has no initial tab')
+    await page.setViewportSize({ width: 390, height: 844 })
+    // CDP device emulation changes layout/touch; it does NOT override focus or
+    // document.visibilityState. Keep its session alive until the test finishes.
+    const emulation = await context.newCDPSession(page)
+    await emulation.send('Emulation.setDeviceMetricsOverride', {
+      width: 390, height: 844, deviceScaleFactor: 3, mobile: true,
+    })
+    await emulation.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+    await emulation.send('Emulation.setUserAgentOverride', {
+      userAgent: nativePhoneUserAgent, platform: 'Android',
+    })
+    await run(page, context)
+  } finally {
+    if (nativeBrowser) {
+      await settleWithin(nativeBrowser.close().catch(() => {}), 5_000, undefined)
+    }
+    if (owned.exitCode === null && owned.signalCode === null) owned.kill('SIGTERM')
+    let stopped = await settleWithin(exited.then(() => true), 5_000, false)
+    if (!stopped) {
+      owned.kill('SIGKILL')
+      stopped = await settleWithin(exited.then(() => true), 5_000, false)
+    }
+    owned.stderr?.destroy()
+    // The profile contains a real test-session bearer cookie, so never leave
+    // it behind after a normal run or on assertion failures.
+    if (!stopped) throw new Error('owned native DSH browser did not exit; profile cleanup refused')
+    // Chrome helpers may briefly recreate profile files after the owned
+    // browser process exits. Node's bounded ENOTEMPTY/EBUSY retries keep
+    // cleanup fail-closed without hiding persistent profile-leak failures.
+    await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
 }
 
 /**
@@ -65,6 +214,39 @@ const apiAnswer = (page: Page, path: string): Promise<PageAnswer> => page.evalua
   })
   return { status: response.status, body: await response.text() }
 }, path)
+
+/**
+ * Re-run the real GUI's successful read-only session/list request after tab
+ * recovery, with a fresh correlation id. A hand-built empty args object is not
+ * the shell's contract on all supported DSH versions; replay only the exact
+ * observed request shape (without copying a browser bearer credential).
+ */
+async function recheckRealSessionList(page: Page, previous: Response, rpcId: string): Promise<boolean> {
+  let body: { type?: unknown; method?: unknown; rpcId?: unknown; payload?: unknown }
+  try {
+    body = previous.request().postDataJSON() as typeof body
+  } catch {
+    return false
+  }
+  if (!body || body.type !== 'client-request' || body.method !== 'session/list'
+    || typeof body.rpcId !== 'string' || body.rpcId.length === 0
+    || body.payload === undefined) return false
+  return page.evaluate(async ({ request, id }) => {
+    const response = await fetch('/api/session/list', {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...request, rpcId: id }),
+    })
+    if (response.status !== 200) return false
+    const reply = await response.json() as {
+      type?: unknown; rpcId?: unknown; result?: { ok?: unknown }
+    }
+    return reply.type === 'server-response' && reply.rpcId === id
+      && reply.result?.ok === true
+  }, { request: body, id: rpcId })
+}
 
 /** Whether the gate refused the page's own fetch. */
 const pageRefused = (answer: PageAnswer): boolean => answer.status === 403 && answer.body === REFUSAL_BODY
@@ -279,6 +461,9 @@ try {
   const executablePath = process.env.LANYARD_CHROMIUM
   // The certificate is self-signed by design; a real device accepts it once.
   const browser = await chromium.launch({
+    // Real tab visibility transitions require the headed browser. Linux CI
+    // supplies a virtual display; do not simulate document.visibilityState.
+    headless: false,
     // The deployment under test is on this machine's own LAN address. An
     // ambient HTTP(S)_PROXY — normal in a container — would send the
     // navigation through it and the connection is reset.
@@ -337,7 +522,7 @@ try {
     await Promise.all(checks)
 
     check('the link lands on the bare origin, the token gone from the address bar', page.url(), `${origin}/`)
-    const session = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const session = await oneUpstreamAuthCookie(paired)
     check('upstream set its session cookie, out of reach of the page\'s scripts', session?.httpOnly, true)
     // What the browser stored, not what the header said: Secure is what keeps
     // it off any later plain-http request to this machine's address.
@@ -358,6 +543,9 @@ try {
       deviceScaleFactor: 3,
       isMobile: true,
       hasTouch: true,
+      // Exercise the same Android UA as the native background/foreground tab.
+      // Viewport/isMobile/hasTouch alone still advertise desktop Linux.
+      userAgent: nativePhoneUserAgent,
       locale: 'en-US',
     })
     // Preserve the same mobile browser profile and its cookie through the
@@ -380,10 +568,13 @@ try {
       const phoneSize = await phonePage.evaluate(() => ({
         width: window.innerWidth,
         touchPoints: navigator.maxTouchPoints,
+        userAgent: navigator.userAgent,
       }))
       check('the task draft runs in an actual narrow touch-emulated viewport',
         phoneSize.width <= 390 && phoneSize.touchPoints > 0, true)
-      const phoneCookie = (await phone.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+      check('the real task and approval flow uses an Android mobile user agent',
+        phoneSize.userAgent.includes('Android') && phoneSize.userAgent.includes('Mobile'), true)
+      const phoneCookie = await oneUpstreamAuthCookie(phone)
       check('the phone stores the upstream session as an HttpOnly Secure cookie',
         phoneCookie?.httpOnly === true && phoneCookie.secure === true, true)
 
@@ -516,12 +707,11 @@ try {
       check('the phone reopens its saved TLS origin after network loss', resumedPhoneLanding?.status(), 200)
       check('the reopened phone authenticates a real session/list RPC',
         resumedPhoneReply.status() === 200 && resumedPhoneRpc.result?.ok === true, true)
-      const phoneCookieAfterRecovery = (await phone.cookies(origin)).find(
-        cookie => cookie.name.startsWith('dsh-auth-'))
+      const phoneCookieAfterRecovery = await oneUpstreamAuthCookie(phone)
       check('the reopened phone retains its existing secure HttpOnly session',
         phoneCookie !== undefined && phoneCookieAfterRecovery !== undefined
         && phoneCookieAfterRecovery.httpOnly && phoneCookieAfterRecovery.secure
-        && phoneCookieAfterRecovery.value === phoneCookie.value, true)
+        && phoneCookieAfterRecovery.name === phoneCookie.name && phoneCookieAfterRecovery.value === phoneCookie.value, true)
       const recoveredComposer = resumedPhone.locator('[data-composer-input][contenteditable="true"]').first()
       await recoveredComposer.waitFor({ state: 'visible', timeout: 20_000 })
       // An editor and an authenticated socket alone do not show that the
@@ -537,10 +727,201 @@ try {
         recoveryBounds !== null && recoveryBounds.x >= 0 && recoveryBounds.y >= 0
         && recoveryBounds.x + recoveryBounds.width <= phoneSize.width + 1
         && recoveryBounds.y + recoveryBounds.height <= 844, true)
+      // Attach before entering the draft: a spontaneous submission during
+      // typing must not escape the same zero-submission assertion as a delayed
+      // submission after backgrounding.
+      let backgroundPromptSubmissions = 0
+      resumedPhone.on('request', request => {
+        if (new URL(request.url()).pathname === '/api/session/prompt')
+          backgroundPromptSubmissions += 1
+      })
       const recoveredDraft = 'Continue from this workspace after reconnecting.'
       await recoveredComposer.fill(recoveredDraft)
       check('the reopened phone can type a fresh task draft',
         await recoveredComposer.textContent(), recoveredDraft)
+
+      // ---- native mobile Chromium: background a REAL DSH task tab ----
+      // The Playwright-managed phone above proves network recovery, but its
+      // force-focus CDP plumbing cannot produce actual hidden/visible events.
+      // Pair a separate native default-context mobile tab with this SAME live
+      // Host and prove the lifecycle there; do not fake visibility or count the
+      // empty-page diagnostic as a product test.
+      await withNativePhoneTab(async (nativePage, nativeContext) => {
+        const sessionReply = nativePage.waitForResponse(
+          response => new URL(response.url()).pathname === '/api/session/list')
+        const nativeLanding = await nativePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
+        const nativeListed = await sessionReply
+        const nativeRpc = await nativeListed.json() as { result?: { ok?: unknown } }
+        check('native mobile tab signs in through the REAL DSH pairing link',
+          nativeLanding?.status() === 200 && nativeListed.status() === 200
+          && nativeRpc.result?.ok === true, true)
+        check('native mobile tab strips the launch token before backgrounding',
+          nativePage.url(), `${origin}/`)
+        const nativeViewport = await nativePage.evaluate(() => ({
+          width: window.innerWidth, touchPoints: navigator.maxTouchPoints,
+          userAgent: navigator.userAgent, platform: navigator.platform,
+        }))
+        check('native DSH tab is phone-width with browser touch emulation',
+          nativeViewport.width <= 390 && nativeViewport.touchPoints > 0, true)
+        check('native DSH tab has an Android mobile user agent, not desktop Linux',
+          nativeViewport.userAgent.includes('Android')
+          && nativeViewport.userAgent.includes('Mobile')
+          && nativeViewport.platform === 'Android', true)
+
+        // A new browser profile has no client-side workspace selection, even
+        // though the actual workspace already exists in the running DSH Host.
+        const nativeComposer = nativePage.locator('[data-composer-input][contenteditable="true"]').first()
+        const composerAlreadyVisible = await nativeComposer.waitFor({
+          state: 'visible', timeout: 3_000,
+        }).then(() => true, () => false)
+        if (!composerAlreadyVisible) {
+          await nativePage.getByRole('button', { name: 'Add workspace', exact: true }).click()
+          const picker = nativePage.getByRole('dialog', { name: 'Select Workspace Directory' })
+          await picker.waitFor({ timeout: 15_000 })
+          await picker.getByRole('button', { name: 'Edit path' }).click()
+          const pathInput = picker.getByRole('textbox', { name: 'Edit path' })
+          await pathInput.fill(workspacePath)
+          await pathInput.press('Enter')
+          await picker.getByRole('button', { name: 'Open', exact: true }).click()
+          await picker.waitFor({ state: 'hidden', timeout: 15_000 })
+        }
+        await nativeComposer.waitFor({ state: 'visible', timeout: 20_000 })
+        // Observe the complete unsent-draft lifetime, including initial
+        // editing. Installing this only after fill would miss an unexpected
+        // automatic prompt submission triggered by typing.
+        let nativePromptSubmissions = 0
+        let tokenNavigationOnReturn = false
+        nativePage.on('request', request => {
+          const url = new URL(request.url())
+          if (url.pathname === '/api/session/prompt') nativePromptSubmissions += 1
+          if (request.isNavigationRequest() && url.searchParams.has('token'))
+            tokenNavigationOnReturn = true
+        })
+        const nativeDraft = 'Keep this genuine DSH phone task unsent through a tab switch.'
+        await nativeComposer.fill(nativeDraft)
+        check('native DSH mobile task is still an unsent editor draft',
+          await nativeComposer.textContent(), nativeDraft)
+        // The UI may respond to visibilitychange, not merely read the current
+        // visibilityState. Observe the real document events before switching;
+        // no synthetic events or CDP visibility overrides are permitted.
+        check('native DSH task tab starts visible before backgrounding',
+          await nativePage.evaluate(() => document.visibilityState), 'visible')
+        await nativePage.evaluate(() => {
+          const observed = window as Window & { __lanyardVisibilityEvents?: string[] }
+          observed.__lanyardVisibilityEvents = []
+          document.addEventListener('visibilitychange', () => {
+            observed.__lanyardVisibilityEvents?.push(document.visibilityState)
+          })
+        })
+        // URL-filtered cookies(origin) only includes cookies sent to '/'.
+        // An insecure duplicate scoped to /api can still reach task endpoints
+        // while escaping that query. This native profile is disposable and only
+        // visits the real DSH origin, so inspect its entire cookie jar.
+        const nativeAuthCookies = () => upstreamAuthCookies(nativeContext)
+        // Mutation control: add a deliberately insecure, API-scoped cookie
+        // WITHOUT sending any request, prove the old root-URL query misses it
+        // but the current whole-profile guard finds both, then remove it.
+        // Replacing nativeAuthCookies() with cookies(origin) must fail here.
+        const scopeProbe = 'dsh-auth-lanyard-path-probe'
+        await nativeContext.addCookies([{
+          name: scopeProbe,
+          value: 'test-only-no-session',
+          domain: new URL(origin).hostname,
+          path: '/api',
+          secure: false,
+          httpOnly: false,
+        }])
+        try {
+          check('root URL cookie query misses an insecure API-scoped duplicate',
+            (await nativeContext.cookies(origin)).some(cookie => cookie.name === scopeProbe), false)
+          check('native cookie guard detects the API-scoped duplicate',
+            (await nativeAuthCookies()).length, 2)
+          // The exact helper protecting every phone recovery must fail when
+          // the test injects a second insecure API-scoped auth cookie.
+          const rejectedDuplicate = await oneUpstreamAuthCookie(nativeContext)
+            .then(() => false, () => true)
+          check('phone recovery refuses a second API-scoped session cookie',
+            rejectedDuplicate, true)
+        } finally {
+          await nativeContext.clearCookies({ name: scopeProbe })
+        }
+        const nativeCookiesBefore = await nativeAuthCookies()
+        const nativeCookieBefore = nativeCookiesBefore[0]
+        check('native phone has exactly one upstream Secure HttpOnly SameSite=Strict session',
+          nativeCookiesBefore.length === 1 && nativeCookieBefore !== undefined
+          && nativeCookieBefore.secure && nativeCookieBefore.httpOnly
+          && nativeCookieBefore.sameSite === 'Strict', true)
+        // Negative control: a session downgraded to SameSite=Lax must fail the
+        // SAME guard used in the recovery flow, even with a correct bearer.
+        // Change a copy, never the real HttpOnly cookie in this paired profile.
+        let laxCookieRejected = false
+        try {
+          requireUpstreamAuthCookie(nativeCookiesBefore.map(cookie => ({
+            ...cookie, sameSite: 'Lax' as const,
+          })))
+        } catch (error) {
+          laxCookieRejected = error instanceof Error && error.message.includes('SameSite=Strict')
+        }
+        check('phone recovery rejects a downgraded SameSite=Lax session',
+          laxCookieRejected, true)
+
+        // This default-context browser is attached with noDefaults:true; the
+        // blank-page control proved that a real tab switch triggers visibility.
+        const otherTab = await nativeContext.newPage()
+        try {
+          await otherTab.bringToFront()
+          await nativePage.waitForFunction(
+            () => document.visibilityState === 'hidden', undefined,
+            { polling: 250, timeout: 10_000 },
+          )
+          check('real native DSH phone tab becomes hidden when switching tabs',
+            await nativePage.evaluate(() => document.visibilityState), 'hidden')
+        } finally {
+          await nativePage.bringToFront()
+          await otherTab.close()
+        }
+        await nativePage.waitForFunction(
+          () => document.visibilityState === 'visible', undefined,
+          { polling: 250, timeout: 10_000 },
+        )
+        check('returning to the same native DSH tab retains its exact unsent draft',
+          await nativeComposer.textContent(), nativeDraft)
+        const observedVisibility = await nativePage.evaluate(() =>
+          (window as Window & { __lanyardVisibilityEvents?: string[] }).__lanyardVisibilityEvents ?? [])
+        const hiddenEvent = observedVisibility.indexOf('hidden')
+        check('real DSH tab dispatches hidden then visible visibilitychange events',
+          hiddenEvent >= 0 && observedVisibility.slice(hiddenEvent + 1).includes('visible'), true)
+        check('foregrounded native DSH tab still completes a real Host RPC',
+          await recheckRealSessionList(nativePage, nativeListed, 'lanyard-native-foreground'), true)
+        const nativeCookiesAfter = await nativeAuthCookies()
+        const nativeCookieAfter = nativeCookiesAfter[0]
+        check('native DSH backgrounding retains exactly its Secure HttpOnly session',
+          nativeCookiesBefore.length === 1 && nativeCookiesAfter.length === 1
+          && nativeCookieAfter !== undefined && nativeCookieBefore !== undefined
+          && nativeCookieAfter.name === nativeCookieBefore.name
+          && nativeCookieAfter.secure && nativeCookieAfter.httpOnly
+          && nativeCookieAfter.value === nativeCookieBefore.value, true)
+        check('native tab still refuses the paired phone configuration API',
+          pageRefused(await apiAnswer(nativePage, '/api/settings/describe')), true)
+        check('native DSH tab returns at the token-free saved TLS origin',
+          nativePage.url(), `${origin}/`)
+        check('native DSH tab never navigates to a new launch-token URL',
+          tokenNavigationOnReturn, false)
+        check('native tab backgrounding never submits its unsent task',
+          nativePromptSubmissions, 0)
+      })
+      check('original recovered phone keeps its separate unsent task draft',
+        await recoveredComposer.textContent(), recoveredDraft)
+      check('the recovered Playwright tab still completes a real Host RPC',
+        await recheckRealSessionList(resumedPhone, resumedPhoneReply, 'lanyard-recovered-tab'), true)
+      const backgroundCookie = await oneUpstreamAuthCookie(phone)
+      check('backgrounding preserves the same secure HttpOnly phone session',
+        backgroundCookie !== undefined && phoneCookieAfterRecovery !== undefined
+        && backgroundCookie.secure && backgroundCookie.httpOnly
+        && backgroundCookie.name === phoneCookieAfterRecovery.name && backgroundCookie.value === phoneCookieAfterRecovery.value, true)
+      check('the returned tab remains at the token-free bookmarked address',
+        resumedPhone.url(), `${origin}/`)
+
       const resumedPhoneFrameDeadline = Date.now() + 10_000
       while (resumedPhoneFrames === 0 && Date.now() < resumedPhoneFrameDeadline) {
         await new Promise<void>(resolve => { setTimeout(resolve, 50) })
@@ -553,6 +934,10 @@ try {
       // navigation to a pairing token must not pass unnoticed.
       check('mobile recovery never revisits a launch-token URL', usedTokenOnResume, false)
       check('mobile recovery ends at the saved bare TLS address', resumedPhone.url(), `${origin}/`)
+      // Observe through the asynchronous stream and API work above. An automatic
+      // delayed submission is still a regression even if the draft looks intact.
+      check('recovered Playwright phone never submits its separate unsent draft',
+        backgroundPromptSubmissions, 0)
       await resumedPhone.close()
     }
 
@@ -594,25 +979,29 @@ try {
     const onlineSession = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/list')
     const onlinePage = await page.goto(origin, { waitUntil: 'domcontentloaded' })
     const onlineReply = await onlineSession
-    const onlineRpc = await onlineReply.json() as { result?: { ok?: unknown } }
     check('the bookmarked TLS address loads again without a new pairing link', onlinePage?.status(), 200)
+    // A navigation can supersede the shell's response before Playwright reads
+    // its body (Network.getResponseBody: no resource with given identifier).
+    // Still require the shell's own successful load RPC, then verify a fresh
+    // fully shaped Host RPC from the recovered document; do not weaken this to
+    // status-only admission or replay the obsolete response body.
     check('the prior session authenticates real RPC after connectivity returns',
-      onlineReply.status() === 200 && onlineRpc.result?.ok === true, true)
+      onlineReply.status() === 200
+      && await recheckRealSessionList(page, listed, 'lanyard-after-offline'), true)
     const onlineFrameDeadline = Date.now() + 10_000
     while (offlineRecoveryFrames === 0 && Date.now() < onlineFrameDeadline) {
       await new Promise<void>(resolve => { setTimeout(resolve, 50) })
     }
     check('a new WebSocket receives a frame after network recovery', offlineRecoveryFrames > 0, true)
     expectingOfflineRecovery = false
-    const onlineCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const onlineCookie = await oneUpstreamAuthCookie(paired)
     check('network recovery keeps the same HttpOnly session cookie',
-      session !== undefined && onlineCookie !== undefined && onlineCookie.value === session.value, true)
+      session !== undefined && onlineCookie !== undefined && onlineCookie.name === session.name && onlineCookie.value === session.value, true)
     check('the configuration plane stays refused after network recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
 
     // Save the mobile profile's existing cookie before the actual host reboot.
-    const mobileCookieBeforeRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const mobileCookieBeforeRestart = await oneUpstreamAuthCookie(phone)
 
     // ---- restart dsh: the same phone should resume without scanning again ----
     const restarted = await restart()
@@ -641,9 +1030,9 @@ try {
     }
     check('the recovered stream delivers a frame on a new WebSocket', recoveredMuxFrames > 0, true)
     // Never log the cookie value in CI: it is a bearer credential.
-    const resumedCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const resumedCookie = await oneUpstreamAuthCookie(paired)
     check('the browser retained its existing HttpOnly session rather than getting a new one',
-      session !== undefined && resumedCookie !== undefined && resumedCookie.value === session.value, true)
+      session !== undefined && resumedCookie !== undefined && resumedCookie.name === session.name && resumedCookie.value === session.value, true)
     check('the configuration plane is still refused after recovery',
       pageRefused(await apiAnswer(page, '/api/settings/describe')), true)
 
@@ -678,10 +1067,10 @@ try {
       await new Promise<void>(resolve => { setTimeout(resolve, 50) })
     }
     check('the new tab receives a frame on its own stream WebSocket', reopenedMuxFrames > 0, true)
-    const reopenedCookie = (await paired.cookies(origin)).find(cookie => cookie.name.startsWith('dsh-auth-'))
+    const reopenedCookie = await oneUpstreamAuthCookie(paired)
     check('reopening the tab retains the original HttpOnly session cookie',
       session !== undefined && reopenedCookie !== undefined
-      && reopenedCookie.httpOnly && reopenedCookie.value === session.value, true)
+      && reopenedCookie.httpOnly && reopenedCookie.name === session.name && reopenedCookie.value === session.value, true)
     check('the new tab still cannot reach the configuration plane',
       pageRefused(await apiAnswer(reopened, '/api/settings/describe')), true)
     // Evaluate navigation history and final URL *after* asynchronous RPC,
@@ -716,12 +1105,11 @@ try {
       mobileRestartLanding?.status(), 200)
     check('the reopened phone makes a successful Host session/list RPC after restart',
       mobileRestartReply.status() === 200 && mobileRestartRpc.result?.ok === true, true)
-    const mobileCookieAfterRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const mobileCookieAfterRestart = await oneUpstreamAuthCookie(phone)
     check('DSH restart preserves the phone original secure HttpOnly session cookie',
       mobileCookieBeforeRestart !== undefined && mobileCookieAfterRestart !== undefined
       && mobileCookieAfterRestart.httpOnly && mobileCookieAfterRestart.secure
-      && mobileCookieAfterRestart.value === mobileCookieBeforeRestart.value, true)
+      && mobileCookieAfterRestart.name === mobileCookieBeforeRestart.name && mobileCookieAfterRestart.value === mobileCookieBeforeRestart.value, true)
     const restartMobileComposer = mobileAfterRestart.locator('[data-composer-input][contenteditable="true"]').first()
     await restartMobileComposer.waitFor({ state: 'visible', timeout: 20_000 })
     const mobileRestartReceipt = mobileAfterRestart.getByText(/Feedback recorded for session/)
@@ -1256,8 +1644,7 @@ try {
     // reloaded its persisted session. Keep the original paired phone profile;
     // neither a new browser context nor the old launch-token URL may mask
     // a lost session. Synthetic inference is still bound only to loopback.
-    const completedCookieBeforeRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const completedCookieBeforeRestart = await oneUpstreamAuthCookie(phone)
     // Preserve the original completed-task baseline across the cookie await;
     // a replay during that read must not become part of a new baseline.
     const completedCallsBeforeRestart = completedToolRequests
@@ -1366,12 +1753,11 @@ try {
     }
     check('the reopened phone receives a new Remote-mux frame after Host reboot',
       postRestartFrames > 0, true)
-    const completedCookieAfterRestart = (await phone.cookies(origin)).find(
-      cookie => cookie.name.startsWith('dsh-auth-'))
+    const completedCookieAfterRestart = await oneUpstreamAuthCookie(phone)
     check('the completed-task reboot retains the original secure HttpOnly phone cookie',
       completedCookieBeforeRestart !== undefined && completedCookieAfterRestart !== undefined
       && completedCookieAfterRestart.httpOnly && completedCookieAfterRestart.secure
-      && completedCookieAfterRestart.value === completedCookieBeforeRestart.value, true)
+      && completedCookieAfterRestart.name === completedCookieBeforeRestart.name && completedCookieAfterRestart.value === completedCookieBeforeRestart.value, true)
     check('completed-task reboot leaves the phone configuration plane pinned',
       pageRefused(await apiAnswer(afterHostRestart, '/api/settings/describe')), true)
     check('completed-task reboot does not reuse any launch-token navigation',
@@ -1394,7 +1780,7 @@ try {
     check('the previous process\'s pairing link is invalid after restart', expired?.status(), 401)
     const forged = await hostilePage.goto(`${origin}/?token=${'A'.repeat(43)}`, { waitUntil: 'domcontentloaded' })
     check('a link carrying the wrong token is refused', forged?.status(), 401)
-    check('and leaves no session behind', (await hostile.cookies(origin)).some(cookie => cookie.name.startsWith('dsh-auth-')), false)
+    check('and leaves no session behind', (await upstreamAuthCookies(hostile)).length, 0)
 
     // Even if an unpaired device learns a real Session ID, it must neither
     // execute a task nor read that Session's history. Use fully shaped RPCs:

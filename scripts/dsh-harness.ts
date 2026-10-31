@@ -19,7 +19,7 @@ import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
@@ -114,9 +114,21 @@ export function unresolvedDependency(reported: string): string | undefined {
  * @param reported - the failing command's combined output.
  * @param requested - the package this suite asked to install.
  */
-export function isUpstreamGraphIncomplete(reported: string, requested: string): boolean {
+/**
+ * A missing DSH release-wave member can mean that upstream is mid-publish.
+ * Missing third-party packages (or unrelated @deepseek-ai packages) are real
+ * install failures, even when they occur under the DSH dependency graph.
+ * Do not misclassify those failures as an incomplete DSH publish.
+ */
+export function isMissingDshWaveDependency(reported: string, requested: readonly string[]): boolean {
   const unresolved = unresolvedDependency(reported)
-  return unresolved !== undefined && unresolved !== requested
+  return unresolved !== undefined
+    && unresolved.startsWith('@deepseek-ai/dsh-')
+    && !requested.includes(unresolved)
+}
+
+export function isUpstreamGraphIncomplete(reported: string, requested: string): boolean {
+  return isMissingDshWaveDependency(reported, [requested])
 }
 
 /**
@@ -358,6 +370,61 @@ export const admitted = (answer: Answer): boolean => !refused(answer)
 /** The spawned CLI: stdin is ignored, both output streams are piped. */
 type DshProcess = ChildProcessByStdio<null, Readable, Readable>
 
+/**
+ * Stop a disposable DSH and await its actual exit before reusing ports or
+ * removing its DSH_HOME. Signalling alone does not mean the process has left:
+ * otherwise the final cleanup can delete a live server's files underneath it,
+ * or fail with an in-use directory on other platforms.
+ */
+export async function stopDshProcess(server: DshProcess, gracefulTimeoutMs = 15_000): Promise<void> {
+  // Failed spawn has no process to signal and may emit 'error' without 'exit'.
+  if (server.pid === undefined || server.exitCode !== null || server.signalCode !== null) return
+  await new Promise<void>((resolve, reject) => {
+    let forced = false
+    let forceTimeout: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      clearTimeout(graceTimeout)
+      if (forceTimeout !== undefined) clearTimeout(forceTimeout)
+      server.off('exit', exited)
+      server.off('error', failed)
+    }
+    const exited = (): void => {
+      cleanup()
+      // A SIGKILL means the graceful-stop contract failed. Do not quietly
+      // count this as a clean shutdown, or erase the workspace in finally.
+      if (forced) reject(new Error('lanyard e2e: dsh ignored SIGTERM and required SIGKILL'))
+      else resolve()
+    }
+    const failed = (error: Error): void => {
+      cleanup()
+      reject(error)
+    }
+    const graceTimeout = setTimeout(() => {
+      forced = true
+      // Keep the promise pending until the child actually exits. A signal
+      // request alone must never allow the runner to delete a live DSH_HOME.
+      forceTimeout = setTimeout(() => {
+        cleanup()
+        reject(new Error('lanyard e2e: dsh did not exit within 5 seconds after SIGKILL'))
+      }, 5_000)
+      try {
+        server.kill('SIGKILL')
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
+    }, gracefulTimeoutMs)
+    server.once('exit', exited)
+    server.once('error', failed)
+    try {
+      server.kill('SIGTERM')
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
+  })
+}
+
 /** The readiness lines under test: lanyard's pairing link and fingerprint, and upstream's own URL line. */
 export interface ReadinessLines {
   pairingLink: string
@@ -365,13 +432,29 @@ export interface ReadinessLines {
   localUrl: string
 }
 
+/** Parse each readiness signal separately, since startup can interleave noisy logs. */
+function readinessParts(output: string): Record<keyof ReadinessLines, string | undefined> {
+  return {
+    pairingLink: /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1],
+    fingerprint: /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1],
+    localUrl: /^dsh web: (https?:\/\/\S+)(?:[ \t]+[^\r\n]*)?\r?\n/m.exec(output)?.[1],
+  }
+}
+
 /** Ignore diagnostic lines sharing the runtime prefix; only an actual URL signals readiness. */
 export function readinessLines(output: string): ReadinessLines | undefined {
-  const pairingLink = /lanyard: pair a device by opening (\S+) once/.exec(output)?.[1]
-  const fingerprint = /lanyard: the phone should show certificate SHA-256 (\S+) /.exec(output)?.[1]
-  const localUrl = /^dsh web: (https?:\/\/\S+)(?:[ \t]+[^\r\n]*)?\r?\n/m.exec(output)?.[1]
+  const { pairingLink, fingerprint, localUrl } = readinessParts(output)
   if (pairingLink === undefined || fingerprint === undefined || localUrl === undefined) return undefined
   return { pairingLink, fingerprint, localUrl }
+}
+
+/**
+ * Strip the upstream per-process launch token from failed startup diagnostics.
+ * Readiness parsing still sees the original output; printing it verbatim after
+ * a timeout could publish a live pairing credential in public CI logs.
+ */
+export function redactReadinessOutput(output: string): string {
+  return output.replace(/([?&]token=)[^&#\s]+/gi, '$1[REDACTED]')
 }
 
 /**
@@ -379,25 +462,83 @@ export function readinessLines(output: string): ReadinessLines | undefined {
  * Loader settles, in either order. The fingerprint line is lanyard's last on a
  * pipe, where no QR code is drawn, so waiting for it waits for the whole block.
  */
-function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
+const MAX_STARTUP_LOG_CHARS = 64 * 1024
+
+export function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
   return new Promise((resolve, reject) => {
-    let output = ''
-    const timer = setTimeout(() => {
-      reject(new Error(`no readiness lines within ${String(BOOT_TIMEOUT_MS)}ms:\n${output}`))
-    }, BOOT_TIMEOUT_MS)
-    const read = (chunk: Buffer | string): void => {
-      output += String(chunk)
-      const lines = readinessLines(output)
-      if (lines === undefined) return
+    // These pipes can interleave in the middle of a ?token= URL. Combining
+    // their chunks invents a readiness URL and can expose the real token's
+    // remaining fragment when a failed start prints diagnostics.
+    const outputByStream = { stdout: '', stderr: '' }
+    const omittedByStream = { stdout: 0, stderr: 0 }
+    const observed: Partial<ReadinessLines> = {}
+    const diagnostic = (): string => (['stdout', 'stderr'] as const).map(stream =>
+      '[' + stream + ']\n'
+      + (omittedByStream[stream] === 0 ? '' : '[omitted ' + String(omittedByStream[stream]) + ' earlier startup log characters]\n')
+      + redactReadinessOutput(outputByStream[stream]),
+    ).join('\n')
+    let settled = false
+    const cleanup = (): void => {
       clearTimeout(timer)
+      server.stdout.off('data', readStdout)
+      server.stderr.off('data', readStderr)
+      server.off('exit', exited)
+      server.off('error', failed)
+      // No readiness parser must keep accumulating logs, but the child's
+      // piped stdout/stderr must still be drained or the DSH process can stall.
+      server.stdout.resume()
+      server.stderr.resume()
+    }
+    const succeed = (lines: ReadinessLines): void => {
+      if (settled) return
+      settled = true
+      cleanup()
       resolve(lines)
     }
-    server.stdout.on('data', read)
-    server.stderr.on('data', read)
-    server.once('exit', (code) => {
-      clearTimeout(timer)
-      reject(new Error(`dsh exited (${String(code)}) before serving:\n${output}`))
-    })
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+    const timer = setTimeout(() => {
+      fail(new Error('no readiness lines within ' + String(BOOT_TIMEOUT_MS) + 'ms:\n' + diagnostic()))
+    }, BOOT_TIMEOUT_MS)
+    const read = (stream: 'stdout' | 'stderr', chunk: Buffer | string): void => {
+      outputByStream[stream] += String(chunk)
+      // Parse each pipe independently: neither readiness nor log redaction may
+      // splice together chunks from different OS streams.
+      const parts = readinessParts(outputByStream[stream])
+      if (parts.localUrl !== undefined) observed.localUrl = parts.localUrl
+      if (parts.pairingLink !== undefined) observed.pairingLink = parts.pairingLink
+      if (parts.fingerprint !== undefined) observed.fingerprint = parts.fingerprint
+      const { localUrl, pairingLink, fingerprint } = observed
+      if (localUrl !== undefined && pairingLink !== undefined && fingerprint !== undefined) {
+        succeed({ localUrl, pairingLink, fingerprint })
+        return
+      }
+      // Discard a truncated partial line too: cutting a ?token= URL at an
+      // arbitrary offset could leave a bare credential fragment in diagnostics.
+      if (outputByStream[stream].length > MAX_STARTUP_LOG_CHARS / 2) {
+        const tail = outputByStream[stream].slice(-(MAX_STARTUP_LOG_CHARS / 2))
+        const newline = tail.indexOf('\n')
+        const kept = newline === -1 ? '' : tail.slice(newline + 1)
+        omittedByStream[stream] += outputByStream[stream].length - kept.length
+        outputByStream[stream] = kept
+      }
+    }
+    const readStdout = (chunk: Buffer | string): void => { read('stdout', chunk) }
+    const readStderr = (chunk: Buffer | string): void => { read('stderr', chunk) }
+    const exited = (code: number | null): void => {
+      fail(new Error('dsh exited (' + String(code) + ') before serving:\n' + diagnostic()))
+    }
+    const failed = (error: Error): void => {
+      fail(new Error('dsh could not start: ' + error.message + '\n' + diagnostic(), { cause: error }))
+    }
+    server.stdout.on('data', readStdout)
+    server.stderr.on('data', readStderr)
+    server.once('exit', exited)
+    server.once('error', failed)
   })
 }
 
@@ -406,10 +547,24 @@ function awaitReadiness(server: DshProcess): Promise<ReadinessLines> {
  * @param body - receives the live deployment facts.
  * @returns whatever `body` returned.
  */
+/** Test-only environment must never redirect a disposable DSH to the caller's real profile. */
+export function isolatedDshEnvironment(
+  home: string,
+  overrides: Readonly<Record<string, string>> = {},
+  inherited: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (Object.hasOwn(overrides, 'DSH_HOME')) {
+    throw new Error('lanyard e2e: DSH_HOME cannot be overridden for an isolated deployment')
+  }
+  return { ...inherited, ...overrides, DSH_HOME: home }
+}
+
 /** Test-only Host configuration. The overlay is applied after the shipped bundles. */
 export interface DeploymentOptions {
   overlay?: string
   env?: Readonly<Record<string, string>>
+  /** Already-verified install candidate; otherwise pack this checkout. */
+  tarball?: string
 }
 
 export async function withDshDeployment<T>(
@@ -420,17 +575,27 @@ export async function withDshDeployment<T>(
   const home = join(workspace, 'home')
   let server: DshProcess | undefined
   try {
+    // Fail before packing or installing anything if a caller targets a real profile.
+    const env = isolatedDshEnvironment(home, options.env)
     console.log(`lanyard e2e: workspace ${workspace}`)
-    console.log('lanyard e2e: packing the plugin as a publishable tarball')
-    run('pnpm', ['pack', '--pack-destination', workspace], { cwd: ROOT })
     const { name, version } = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as Manifest
-    const tarball = join(workspace, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
+    const expectedTarball = join(workspace, `${name.replace('@', '').replace('/', '-')}-${version}.tgz`)
+    const tarball = options.tarball ?? expectedTarball
+    if (options.tarball === undefined) {
+      console.log('lanyard e2e: packing the plugin as a publishable tarball')
+      run('pnpm', ['pack', '--pack-destination', workspace], { cwd: ROOT })
+    } else {
+      if (!isAbsolute(tarball) || basename(tarball) !== basename(expectedTarball) || !existsSync(tarball)) {
+        throw new Error('lanyard e2e: candidate tarball must be an existing absolute path with the reviewed package name')
+      }
+      console.log('lanyard e2e: installing the externally verified candidate tarball (not repacking)')
+    }
 
     console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${CLI_SPEC}`)
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
     installCli(workspace, CLI_SPEC)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
-    const env: NodeJS.ProcessEnv = { ...process.env, DSH_HOME: home, ...options.env }
+
 
     console.log('lanyard e2e: dsh plugin add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], { cwd: workspace, env })
@@ -474,24 +639,9 @@ export async function withDshDeployment<T>(
       if (previous === undefined || previous.exitCode !== null || previous.signalCode !== null) {
         throw new Error('lanyard e2e: cannot restart a dsh process that is no longer running')
       }
-      // Wait for the old process to release BOTH ports before spawning a new
-      // one. Merely sending SIGTERM would race the new carrier against it.
-      const exited = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          previous.kill('SIGKILL')
-          reject(new Error('lanyard e2e: dsh did not stop within 15 seconds'))
-        }, 15_000)
-        previous.once('exit', () => {
-          clearTimeout(timeout)
-          resolve()
-        })
-        previous.once('error', (error) => {
-          clearTimeout(timeout)
-          reject(error)
-        })
-      })
-      previous.kill('SIGTERM')
-      await exited
+      // Both restart and final teardown must wait for the actual process
+      // exit; otherwise a live DSH can retain ports or read deleted files.
+      await stopDshProcess(previous)
       console.log('lanyard e2e: restarting dsh in the same workspace and on the same ports')
       server = boot()
       return await awaitReadiness(server)
@@ -502,7 +652,10 @@ export async function withDshDeployment<T>(
       bundles: profile.dsh?.profile?.bundles ?? [], restart,
     })
   } finally {
-    server?.kill('SIGTERM')
+    // Do not unlink an in-use profile or TLS private key while the child is
+    // still shutting down. A failed stop deliberately leaves the workspace
+    // intact for diagnosis rather than deleting a live process's state.
+    if (server !== undefined) await stopDshProcess(server)
     if (process.env.DSH_E2E_KEEP === undefined) rmSync(workspace, { recursive: true, force: true })
     else console.log(`lanyard e2e: kept ${workspace}`)
   }

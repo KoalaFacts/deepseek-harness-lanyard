@@ -35,7 +35,20 @@ pnpm pack --pack-destination .
 dsh plugin --profile web add "$PWD/koalafacts-deepseek-harness-lanyard-0.2.0.tgz"
 ```
 
-上面的 `.tgz` 文件名对应当前 `package.json` 的 `0.2.0` 版本；以后版本号变了，就以 `pnpm pack` 生成的实际文件名为准。在 Windows PowerShell 中，最后一条命令请改用生成的 `.tgz` 文件的绝对路径，不要照抄 POSIX Shell 的 `$PWD/...` 写法。建议同时记录 `git rev-parse HEAD`，方便日后确认自己安装的是哪一个源码提交。
+上面的 `.tgz` 文件名对应当前 `package.json` 的 `0.2.0` 版本；以后版本号变了，就以 `pnpm pack` 生成的实际文件名为准。建议同时记录 `git rev-parse HEAD`，方便日后确认自己安装的是哪一个源码提交。
+
+如果使用 **Windows PowerShell**，先照常运行前面的 `git clone`、冻结依赖安装、`npm run check` 和 `pnpm pack`，然后**只替换最后一条** `dsh plugin ... add` 命令。下面会从 `package.json` 读取实际版本，避免猜测文件名或误装目录里更旧的安装包：
+
+```powershell
+$version = (Get-Content -LiteralPath .\package.json -Raw | ConvertFrom-Json).version
+$tarball = Join-Path (Get-Location) "koalafacts-deepseek-harness-lanyard-$version.tgz"
+if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) {
+  throw "Missing local tarball: $tarball. Run pnpm pack first."
+}
+dsh plugin --profile web add $tarball
+```
+
+这仍然只在运行 DSH 的电脑上安装本地打包产物，不代表 npm 已正式发布，也不会自动开放局域网监听。
 
 这种方式**不会向 npm 发布任何东西，也不会自动开放局域网**。项目现有的真实 DSH 端到端测试采用同类本地 tarball 在干净环境安装，但这不代表正式 npm 发布或实体手机测试已经完成。安装之后仍要按照下文指定可信局域网地址启动 dsh，并遵循 TLS 证书指纹核对和配对步骤。
 
@@ -80,6 +93,8 @@ dsh 自己那行 `dsh web:` 里的 `(LAN: …)` 链接别去点：它走明文 h
 | `--network-port <port>` | 网络上的设备连接的端口；不指定就是 3443 |
 | `--keep-awake` | 阻止主机休眠，免得手机用到一半被断开 |
 | `--port`、`--no-open`、`--trusted-host` | 与上游行为一致；`--port` 仍然是本机自己用的端口 |
+
+在 macOS 上，`--keep-awake` 使用 `caffeinate -i -w` 监视 dsh 进程；即使 dsh 被强制终止、未执行清理，闲置休眠抑制也会随进程退出而释放。Linux 上，`systemd-inhibit` 现在使用 GNU `tail --pid` 监视 dsh，进程异常退出后也会在短时间内释放抑制（需要 GNU `tail`；如果未安装，`--keep-awake` 会在启动时明确报出缺少该工具，而非继续启动）。Windows 上的 PowerShell 休眠抑制进程使用显式 UInt32 参数传入休眠标志（避免 Windows PowerShell 5.1 把高位十六进制字面量识别为负数），先获取 dsh 进程对象，初始化或运行时出错时立即失败（不会在报错后继续给出虚假的就绪信号），并要求 Windows 休眠抑制返回非空且非零的结果，确认成功后才等待 dsh 退出；如果系统拒绝抑制请求，辅助进程会报错退出，而非在未提供保护时继续等待。Windows 启动时会等到 PowerShell 在 Win32 休眠抑制成功后明确回报（最长 20 秒），如果失败或一直没有确认就拒绝启动；运行中意外退出仍会告警。如果启动确认失败，会尝试终止未确认的辅助程序；即使终止信号报错，也会最多等待七秒检查是否退出，再报告原始启动失败；如果无法确认清理完成，会警告可能有残留休眠抑制进程。 正常退出时，即使终止信号报错，也会继续有限时地检查辅助进程是否退出；若仍无法确认，会警告而不是让本插件的清理操作报错（上游子进程层还有独立的关闭规则）。设计上即使 dsh 被强制终止也会释放抑制，但仍待 Windows 实机验证。启动时只从 `PATH` 中的绝对目录查找休眠抑制工具（Linux 还包括 `tail`），忽略 `.` 等相对目录，避免选中工作目录中不可信的同名程序；找到后直接按绝对路径执行，不再重新搜索 `PATH`。如果没有符合要求的工具，`--keep-awake` 会明确拒绝启动。Windows 只选择原生 `powershell.exe`；DSH 的子进程不会通过命令解释器运行 `.cmd`/`.bat` 包装脚本，因此不会误把这些脚本认作可用的休眠抑制工具。此选项不阻止主动休眠，也不保证合上笔记本盖后仍能提供服务。
 
 需要 dsh 0.1.5-rc.3 或更高版本，并针对 dsh 的最新版本测试。从 0.1.7 起，dsh 会自己检查这个最低版本：低于它的版本既不会安装这个插件包，也不会加载它，于是 `--host 0.0.0.0` 照旧被拒绝。更早的 dsh 不做这项检查；如果它还没有自带的浏览器登录（0.1.2 之前），这个插件会在启动时直接报错，并拒绝网络上的所有设备，而不是在没有登录的情况下对局域网敞开。
 

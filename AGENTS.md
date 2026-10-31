@@ -31,7 +31,7 @@ npm run typecheck
 npm run test               # vitest
 npm run build              # tsc to lib/ + lib/types, then scripts/verify-build.ts
 npm run test:e2e           # boot a real dsh and drive the gate over TLS
-npm run test:e2e:browser   # drive the pairing flow in Chromium
+npm run test:e2e:browser   # headed Chromium; on Linux without a display use xvfb-run -a
 node scripts/sync-dsh.ts   # move the dsh-* devDependencies to dsh@latest, then pnpm install
 ```
 
@@ -195,7 +195,7 @@ Four layers, each covering what the one below cannot:
 | `npm run test` | unit behavior against published `@deepseek-ai/dsh-*`, no harness checkout |
 | `npm run build` | every subpath the shipped `lib/` exports loads |
 | `npm run test:e2e` | a real `dsh` boot, gate driven from the machine's LAN address over TLS |
-| `npm run test:e2e:browser` | the pairing flow in Chromium — the only thing that proves the session rides the shell's own fetches and WebSocket, and that nothing the shell calls on load is refused by accident |
+| `npm run test:e2e:browser` | the actual pairing, task and approval flow in Chromium; background/foreground checks use an owned native Chromium default profile attached with `connectOverCDP({ noDefaults: true })` to a real DSH pairing and Host session (Playwright-managed contexts otherwise force visibility), preserving a pending draft and Secure HttpOnly session. Test-only Chromium bypasses the self-signed certificate warning; this proves neither physical iOS/Android screen lock nor OS eviction |
 
 Run `npm run test:mutation:tls` for the TLS identity recovery guards: it runs the real focused Vitest cases against the original source and five deliberately broken variants, verifies assertion-specific failures, and restores the source.
 
@@ -233,7 +233,7 @@ The publish-payload allowlist is an explicit 32-file inventory in `scripts/paylo
 
 On each successful **main** push, the CI `check` job additionally creates an unpublished `.tgz` from that same checked `lib/` with `npm pack --ignore-scripts`, then saves the tarball, a SHA-256 checksum, and the source commit SHA as a seven-day GitHub Actions artifact. The artifact is not generated on PRs and holds no npm publishing credentials. Treat it as a manual **install candidate**, not as a release: only use a run where `check`, real-DSH `e2e`, and `browser` all completed successfully. This adds no new dependency or build step to the credential-bearing `publish-npm` job. The checksum shares the archive and does not independently attest provenance. The operator must check the GitHub run SHA; physical iOS/Android validation is still separate.
 
-After the successful main check, real-DSH E2E and browser jobs, `candidate-consumer` downloads **that same run's** artifact into a separate runner, checks its exact three members, source SHA and tarball checksum, then installs that downloaded `.tgz` with the published dsh CLI in a fresh DSH_HOME. It verifies the resulting web profile and seven installed JS/declaration exports. This is an automated **clean install** acceptance that the source-packing E2E cannot provide; it does not start a mobile GUI session or validate real phone behavior. Candidate failures must remain visible as CI failures, not hidden as skipped successes.
+After check, real-DSH E2E and browser jobs pass, `candidate-consumer` runs on **both PRs and main**. On PRs it builds and packs the tested merge checkout **inside that job only**; no installable PR artifact is uploaded. On main it instead downloads **that same run's** artifact into a separate runner. Both paths check the exact three members, source SHA and tarball checksum, install the actual `.tgz` with the published dsh CLI in a clean DSH_HOME, and verify the web profile and seven installed JS/declaration export paths. Then a fresh real DSH carrier boots the **same verified tarball**, confirms an unpaired LAN request is denied, and performs upstream token-to-Secure-cookie pairing over certificate-validated TLS. Optional Cordis/DSH peer imports are exercised through that carrier rather than by an unsupported standalone Node import. This is automated install-and-boot acceptance, **not** physical iOS/Android verification or npm publication. Candidate failures remain CI failures, not skipped successes.
 
 Two workflows, run in order from the Actions tab. Both are deliberate: pushing a tag starts nothing, and neither runs on its own.
 

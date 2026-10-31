@@ -11,7 +11,7 @@
 
 import { pathToFileURL } from 'node:url'
 import { realpathSync } from 'node:fs'
-import { ROOT, run, unresolvedDependency } from './dsh-harness.ts'
+import { ROOT, run, isMissingDshWaveDependency, unresolvedDependency } from './dsh-harness.ts'
 
 /** What the contract job tests against: the CLI's whole surface, plus the three contracts the unit suite reads. */
 export const NEXT_PACKAGES = [
@@ -28,8 +28,7 @@ export const NEXT_PACKAGES = [
  * @param requested - the packages this install asked for by name.
  */
 export function isWaveIncomplete(reported: string, requested: readonly string[]): boolean {
-  const unresolved = unresolvedDependency(reported)
-  return unresolved !== undefined && !requested.includes(unresolved)
+  return isMissingDshWaveDependency(reported, requested)
 }
 
 const invoked = process.argv[1]

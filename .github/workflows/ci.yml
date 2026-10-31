@@ -9,8 +9,8 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Jobs never push, comment, or publish. The check job uploads only an
-# ephemeral, unpublished install candidate from main after its local gates.
+# Jobs never push, comment, or publish. Main uploads an ephemeral unpublished
+# install candidate; PR consumer checks pack into the job workspace only.
 # Without this block jobs could inherit the repository's default write scopes,
 # including on pull requests from automated dependency bumps. Artifact upload
 # uses the Actions runtime and does not require repository write permission.
@@ -62,6 +62,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  windows-keep-awake:
+    # Execute the actual Win32 hold and forced-parent-exit cleanup, not just
+    # source/argv assertions made on Linux. This is not a physical sleep test.
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run tests/keep-awake.spec.ts
+
   e2e:
     # Installs the published dsh CLI and boots it with this plugin installed,
     # then drives the gate from the runner's own LAN address over real TLS.
@@ -96,14 +113,21 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:browser
+      - id: chromium
+        run: npx playwright install --with-deps chromium
+      - name: Diagnose native tab visibility without business state
+        run: xvfb-run -a node scripts/probe-native-visibility.mjs .
+      - name: Full browser product gate
+        if: ${{ !cancelled() && steps.chromium.outcome == 'success' }}
+        run: xvfb-run -a npm run test:e2e:browser
 
   candidate-consumer:
-    # The regular e2e packs its own checkout; this job validates the artifact
-    # a user actually downloads. No npm publish or long-running server.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check, e2e, browser]
+    # PR: install an unpublished, locally packed checkout in a clean real DSH
+    # consumer before merge, without uploading an installable PR artifact.
+    # Main: independently download/install the artifact a user receives.
+    # The PR checkout is GitHub's tested merge ref (github.sha), not head.sha.
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: [check, e2e, browser, windows-keep-awake]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -116,7 +140,29 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Install consumer smoke harness dependencies on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: pnpm install --frozen-lockfile
+      - name: Prepare ephemeral PR consumer tarball (never uploaded)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          npm run build
+          mkdir -p "$RUNNER_TEMP/lanyard-candidate"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/lanyard-candidate"
+          tarballs=("$RUNNER_TEMP"/lanyard-candidate/*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ] || [ ! -f "${tarballs[0]}" ]; then
+            echo "::error::expected exactly one ephemeral PR tarball"
+            exit 1
+          fi
+          (
+            cd "$RUNNER_TEMP/lanyard-candidate"
+            sha256sum -- "$(basename "${tarballs[0]}")" > SHA256SUMS
+            printf '%s\n' "$GITHUB_SHA" > SOURCE_SHA
+          )
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: unpublished-lanyard-${{ github.sha }}
           path: ${{ runner.temp }}/lanyard-candidate

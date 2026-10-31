@@ -58,7 +58,7 @@ jobs:
       - name: Drive the pairing flow in a browser
         env:
           DSH_E2E_VERSION: ${{ inputs.cli_version || matrix.channel }}
-        run: npm run test:e2e:browser
+        run: xvfb-run -a npm run test:e2e:browser
 
   contract:
     # The unit suite checks three upstream contracts against whatever the
