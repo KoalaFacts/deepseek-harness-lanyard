@@ -62,8 +62,14 @@ describe('resolveInhibitor', () => {
     expect(script).toContain(`Get-Process -Id ${process.pid} -ErrorAction Stop`)
     expect(script).toContain('Wait-Process -InputObject $dsh -ErrorAction Stop')
     expect(script).not.toContain('Start-Sleep')
-    expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('::SetThreadExecutionState'))
-    expect(script.indexOf('::SetThreadExecutionState')).toBeLessThan(script.indexOf('Wait-Process -InputObject'))
+    // Win32 returns zero on failure without throwing. Do not wait forever
+    // under a false belief that the sleep assertion was acquired.
+    expect(script).toContain('$state = [DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001)')
+    expect(script).toContain('if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" }')
+    expect(script).not.toContain('::SetThreadExecutionState(0x80000001) | Out-Null')
+    expect(script.indexOf('Get-Process -Id')).toBeLessThan(script.indexOf('$state ='))
+    expect(script.indexOf('$state =')).toBeLessThan(script.indexOf('if ($state -eq 0)'))
+    expect(script.indexOf('if ($state -eq 0)')).toBeLessThan(script.indexOf('Wait-Process -InputObject'))
   })
 
   it('blocks sleep on Linux and watches the owning dsh PID rather than sleeping forever', () => {

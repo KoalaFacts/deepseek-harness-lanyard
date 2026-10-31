@@ -54,7 +54,8 @@ const WINDOWS_HOLD = [
   // Wait-Process then watches that instance, not a potentially reused PID.
   `$dsh = Get-Process -Id ${process.pid} -ErrorAction Stop;`,
   'Add-Type -MemberDefinition \'[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);\' -Name PowerState -Namespace DshKeepAwake | Out-Null;',
-  '[DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001) | Out-Null;',
+  '$state = [DshKeepAwake.PowerState]::SetThreadExecutionState(0x80000001);',
+  'if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" };',
   'Wait-Process -InputObject $dsh -ErrorAction Stop',
 ].join(' ')
 
