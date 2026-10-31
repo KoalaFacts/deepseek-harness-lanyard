@@ -2,12 +2,11 @@
  * The host sleep inhibitor: while enabled, holds a platform keep-awake child
  * for the dsh process lifetime so idle sleep cannot cut off running sessions or
  * paired LAN devices. The inhibitor is the platform's own facility —
- * `caffeinate -i` on macOS, `systemd-inhibit` on Linux, a PowerShell
- * `SetThreadExecutionState` holder on Windows — so the OS drops the lock when
- * that child exits. On macOS `caffeinate -w` also watches the owning dsh PID:
- * an abrupt dsh exit releases the idle-sleep assertion without a disposer.
- * On Linux/Windows an abrupt kill can still orphan the inhibitor child until
- * it is killed or the machine restarts. An inhibitor that
+ * `caffeinate -i -w` on macOS, `systemd-inhibit` with a GNU `tail --pid`
+ * watcher on Linux, and a PowerShell `SetThreadExecutionState` holder on
+ * Windows. On macOS and Linux, the watcher drops the idle-sleep assertion
+ * after an abrupt dsh exit even without a disposer. On Windows an abrupt
+ * kill can still orphan the inhibitor child until it dies or is terminated. An inhibitor that
  * is not on PATH rejects activation: a deployment that asked to stay awake
  * must never silently serve without it. A child that dies later logs a warning
  * and serving continues.
@@ -106,11 +105,18 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
       return { command: 'caffeinate', args: ['-i', '-w', String(process.pid)] }
     case 'win32':
       return { command: 'powershell', args: ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_HOLD] }
-    default:
+    default: {
+      // GNU tail stops following /dev/null once this dsh PID disappears,
+      // even after SIGKILL. This releases systemd-inhibit's lock without
+      // depending on Cordis' disposer. Keep the legacy fallback off Linux.
+      const lifetime = platform === 'linux'
+        ? ['tail', `--pid=${process.pid}`, '-f', '/dev/null']
+        : ['sleep', 'infinity']
       return {
         command: 'systemd-inhibit',
-        args: ['--what=sleep:idle', '--who=dsh', '--why=Serving the DSH web GUI', '--mode=block', 'sleep', 'infinity'],
+        args: ['--what=sleep:idle', '--who=dsh', '--why=Serving the DSH web GUI', '--mode=block', ...lifetime],
       }
+    }
   }
 }
 

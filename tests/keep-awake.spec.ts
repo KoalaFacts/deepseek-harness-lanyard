@@ -59,8 +59,15 @@ describe('resolveInhibitor', () => {
     expect(args.at(-1)).toContain('SetThreadExecutionState')
   })
 
-  it('blocks sleep on Linux for the process lifetime', () => {
-    expect(resolveInhibitor('linux').args).toContain('--mode=block')
+  it('blocks sleep on Linux and watches the owning dsh PID rather than sleeping forever', () => {
+    const { args } = resolveInhibitor('linux')
+    expect(args).toContain('--mode=block')
+    expect(args.slice(-4)).toEqual(['tail', `--pid=${process.pid}`, '-f', '/dev/null'])
+    expect(args).not.toContain('infinity')
+  })
+
+  it('does not change the legacy non-Linux fallback command', () => {
+    expect(resolveInhibitor('freebsd').args.slice(-2)).toEqual(['sleep', 'infinity'])
   })
 })
 
