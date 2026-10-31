@@ -49,6 +49,8 @@ export interface InhibitorCommand {
  * clears the state automatically when the holding process dies, so no
  * release call exists or is needed.
  */
+const WINDOWS_READY = 'LANYARD_HOLD_READY'
+
 const WINDOWS_HOLD = [
   // Capture the original process object before taking a sleep assertion.
   // Wait-Process then watches that instance, not a potentially reused PID.
@@ -58,6 +60,8 @@ const WINDOWS_HOLD = [
   // expects UInt32. Use the positive decimal value with an explicit cast.
   '$state = [DshKeepAwake.PowerState]::SetThreadExecutionState([uint32]2147483649);',
   'if ($state -eq 0) { throw "SetThreadExecutionState failed; --keep-awake cannot hold this host awake" };',
+  // Acknowledge only after Win32 accepts the actual sleep assertion.
+  ` [Console]::Out.WriteLine('${WINDOWS_READY}');`,
   'Wait-Process -InputObject $dsh -ErrorAction Stop',
 ].join(' ')
 
@@ -89,12 +93,43 @@ const RELEASE_TIMEOUT_MS = TERMINATE_GRACE_MS + 2_000
  */
 const HOLD_CONFIRM_MS = 250
 
+// Add-Type initialization may take longer than the Unix failure-detection window.
+const WINDOWS_CONFIRM_TIMEOUT_MS = 20_000
+
 /**
  * The inhibitors print nothing in normal operation. Collecting a small bound
  * keeps whatever a broken one does say off the URL readiness line, without
  * leaving an unread pipe the child could block on.
  */
 const DISCARD_OUTPUT = { maxBytes: 4096 } as const
+
+/** Require a live helper to acknowledge the Win32 assertion before serving. */
+async function confirmWindowsHold(held: {
+  collected: { stdout?: { readFrom(fromByte: number): { text: string; lossy: boolean } } }
+  done: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>
+}): Promise<string | undefined> {
+  const output = held.collected.stdout
+  if (!output) return 'did not expose a readiness output stream'
+  let stopped: string | undefined
+  void held.done.then(
+    outcome => { stopped = 'exited before confirming the hold (code ' + String(outcome.exitCode) + ', signal ' + String(outcome.signal) + ')' },
+    (error: unknown) => { stopped = 'could not start (' + String(error) + ')' },
+  )
+  const deadline = Date.now() + WINDOWS_CONFIRM_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (stopped !== undefined) return stopped
+    const read = output.readFrom(0)
+    if (read.lossy) return 'readiness output exceeded its safety bound'
+    if (read.text.split(/\r?\n/).includes(WINDOWS_READY)) {
+      // An exit in the same turn as the marker is not a live hold.
+      await Promise.resolve()
+      return stopped
+    }
+    await delay(50)
+  }
+  return 'did not confirm a Windows sleep assertion within 20 seconds'
+}
+
 
 /**
  * Resolve the platform's sleep-inhibitor invocation.
@@ -199,18 +234,27 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     stdio: { stdin: 'ignore', stdout: DISCARD_OUTPUT, stderr: DISCARD_OUTPUT },
     graceMs: TERMINATE_GRACE_MS,
   })
-  // An inhibitor that settles inside the window never held: fail the load
-  // rather than serve without what this invocation asked for.
-  const confirmation = new AbortController()
-  const early = await Promise.race([
-    held.done.then(
-      outcome => `exited at once (code ${String(outcome.exitCode)}, signal ${String(outcome.signal)})`,
-      (error: unknown) => `could not start (${String(error)})`,
-    ),
-    // Aborted once the race is decided, so no timer outlives it.
-    delay(HOLD_CONFIRM_MS, undefined, { signal: confirmation.signal }).catch(() => undefined),
-  ])
-  confirmation.abort()
+  // Unlike short-lived Unix startup checks, Windows must confirm the actual
+  // Win32 hold after PowerShell's potentially slow Add-Type initialization.
+  let early: string | undefined
+  try {
+    if (process.platform === 'win32') {
+      early = await confirmWindowsHold(held)
+    } else {
+      const confirmation = new AbortController()
+      early = await Promise.race([
+        held.done.then(
+          outcome => `exited at once (code ${String(outcome.exitCode)}, signal ${String(outcome.signal)})`,
+          (error: unknown) => `could not start (${String(error)})`,
+        ),
+        delay(HOLD_CONFIRM_MS, undefined, { signal: confirmation.signal }).catch(() => undefined),
+      ])
+      confirmation.abort()
+    }
+  } catch (error) {
+    held.terminate()
+    throw new Error(`lanyard-keep-awake: failed to verify ${command} startup (${String(error)})`)
+  }
   if (early !== undefined) {
     held.terminate()
     throw new Error(`lanyard-keep-awake: ${command} ${early}, so --keep-awake cannot hold this host awake`)

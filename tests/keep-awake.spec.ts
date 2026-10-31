@@ -19,7 +19,7 @@ interface Spawned { argv: string[]; terminated: boolean }
  * handle: no pid, a `done` that settles on exit, and termination.
  * @param done - the outcome the spawn settles to.
  */
-function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null }>): {
+function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null }>, ready = true): {
   seam: unknown
   spawned: Spawned[]
 } {
@@ -30,6 +30,10 @@ function fakeSubprocess(done: Promise<{ exitCode: number; signal: string | null 
       spawned.push(record)
       return {
         done,
+        collected: { stdout: { readFrom: () => ({
+          text: ready && process.platform === 'win32' ? 'LANYARD_HOLD_READY\n' : '',
+          nextOffset: 0, lossy: false,
+        }) } },
         terminate: () => { record.terminated = true },
         waitForExit: () => Promise.resolve(true),
       }
@@ -183,7 +187,7 @@ describe('the keep-awake row', () => {
     // A missing interpreter, a permission lost since the check, EAGAIN: the
     // seam rejects `done` within a tick, before the load has resolved.
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
-    const { seam, spawned } = fakeSubprocess(Promise.reject(new Error('spawn EACCES')))
+    const { seam, spawned } = fakeSubprocess(Promise.reject(new Error('spawn EACCES')), false)
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/could not start \(Error: spawn EACCES\)/)
@@ -197,6 +201,7 @@ describe('the keep-awake row', () => {
     const seam = {
       spawn: () => ({
         done: new Promise((_resolve, reject) => { setTimeout(() => { reject(new Error('spawn EAGAIN')) }, 20) }),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
         terminate: () => {},
         waitForExit: () => Promise.resolve(true),
       }),
@@ -209,10 +214,28 @@ describe('the keep-awake row', () => {
   it('rejects its load when the inhibitor exits at once, having never taken hold', async () => {
     // systemd-inhibit with no logind to ask exits within milliseconds.
     vi.spyOn(internals, 'findOnPath').mockReturnValue('/usr/bin/inhibitor')
-    const { seam } = fakeSubprocess(Promise.resolve({ exitCode: 1, signal: null }))
+    const { seam } = fakeSubprocess(Promise.resolve({ exitCode: 1, signal: null }), false)
     ctx = new Context()
     ctx.provide('subprocess', seam)
     await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/exited at once \(code 1, signal null\)/)
+  })
+
+  it.skipIf(process.platform !== 'win32')('rejects a Windows assertion failure after the old 250 ms guess', async () => {
+    vi.spyOn(internals, 'findOnPath').mockReturnValue('/trusted/powershell.exe')
+    let terminated = false
+    const seam = {
+      spawn: () => ({
+        done: new Promise<{ exitCode: number; signal: null }>(resolve =>
+          setTimeout(() => resolve({ exitCode: 1, signal: null }), 450)),
+        collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) } },
+        terminate: () => { terminated = true },
+        waitForExit: async () => true,
+      }),
+    }
+    ctx = new Context()
+    ctx.provide('subprocess', seam)
+    await expect(ctx.plugin(KeepAwake, { enabled: true }).await()).rejects.toThrow(/exited before confirming the hold/)
+    expect(terminated).toBe(true)
   })
 
   it('warns, and keeps serving, when a running inhibitor dies later', async () => {
@@ -252,13 +275,12 @@ describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecyc
       if (!original.includes(pidLookup) || !original.includes(wait))
         throw new Error('the Windows keep-awake command changed; update this native acceptance test')
 
-      // The production command uses process.pid. Only this disposable test
-      // substitutes its own target and emits a marker after the Win32 call has
-      // returned successfully (a zero result throws before this point).
+      // The production command emits readiness after Win32 succeeds. This test
+      // substitutes only the disposable watched PID, not a synthetic marker.
       const marker = 'LANYARD_HOLD_READY'
-      const script = original
-        .replace(pidLookup, `Get-Process -Id ${owner.pid} -ErrorAction Stop`)
-        .replace(wait, `[Console]::Out.WriteLine('${marker}'); ${wait}`)
+      if (!original.includes(`[Console]::Out.WriteLine('${marker}')`))
+        throw new Error('production Windows helper did not emit its successful-hold marker')
+      const script = original.replace(pidLookup, `Get-Process -Id ${owner.pid} -ErrorAction Stop`)
       const powerShell = spawn(executable, [...args.slice(0, -1), script], {
         windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
       })
