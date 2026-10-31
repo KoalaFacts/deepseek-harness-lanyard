@@ -131,9 +131,20 @@ describe.skipIf(process.platform === 'win32')('findOnPath', () => {
     expect(findOnPath('inhibitor', ['', relativeDir].join(delimiter), [''])).toBe(executable)
   })
 
-  it('tries each extension it is given, as Windows resolves PATHEXT', () => {
+  it('tries the explicitly supplied executable extensions in order', () => {
     const path = pathWith({ 'inhibitor.exe': 0o755 })
     expect(findOnPath('inhibitor', path, ['', '.com', '.exe'])).toMatch(/inhibitor\.exe$/)
+  })
+
+  it('chooses native PowerShell over a PATHEXT .cmd shim, and rejects a shim alone', () => {
+    // DSH spawns argv without cmd.exe: selecting a .cmd/.bat wrapper fails
+    // even if an actual powershell.exe exists later in PATH.
+    const extensions = internals.pathExtensions('win32')
+    expect(extensions).toEqual(['.exe'])
+    const withNative = pathWith({ 'powershell.cmd': 0o755, 'powershell.exe': 0o755 })
+    expect(findOnPath('powershell', withNative, extensions)).toMatch(/powershell\.exe$/)
+    const onlyShim = pathWith({ 'powershell.cmd': 0o755 })
+    expect(findOnPath('powershell', onlyShim, extensions)).toBeUndefined()
   })
 })
 

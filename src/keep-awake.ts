@@ -166,8 +166,8 @@ export function resolveInhibitor(platform: NodeJS.Platform): InhibitorCommand {
 
 /**
  * Where an executable name resolves on PATH, the way the platform's spawn
- * would find it: each PATH entry in order, and on Windows each `PATHEXT`
- * extension within it.
+ * would find it: each PATH entry in order, restricted to native `.exe`
+ * programs on Windows because the subprocess seam does not invoke a shell.
  * @param command - a bare executable name.
  * @param path - the PATH value to search.
  * @param extensions - candidate suffixes; `['']` outside Windows.
@@ -189,10 +189,12 @@ export function findOnPath(command: string, path = process.env.PATH ?? '', exten
   return undefined
 }
 
-/** `PATHEXT` on Windows, where a bare name resolves through it; nothing elsewhere. */
-function pathExtensions(): string[] {
-  if (process.platform !== 'win32') return ['']
-  return ['', ...(process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(extension => extension !== '')]
+/** The native executable suffix supported by the shell-free Windows subprocess. */
+function pathExtensions(platform: NodeJS.Platform = process.platform): string[] {
+  // PATHEXT may put .CMD/.BAT shims before .EXE, but DSH's argv-based
+  // subprocess does not invoke cmd.exe. Resolve the actual PowerShell binary
+  // instead of accepting an unusable script wrapper as the checked helper.
+  return platform === 'win32' ? ['.exe'] : ['']
 }
 
 /**
@@ -200,7 +202,7 @@ function pathExtensions(): string[] {
  * suite must not depend on whether the machine running it has
  * `systemd-inhibit`.
  */
-export const internals = { findOnPath }
+export const internals = { findOnPath, pathExtensions }
 
 /**
  * Hold the sleep inhibitor while this plugin lives.
