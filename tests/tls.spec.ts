@@ -10,7 +10,11 @@ import * as Tls from '../src/tls.ts'
 import { LANYARD_TLS_SERVICE, certificateCovers, generateMaterial, lanIpv4Addresses, type LanyardTlsValues } from '../src/tls.ts'
 
 let ctx: Context | undefined
-afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
+async function disposeCurrentContext(): Promise<void> {
+  await ctx?.fiber.dispose()
+  ctx = undefined
+}
+afterEach(disposeCurrentContext)
 
 /** Mount the row and read back what it provided. */
 async function provide(config: { enabled: boolean; dir: string; host?: string }): Promise<LanyardTlsValues> {
@@ -72,8 +76,7 @@ describe('the tls row', () => {
       expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
     } finally {
       chmodSync(dir, 0o700)
-      await ctx?.fiber.dispose()
-      ctx = undefined
+      await disposeCurrentContext()
     }
     await provide({ enabled: true, dir })
     expect(readFileSync(certPath, 'utf8')).toBe(original[0])
@@ -93,8 +96,7 @@ describe('the tls row', () => {
       expect(statSync(keyPath).mode & 0o777).toBe(0o640)
     } finally {
       chmodSync(keyPath, 0o600)
-      await ctx?.fiber.dispose()
-      ctx = undefined
+      await disposeCurrentContext()
     }
     await provide({ enabled: true, dir })
     expect(readFileSync(keyPath, 'utf8')).toBe(original[1])
