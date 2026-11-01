@@ -72,7 +72,10 @@ describe('the tls row', () => {
     ctx = undefined
     chmodSync(dir, 0o755)
     try {
-      await expect(provide({ enabled: true, dir })).rejects.toThrow(/directory permissions must be owner-only/)
+      await expect(provide({ enabled: true, dir })).rejects.toMatchObject({
+        message: expect.stringContaining('could not generate TLS material'),
+        cause: { message: expect.stringMatching(/directory permissions must be owner-only/) },
+      })
       expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
     } finally {
       chmodSync(dir, 0o700)
@@ -91,7 +94,10 @@ describe('the tls row', () => {
     ctx = undefined
     chmodSync(keyPath, 0o640)
     try {
-      await expect(provide({ enabled: true, dir })).rejects.toThrow(/private key permissions must be owner-only/)
+      await expect(provide({ enabled: true, dir })).rejects.toMatchObject({
+        message: expect.stringContaining('could not generate TLS material'),
+        cause: { message: expect.stringMatching(/private key permissions must be owner-only/) },
+      })
       expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
       expect(statSync(keyPath).mode & 0o777).toBe(0o640)
     } finally {
