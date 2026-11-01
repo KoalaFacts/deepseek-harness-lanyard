@@ -41,7 +41,14 @@ export interface SessionAuthority {
  * @param candidate - `ctx.get('connection')`, whatever it holds.
  */
 export function isSessionAuthority(candidate: unknown): candidate is SessionAuthority {
-  return typeof (candidate as Partial<SessionAuthority> | undefined)?.requestRejection === 'function'
+  try {
+    return typeof (candidate as Partial<SessionAuthority> | undefined)?.requestRejection === 'function'
+  } catch {
+    // A transiently broken upstream service getter can throw before the
+    // verifier method is even called. Treat it as absent, never as admission;
+    // its error might contain session or credential material.
+    return false
+  }
 }
 
 /**
