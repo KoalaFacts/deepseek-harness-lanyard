@@ -1,5 +1,5 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
@@ -293,6 +293,23 @@ describe('generateMaterial', () => {
       .rejects.toThrow(/existing TLS certificate and private key are incomplete.*left unchanged/i)
     expect(readFileSync(survivorPath, 'utf8')).toBe(survivor)
     expect(existsSync(missingPath)).toBe(false)
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses to overwrite dangling saved TLS material paths', async () => {
+    for (const dangling of ['cert.pem', 'key.pem'] as const) {
+      const { certPath, keyPath } = paths()
+      const entry = dangling === 'cert.pem' ? certPath : keyPath
+      const other = dangling === 'cert.pem' ? keyPath : certPath
+      const target = 'missing-' + dangling
+      symlinkSync(target, entry)
+      // existsSync follows the target and incorrectly sees "no saved file".
+      expect(existsSync(entry)).toBe(false)
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5']))
+        .rejects.toThrow(/existing TLS certificate and private key are incomplete.*left unchanged/i)
+      expect(lstatSync(entry).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(entry)).toBe(target)
+      expect(existsSync(other)).toBe(false)
+    }
   })
 
   it('refuses a mismatched saved key even when the certificate no longer names the LAN address', async () => {

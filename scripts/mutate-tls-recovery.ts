@@ -20,6 +20,14 @@ interface Mutant {
 
 const mutants: Mutant[] = [
   {
+    label: 'dangling managed TLS identity symlink presence',
+    from: 'return lstatSync(path, { throwIfNoEntry: false }) !== undefined',
+    to: 'return existsSync(path) /* MUTANT: treat a dangling saved identity link as absent */',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses to overwrite dangling saved TLS material paths',
+    failure: /promise resolved/i,
+  },
+  {
     label: 'pre-existing TLS material directory owner-only enforcement',
     from: 'if ((statSync(dir).mode & 0o077) !== 0)',
     to: 'if (false /* MUTANT: accept a traversable managed TLS directory */)',

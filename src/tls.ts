@@ -8,7 +8,7 @@
  * @module
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -152,10 +152,21 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
   }
 }
 
+/**
+ * A dangling certificate/key symlink is still a saved filesystem entry.
+ * existsSync() follows its missing target and reports false, which would let
+ * first-issue generation silently replace that link and discard a previous
+ * TLS identity. Treat any existing entry as saved material; unreadable or
+ * unmatched pairs are rejected by generateLockedMaterial().
+ */
+function materialEntryExists(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false }) !== undefined
+}
+
 /** The complete material transaction, called only with both writer locks held. */
 async function generateLockedMaterial(certPath: string, keyPath: string, addresses: string[]): Promise<void> {
-  const hasCertificate = existsSync(certPath)
-  const hasKey = existsSync(keyPath)
+  const hasCertificate = materialEntryExists(certPath)
+  const hasKey = materialEntryExists(keyPath)
   if (hasCertificate !== hasKey) {
     // A partial identity may be the result of an interrupted update or an
     // operator moving one file. Never destroy the survivor to "repair" it.
