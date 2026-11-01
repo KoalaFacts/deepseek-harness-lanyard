@@ -682,7 +682,12 @@ export class GatedWebServer extends WebServer {
             + 'reach this machine on it; pass --network-port to choose another, or --host 127.0.0.1 to serve this machine only',
             { cause: error },
           )
-          : error)
+          : error.code === 'EADDRNOTAVAIL'
+            ? new Error(
+              `lanyard: ${JSON.stringify(this.gate.host)} is not assigned to this computer; choose an active Wi-Fi or Ethernet IPv4 address for --host, or omit --host for local-only use`,
+              { cause: error },
+            )
+            : error)
       }
       tls.once('error', failed)
       tls.listen(this.networkPortConfigured, this.gate.host, () => {

@@ -211,6 +211,18 @@ describe('GatedWebServer', () => {
     }
   })
 
+  it('explains a stale or mistyped LAN IPv4 instead of silently serving another interface', async () => {
+    // TEST-NET-1 is not a local interface on the CI hosts. A real bind must
+    // fail with EADDRNOTAVAIL and name the operator's recovery action.
+    const { certPath, keyPath } = await certificateFiles()
+    ctx = withSession()
+    const host = '192.0.2.254'
+    const fiber = ctx.plugin(GatedWebServer, {
+      host: networkBindHost(host), port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    })
+    await expect(fiber.await()).rejects.toThrow(/192\.0\.2\.254.*not assigned.*--host.*local-only use/s)
+  })
+
   it('refuses TLS material configured by halves', async () => {
     ctx = new Context()
     const fiber = ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, tlsCertPath: '/tmp/cert.pem' })
