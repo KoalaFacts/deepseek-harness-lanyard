@@ -304,7 +304,7 @@ describe('the pairing row', () => {
     'refuses pairing when the TLS carrier has no valid LAN port (%s)', async (networkPort) => {
       const errors: string[] = []
       const printed = await mount({}, {
-        server: { scheme: 'https', port: 3080, networkPort, certificateFingerprint: CERT_FINGERPRINT },
+        server: { scheme: 'https', port: 3080, ...(networkPort === undefined ? {} : { networkPort }), certificateFingerprint: CERT_FINGERPRINT },
         onError: line => { errors.push(line) },
       })
       expect(printed).toEqual([])
