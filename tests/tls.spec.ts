@@ -306,6 +306,43 @@ describe('generateMaterial', () => {
     expect(Date.parse(renewed.validTo)).toBeGreaterThan(Date.now())
   })
 
+  it('keeps the old certificate and key matched after an expired certificate renewal cannot publish', async () => {
+    const { certPath, keyPath } = paths()
+    const now = Date.now(), day = 86_400_000
+    const old = await generate([{ name: 'commonName', value: 'dsh' }], {
+      notBeforeDate: new Date(now - 4 * day),
+      notAfterDate: new Date(now - 2 * day),
+      keySize: 2048,
+      algorithm: 'sha256',
+      extensions: [{
+        name: 'subjectAltName',
+        altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '192.168.1.5' }],
+      }],
+    })
+    writeFileSync(certPath, old.cert)
+    writeFileSync(keyPath, old.private)
+    // New key is installed first. A pre-existing certificate temp forces the
+    // cert write to fail, previously leaving a permanently mismatched pair.
+    const blockedTemp = `${certPath}.${String(process.pid)}.tmp`
+    writeFileSync(blockedTemp, 'do not overwrite an interrupted temp')
+    try {
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5'])).rejects.toThrow()
+      expect(readFileSync(certPath, 'utf8')).toBe(old.cert)
+      expect(new X509Certificate(readFileSync(certPath))
+        .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+      expect(readFileSync(keyPath, 'utf8')).toBe(old.private)
+      expect(readFileSync(blockedTemp, 'utf8')).toBe('do not overwrite an interrupted temp')
+    } finally {
+      rmSync(blockedTemp, { force: true })
+    }
+    // A later restart can renew both files instead of refusing the saved pair.
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const renewed = new X509Certificate(readFileSync(certPath))
+    expect(renewed.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+    expect(Date.parse(renewed.validTo)).toBeGreaterThan(Date.now())
+    expect(readFileSync(keyPath, 'utf8')).not.toBe(old.private)
+  })
+
   it('replaces material once the machine is reachable somewhere it does not name', async () => {
     const { certPath, keyPath } = paths()
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])

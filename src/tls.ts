@@ -101,6 +101,9 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
 /**
  * Write one certificate and key pair unless a usable one already exists. The
  * key is written before the certificate and each lands through a rename.
+ * For an expired/not-yet-valid identity, a reported certificate write failure
+ * rolls the key back while the old certificate remains. This is not atomic
+ * across abrupt process or power loss between the two file replacements.
  * Any pre-existing material must form a readable matching pair before SAN or
  * date checks permit renewal: an interrupted replacement must not silently
  * discard the remaining identity, even when the LAN address has changed.
@@ -162,12 +165,17 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
   // private key. If the certificate rename fails, the saved pair must still
   // match on the next boot rather than strand the user's phone identity.
   let retainedKeyPair: { privateKey: string; publicKey: string } | undefined
+  // Validity renewal rotates the key; a failed certificate write must not
+  // strand the old certificate next to that new private key.
+  let previousIdentity: { certificate: string; key: string } | undefined
   if (hasCertificate) {
     let cert: X509Certificate
     let savedKey: string
     try {
-      cert = new X509Certificate(readFileSync(certPath))
+      const certificate = readFileSync(certPath, 'utf8')
+      cert = new X509Certificate(certificate)
       savedKey = readFileSync(keyPath, 'utf8')
+      previousIdentity = { certificate, key: savedKey }
       if (!cert.checkPrivateKey(createPrivateKey(savedKey))) throw new Error('key mismatch')
     } catch {
       // Check identity before SANs: a moved LAN address must never make a
@@ -185,6 +193,7 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
         privateKey: savedKey,
         publicKey: cert.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       }
+      previousIdentity = undefined
     }
   }
   const notBeforeDate = new Date()
@@ -219,6 +228,21 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
             unlinkSync(keyPath)
           }
         } catch { /* Fail closed if cleanup fails; preserve the original error. */ }
+      } else if (previousIdentity !== undefined) {
+        // The old certificate is still on disk; roll back only this attempt's
+        // replacement key. A non-cooperating writer must never be overwritten.
+        try {
+          if (readFileSync(certPath, 'utf8') !== previousIdentity.certificate
+            || readFileSync(keyPath, 'utf8') !== pems.private) {
+            throw new Error('TLS identity changed during failed renewal; refusing unsafe rollback')
+          }
+          writeAtomic(keyPath, previousIdentity.key, 0o600)
+        } catch (restoreError) {
+          throw new Error(
+            'TLS renewal failed and the previous matching private key could not be restored; recover cert.pem and key.pem from a matching backup',
+            { cause: new AggregateError([error, restoreError], 'TLS renewal and rollback failed') },
+          )
+        }
       }
       throw error
     }

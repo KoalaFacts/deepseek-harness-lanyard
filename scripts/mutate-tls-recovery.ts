@@ -44,6 +44,14 @@ const mutants: Mutant[] = [
     failure: /expected true to be false/i,
   },
   {
+    label: 'expired TLS renewal key rollback',
+    from: 'else if (previousIdentity !== undefined)',
+    to: 'else if (false /* MUTANT: strand a rotated key next to the saved certificate */)',
+    file: 'tests/tls.spec.ts',
+    test: 'keeps the old certificate and key matched after an expired certificate renewal cannot publish',
+    failure: /expected false to be true/i,
+  },
+  {
     label: 'rename-failure temporary-file cleanup',
     from: 'try { unlinkSync(temp) }',
     to: 'try { void temp /* MUTANT: retain failed rename temp */ }',
