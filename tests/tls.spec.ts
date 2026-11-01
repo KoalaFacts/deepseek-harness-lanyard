@@ -1,5 +1,5 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
@@ -309,6 +309,37 @@ describe('generateMaterial', () => {
       expect(lstatSync(entry).isSymbolicLink()).toBe(true)
       expect(readlinkSync(entry)).toBe(target)
       expect(existsSync(other)).toBe(false)
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses valid linked managed TLS material before renewal can sever its pointer', async () => {
+    for (const linked of ['cert.pem', 'key.pem'] as const) {
+      const { certPath, keyPath } = paths()
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      const entry = linked === 'cert.pem' ? certPath : keyPath
+      const other = linked === 'cert.pem' ? keyPath : certPath
+      const target = join(join(entry, '..'), 'saved-' + linked)
+      const initial = [readFileSync(entry, 'utf8'), readFileSync(other, 'utf8')]
+      renameSync(entry, target)
+      symlinkSync('saved-' + linked, entry)
+
+      // A rename on renewal replaces the link, not the target. Refuse even a
+      // currently matching identity instead of silently breaking its pointer.
+      await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+        .rejects.toThrow(/managed TLS certificate and private key must be regular files.*left unchanged/i)
+      expect(lstatSync(entry).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(entry)).toBe('saved-' + linked)
+      expect(readFileSync(target, 'utf8')).toBe(initial[0])
+      expect(readFileSync(other, 'utf8')).toBe(initial[1])
+
+      // Operator recovery: restore the same matching bytes as regular files.
+      rmSync(entry)
+      renameSync(target, entry)
+      await generateMaterial(certPath, keyPath, ['10.0.0.7'])
+      expect(lstatSync(entry).isSymbolicLink()).toBe(false)
+      expect(new X509Certificate(readFileSync(certPath))
+        .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+      expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
     }
   })
 
