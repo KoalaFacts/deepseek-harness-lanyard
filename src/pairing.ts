@@ -466,7 +466,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
-    const code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))
+    let code: string
+    try {
+      code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))
+    } catch {
+      // QR rendering is optional after a verified HTTPS link is already
+      // printed. An encoder error could contain the launch token: do not
+      // expose its message or reject the loader's readiness promise.
+      ctx.logger.error(
+        'lanyard: could not render the pairing QR code; use the verified HTTPS pairing link above instead',
+      )
+      return
+    }
     const columns = terminalColumns(process.stdout.columns)
     if (!fitsTerminal(code, columns)) {
       console.log(`lanyard: the code needs ${String(renderedWidth(code))} columns and this terminal has ${String(columns)}, so open the link above instead`)

@@ -1,5 +1,6 @@
 /** The pairing link, its QR code, and the row that announces them. */
 import jsQR from 'jsqr'
+import qrcodeTerminal from 'qrcode-terminal'
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import {
@@ -392,6 +393,31 @@ describe('the pairing row', () => {
     expect(printed).toEqual([])
     expect(errors).toEqual([expect.stringMatching(/unsafe pairing URL.*no pairing link/) ])
     expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
+
+  it('keeps a verified HTTPS pairing link usable if QR rendering throws a token-bearing error', async () => {
+    // Only the optional terminal encoder fails. This must not turn successful
+    // sign-in link generation into a startup rejection or log encoder secrets.
+    const previousIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+    Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+    vi.spyOn(qrcodeTerminal, 'generate').mockImplementation(() => {
+      throw new Error(`QR renderer diagnostic included ${LAUNCH_TOKEN}`)
+    })
+    try {
+      const errors: string[] = []
+      const printed = await mount({ printPairingQr: true }, {
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toContain(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+      expect(printed).toContain(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
+      expect(printed.some(line => line.includes('or scan this with the phone'))).toBe(false)
+      expect(errors).toEqual(['lanyard: could not render the pairing QR code; use the verified HTTPS pairing link above instead'])
+      expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+    } finally {
+      if (previousIsTTY === undefined) Reflect.deleteProperty(process.stdout, 'isTTY')
+      else Object.defineProperty(process.stdout, 'isTTY', previousIsTTY)
+    }
   })
 
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
