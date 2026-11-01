@@ -105,13 +105,31 @@ export function isLaunchLinkIssuer(candidate: unknown): candidate is LaunchLinkI
  * @param scheme - the scheme the carrier actually answers.
  * @param port - the port a device on the network reaches.
  * @param lanAddress - the LAN literal to advertise, or undefined on a loopback bind.
- * @returns the link, or undefined when there is no network address to pair over.
+ * @returns a same-origin HTTPS root link carrying one launch token, or undefined if the address or issuer contract is unsafe.
  */
 export function pairingLink(
   issuer: LaunchLinkIssuer, scheme: 'http' | 'https', port: number, lanAddress: string | undefined,
 ): string | undefined {
-  if (lanAddress === undefined || isIP(lanAddress) !== 4) return undefined
-  return issuer.authenticatedUrl(`${scheme}://${lanAddress}:${String(port)}/`)
+  if (lanAddress === undefined || isIP(lanAddress) !== 4 || scheme !== 'https'
+    || !Number.isSafeInteger(port) || port < 1 || port > 65_535) return undefined
+  const baseUrl = `${scheme}://${lanAddress}:${String(port)}/`
+  const link = issuer.authenticatedUrl(baseUrl)
+  if (typeof link !== 'string') return undefined
+  // The upstream issuer owns the secret, but it must never change the trusted
+  // listener we are about to ask a phone to contact. Compare parsed origins,
+  // not textual prefixes (which accept host.example.evil or userinfo tricks).
+  // Require the root token exchange and an unambiguous, canonical URL; this
+  // also excludes redirects, fragments and control characters in printed logs.
+  try {
+    const parsed = new URL(link)
+    if (parsed.href !== link || parsed.origin !== new URL(baseUrl).origin
+      || parsed.pathname !== '/' || parsed.username !== '' || parsed.password !== ''
+      || parsed.hash !== '' || parsed.searchParams.size !== 1
+      || !parsed.searchParams.get('token')) return undefined
+  } catch {
+    return undefined
+  }
+  return link
 }
 
 /**
@@ -410,7 +428,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
     const reachable = networkPort
     const link = pairingLink(issuer, scheme, reachable, lanAddress)
-    if (link === undefined) return
+    // Validate every URL before printing even the first one. An upstream
+    // contract drift on an alternative interface must not leave a partly
+    // usable, token-bearing set of pairing instructions in terminal logs.
+    const alternatives = offered.filter(address => address !== lanAddress)
+      .map(address => ({ address, link: pairingLink(issuer, scheme, reachable, address) }))
+    if (link === undefined || alternatives.some(alternative => alternative.link === undefined)) {
+      ctx.logger.error(
+        'lanyard: stop dsh now — upstream returned an unsafe pairing URL for the verified HTTPS listener; '
+        + 'no pairing link or QR code is printed',
+      )
+      return
+    }
     // The shipped line's `(LAN: …)` link pairs the plaintext loopback port with
     // the LAN address and carries the launch token. Nothing answers it, so a
     // passive listener learns nothing — but whoever impersonated this machine
@@ -421,8 +450,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.
-    for (const alternative of offered.filter(address => address !== lanAddress)) {
-      console.log(`lanyard: or, from a device on the ${alternative} network: ${String(pairingLink(issuer, scheme, reachable, alternative))}`)
+    for (const alternative of alternatives) {
+      console.log(`lanyard: or, from a device on the ${alternative.address} network: ${alternative.link}`)
     }
     // The certificate is self-signed, so the phone's warning is the only check
     // there is; this is what makes it a check rather than a formality.

@@ -31,6 +31,33 @@ describe('pairingLink', () => {
     expect(asked).toEqual(['https://192.168.1.5:3080/'])
   })
 
+  it.each([
+    ['plaintext downgrade', (base: string) => base.replace('https:', 'http:') + `?token=${LAUNCH_TOKEN}`],
+    ['different IP', (_base: string) => `https://192.168.1.6:3443/?token=${LAUNCH_TOKEN}`],
+    ['different port', (base: string) => base.replace(':3443', ':3080') + `?token=${LAUNCH_TOKEN}`],
+    ['lookalike host', (_base: string) => `https://192.168.1.5.example.invalid:3443/?token=${LAUNCH_TOKEN}`],
+    ['userinfo', (base: string) => base.replace('://', '://user@') + `?token=${LAUNCH_TOKEN}`],
+    ['different path', (base: string) => base + `redirect/?token=${LAUNCH_TOKEN}`],
+    ['fragment', (base: string) => base + `?token=${LAUNCH_TOKEN}#redirect`],
+    ['extra query', (base: string) => base + `?token=${LAUNCH_TOKEN}&next=https://example.invalid`],
+    ['duplicate token', (base: string) => base + `?token=${LAUNCH_TOKEN}&token=other`],
+    ['empty token', (base: string) => base + '?token='],
+    ['missing token', (base: string) => base + '?other=value'],
+    ['relative URL', (_base: string) => `//192.168.1.5:3443/?token=${LAUNCH_TOKEN}`],
+    ['not a URL', (_base: string) => 'not a URL'],
+    ['leading newline', (base: string) => `\n${base}?token=${LAUNCH_TOKEN}`],
+  ])('does not trust an upstream-issued %s pairing URL', (_case, authenticatedUrl) => {
+    expect(pairingLink({ authenticatedUrl }, 'https', 3443, '192.168.1.5')).toBeUndefined()
+  })
+
+  it('does not ask upstream to issue a plaintext or invalid-port LAN link', () => {
+    const authenticatedUrl = vi.fn(issuer.authenticatedUrl)
+    for (const [scheme, port] of [['http', 3443], ['https', 0], ['https', 65_536], ['https', 3443.5]] as const) {
+      expect(pairingLink({ authenticatedUrl }, scheme, port, '192.168.1.5')).toBeUndefined()
+    }
+    expect(authenticatedUrl).not.toHaveBeenCalled()
+  })
+
   it('has no link on a loopback bind with no LAN address to advertise', () => {
     expect(pairingLink(issuer, 'http', 3080, undefined)).toBeUndefined()
   })
@@ -311,6 +338,32 @@ describe('the pairing row', () => {
       expect(errors).toEqual([expect.stringMatching(/stop dsh now.*no valid networkPort.*no pairing link/)])
     },
   )
+
+  it('refuses an upstream origin downgrade without printing a token or QR code', async () => {
+    const errors: string[] = []
+    const printed = await mount({}, {
+      connection: { authenticatedUrl: (base: string) => base.replace('https:', 'http:') + `?token=${LAUNCH_TOKEN}` },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+      onError: line => { errors.push(line) },
+    })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/stop dsh now.*unsafe pairing URL.*no pairing link/) ])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
+
+  it('validates all alternate interface links before printing any pairing instructions', async () => {
+    const errors: string[] = []
+    const printed = await mount({}, {
+      lanAddresses: ['10.8.0.2', '192.168.1.5'],
+      connection: { authenticatedUrl: (base: string) => base.includes('10.8.0.2')
+        ? base.replace('https:', 'http:') + `?token=${LAUNCH_TOKEN}` : `${base}?token=${LAUNCH_TOKEN}` },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+      onError: line => { errors.push(line) },
+    })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/unsafe pairing URL.*no pairing link/) ])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
 
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
     // `port` is this machine's plaintext listener, bound to loopback; a link
