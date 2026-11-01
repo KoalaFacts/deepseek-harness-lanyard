@@ -50,6 +50,13 @@ describe('pairingLink', () => {
     expect(pairingLink({ authenticatedUrl }, 'https', 3443, '192.168.1.5')).toBeUndefined()
   })
 
+  it('treats a throwing upstream link issuer as an unsafe contract, without propagating its token-bearing error', () => {
+    const failing: LaunchLinkIssuer = {
+      authenticatedUrl: () => { throw new Error(`upstream diagnostic contained ${LAUNCH_TOKEN}`) },
+    }
+    expect(pairingLink(failing, 'https', 3443, '192.168.1.5')).toBeUndefined()
+  })
+
   it('does not ask upstream to issue a plaintext or invalid-port LAN link', () => {
     const authenticatedUrl = vi.fn(issuer.authenticatedUrl)
     for (const [scheme, port] of [['http', 3443], ['https', 0], ['https', 65_536], ['https', 3443.5]] as const) {
@@ -336,6 +343,28 @@ describe('the pairing row', () => {
       })
       expect(printed).toEqual([])
       expect(errors).toEqual([expect.stringMatching(/stop dsh now.*no valid networkPort.*no pairing link/)])
+    },
+  )
+
+  it.each(['primary', 'alternative'])(
+    'does not print any token or propagate an issuer exception for the %s interface', async (failingInterface) => {
+      const errors: string[] = []
+      const printed = await mount({}, {
+        lanAddresses: ['192.168.1.5', '10.8.0.2'],
+        connection: {
+          authenticatedUrl: (base: string) => {
+            if (base.includes(failingInterface === 'primary' ? '192.168.1.5' : '10.8.0.2')) {
+              throw new Error(`upstream diagnostic containing launch token ${LAUNCH_TOKEN}`)
+            }
+            return `${base}?token=${LAUNCH_TOKEN}`
+          },
+        },
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toEqual([])
+      expect(errors).toEqual([expect.stringMatching(/unsafe pairing URL.*no pairing link/)])
+      expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
     },
   )
 

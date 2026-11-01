@@ -113,7 +113,15 @@ export function pairingLink(
   if (lanAddress === undefined || isIP(lanAddress) !== 4 || scheme !== 'https'
     || !Number.isSafeInteger(port) || port < 1 || port > 65_535) return undefined
   const baseUrl = `${scheme}://${lanAddress}:${String(port)}/`
-  const link = issuer.authenticatedUrl(baseUrl)
+  let link: string
+  try {
+    link = issuer.authenticatedUrl(baseUrl)
+  } catch {
+    // A drifted upstream issuer can throw a diagnostic that includes the
+    // launch token. Never allow that message into logs or an unhandled
+    // readiness promise: refuse pairing through the fixed error path below.
+    return undefined
+  }
   if (typeof link !== 'string') return undefined
   // The upstream issuer owns the secret, but it must never change the trusted
   // listener we are about to ask a phone to contact. Compare parsed origins,
