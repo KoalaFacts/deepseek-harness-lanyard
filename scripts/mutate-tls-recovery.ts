@@ -20,6 +20,22 @@ interface Mutant {
 
 const mutants: Mutant[] = [
   {
+    label: 'pre-existing TLS material directory owner-only enforcement',
+    from: 'if ((statSync(dir).mode & 0o077) !== 0)',
+    to: 'if (false /* MUTANT: accept a traversable managed TLS directory */)',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses an existing world-traversable managed TLS directory until permissions are repaired',
+    failure: /promise resolved/i,
+  },
+  {
+    label: 'pre-existing managed TLS private key owner-only enforcement',
+    from: 'if (existsSync(keyPath) && (statSync(keyPath).mode & 0o077) !== 0)',
+    to: 'if (false /* MUTANT: reuse a group-readable private key */)',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses an existing group-readable managed private key until permissions are repaired',
+    failure: /promise resolved/i,
+  },
+  {
     label: 'filesystem-preserving lock parent canonicalization',
     from: 'realpathSync.native(dirname(path))',
     to: 'realpathSync.native(dirname(join(path))) /* MUTANT: normalize before resolving symlinks */',

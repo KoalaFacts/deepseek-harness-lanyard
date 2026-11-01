@@ -8,7 +8,7 @@
  * @module
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -270,6 +270,25 @@ function writeAtomic(path: string, content: string, mode: number): void {
 }
 
 /**
+ * Do not serve a managed identity saved with permissions which let other local
+ * accounts read its private key or traverse its private material directory.
+ * mkdirSync({ recursive: true, mode }) does not repair an existing directory;
+ * a restored key may likewise be group/world-readable. Fail closed rather than
+ * silently changing permissions on a directory the operator may share.
+ * POSIX mode bits do not describe Windows ACLs; Windows file security remains
+ * the operator's responsibility.
+ */
+function assertOwnerOnlyManagedMaterial(dir: string, keyPath: string): void {
+  if (process.platform === 'win32') return
+  if ((statSync(dir).mode & 0o077) !== 0) {
+    throw new Error('Managed TLS directory permissions must be owner-only (chmod 700 on the material directory); existing permissions were left unchanged')
+  }
+  if (existsSync(keyPath) && (statSync(keyPath).mode & 0o077) !== 0) {
+    throw new Error('Managed TLS private key permissions must be owner-only (chmod 600 on key.pem); existing permissions were left unchanged')
+  }
+}
+
+/**
  * Provide the TLS paths, generating material on the first network-serving boot.
  * A generation failure or an unwritable directory rejects the load: a
  * composition that asked for TLS must never silently serve plaintext.
@@ -286,6 +305,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Owner-only: the key's directory must not be world-traversable on a shared host.
   mkdirSync(config.dir, { recursive: true, mode: 0o700 })
   try {
+    // Check before reading a reused identity and after any write. Neither a
+    // pre-existing directory nor a restored key is automatically chmodded.
+    assertOwnerOnlyManagedMaterial(config.dir, keyPath)
     // A concrete-interface carrier cannot serve the other adapters. Requiring
     // SANs for all of them rotates a phone's accepted certificate whenever an
     // unrelated VPN or virtual adapter appears. Legacy wildcard binds still
@@ -293,6 +315,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const addresses = config.host === undefined || config.host === '0.0.0.0'
       ? lanIpv4Addresses() : [config.host]
     await generateMaterial(certPath, keyPath, addresses)
+    assertOwnerOnlyManagedMaterial(config.dir, keyPath)
   } catch (error) {
     throw new Error(`lanyard-tls: could not generate TLS material in ${config.dir}`, { cause: error })
   }

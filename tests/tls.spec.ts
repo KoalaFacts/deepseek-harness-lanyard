@@ -1,5 +1,5 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
@@ -59,7 +59,48 @@ describe('the tls row', () => {
     expect(statSync(join(dir, 'key.pem')).mode & 0o777).toBe(0o600)
   })
 
-  it('reuses existing material, so a paired device\'s accepted exception survives a restart', async () => {
+  it.skipIf(process.platform === 'win32')('refuses an existing world-traversable managed TLS directory until permissions are repaired', async () => {
+    const dir = unusedDir()
+    await provide({ enabled: true, dir })
+    const certPath = join(dir, 'cert.pem'), keyPath = join(dir, 'key.pem')
+    const original = [readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]
+    await ctx?.fiber.dispose()
+    ctx = undefined
+    chmodSync(dir, 0o755)
+    try {
+      await expect(provide({ enabled: true, dir })).rejects.toThrow(/directory permissions must be owner-only/)
+      expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
+    } finally {
+      chmodSync(dir, 0o700)
+      await ctx?.fiber.dispose()
+      ctx = undefined
+    }
+    await provide({ enabled: true, dir })
+    expect(readFileSync(certPath, 'utf8')).toBe(original[0])
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses an existing group-readable managed private key until permissions are repaired', async () => {
+    const dir = unusedDir()
+    await provide({ enabled: true, dir })
+    const certPath = join(dir, 'cert.pem'), keyPath = join(dir, 'key.pem')
+    const original = [readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]
+    await ctx?.fiber.dispose()
+    ctx = undefined
+    chmodSync(keyPath, 0o640)
+    try {
+      await expect(provide({ enabled: true, dir })).rejects.toThrow(/private key permissions must be owner-only/)
+      expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
+      expect(statSync(keyPath).mode & 0o777).toBe(0o640)
+    } finally {
+      chmodSync(keyPath, 0o600)
+      await ctx?.fiber.dispose()
+      ctx = undefined
+    }
+    await provide({ enabled: true, dir })
+    expect(readFileSync(keyPath, 'utf8')).toBe(original[1])
+  })
+
+  it('reuses existing material, so a paired device's accepted exception survives a restart', async () => {
     const dir = unusedDir()
     await provide({ enabled: true, dir })
     const first = readFileSync(join(dir, 'cert.pem'), 'utf8')
