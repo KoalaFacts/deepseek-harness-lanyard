@@ -88,5 +88,14 @@ export function admit(req: IncomingMessage, authority: unknown): boolean {
   if (isLoopbackAddress(req.socket.remoteAddress)) return true
   // Without the check there is no telling a paired device from anyone else on
   // the network, so the peer is refused rather than waved through.
-  return isSessionAuthority(authority) && authority.requestRejection(req) === undefined
+  if (!isSessionAuthority(authority)) return false
+  try {
+    return authority.requestRejection(req) === undefined
+  } catch {
+    // A drifted or temporarily broken upstream session verifier must not
+    // reject the route handler's promise (or take down a long-running dsh).
+    // No exception details or possible credentials should enter the response.
+    // A network peer is refused until upstream can verify it again.
+    return false
+  }
 }

@@ -129,7 +129,7 @@ Three things to expect:
 What stays at the machine is the GUI's configuration plane, and the network never meets an unguarded route:
 
 - **Refused for everyone but a loopback peer:** settings, credentials, the account, model providers, installing or inspecting plugins, anything that opens something on the machine's own screen, and any Gateway namespace or `/api` route this build has not deliberately classified. That keeps credentials off the phone's screen and a stray tap from reconfiguring the install. It is not a wall against a device you paired — see above.
-- **dsh's session is checked in front of every route**, not only the ones dsh guards itself, so a route whose owner forgets to check reaches no one on the network.
+- **dsh's session is checked in front of every route**, not only the ones dsh guards itself, so a route whose owner forgets to check reaches no one on the network. If upstream's session checker unexpectedly fails, the network request is refused instead of escaping as a handler error; it is not treated as a successful sign-in.
 - **The session cookie only travels inside TLS.** dsh does not mark it `Secure`; this does, on the network listener, so a phone that later opens a plain `http://` address on this machine does not send it in the clear.
 - **TLS is terminated in-process**, which preserves the real client address. A forwarding proxy in that seat would make every request look local, and lift both the session check and the configuration pin.
 - **The GUI's own static files are not behind the session.** Pairing arrives on the same route that serves them, before the phone has a session; they carry no secret, and source maps stay excluded. dsh signs in the page itself, and everything the loaded page does needs the session.

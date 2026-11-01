@@ -326,6 +326,20 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
   })
 
+  it('returns the gate refusal if upstream session verification throws', async () => {
+    const broken = new Context()
+    broken.provide('connection', {
+      requestRejection: () => { throw new Error('synthetic credential-bearing upstream failure') },
+    })
+    const handler = await gatedHandler('/api', 'prefix', broken)
+    const denied = response()
+    // Without the guard this handler rejects rather than sending the normal
+    // fixed refusal, potentially disrupting the long-running HTTP listener.
+    await expect(Promise.resolve(handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), denied)))
+      .resolves.toBeUndefined()
+    expect([denied.status, denied.body]).toEqual([403, REFUSAL_BODY])
+  })
+
   it('keeps the configuration plane at the machine even for a paired device', async () => {
     const handler = await gatedHandler('/api')
     for (const endpoint of ['settings/update', 'credentials/set', 'dynamicCordisRunner/invoke', 'session/openWorkspacePath']) {
