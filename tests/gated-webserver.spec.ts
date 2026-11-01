@@ -1,6 +1,6 @@
 /** The gated carrier over a real listener: admission, the privileged pin, and TLS. */
 import { connect as tlsConnect } from 'node:tls'
-import { createServer as createTcpServer } from 'node:net'
+import { connect as tcpConnect, createServer as createTcpServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
@@ -130,6 +130,43 @@ describe('GatedWebServer', () => {
     // A loopback peer is exempt, so this leg only shows the listener is real
     // and routes reach their handlers; the network legs below carry the gate.
     expect((await get('127.0.0.1', server.networkPort, '/api/session/list', {}, ca)).status).toBe(200)
+  })
+
+  it('does not wait for a paired TLS socket or an incomplete handshake on shutdown', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const paired = tlsConnect({ host: '127.0.0.1', port: server.networkPort, ca })
+    paired.on('error', () => {}) // Disposal intentionally disconnects active peers.
+    let negotiating: ReturnType<typeof tcpConnect> | undefined
+    let disposing: Promise<void> | undefined
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await new Promise<void>((resolve, reject) => {
+        paired.once('secureConnect', resolve); paired.once('error', reject)
+      })
+      // A TCP client that sends no ClientHello tests the pre-handshake seat.
+      negotiating = tcpConnect(server.networkPort, '127.0.0.1')
+      negotiating.on('error', () => {})
+      await new Promise<void>((resolve, reject) => {
+        negotiating!.once('connect', resolve); negotiating!.once('error', reject)
+      })
+      disposing = ctx.fiber.dispose()
+      const finished = await Promise.race([
+        disposing.then(() => true),
+        new Promise<boolean>(resolve => { deadline = setTimeout(() => { resolve(false) }, 1_500) }),
+      ])
+      expect(finished).toBe(true)
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      paired.destroy()
+      negotiating?.destroy()
+      await (disposing ?? ctx.fiber.dispose())
+      ctx = undefined
+    }
   })
 
   it('refuses a network bind that has no TLS material', async () => {

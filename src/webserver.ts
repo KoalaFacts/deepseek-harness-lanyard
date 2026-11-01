@@ -46,7 +46,7 @@ import { X509Certificate } from 'node:crypto'
 import { posix } from 'node:path'
 import { isIP } from 'node:net'
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import type { Server as TlsServer, TLSSocket } from 'node:tls'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -663,6 +663,13 @@ export class GatedWebServer extends WebServer {
     const [cert, key] = await Promise.all([readFile(tlsCertPath), readFile(tlsKeyPath)])
     const fingerprint = new X509Certificate(cert).fingerprint256
     const tls = createTlsServer({ cert, key })
+    // Track underlying TCP sockets, including peers that never finish TLS
+    // negotiation. A stalled handshake has no secureConnection event.
+    const connections = new Set<Socket>()
+    tls.on('connection', socket => {
+      connections.add(socket)
+      socket.once('close', () => { connections.delete(socket) })
+    })
     // The decrypted TLSSocket keeps the underlying connection's remoteAddress,
     // so admission still reads the real peer rather than this process.
     tls.on('secureConnection', socket => { routed.emit('connection', socket) })
@@ -687,7 +694,13 @@ export class GatedWebServer extends WebServer {
       })
     })
     this.ctx.effect(() => async () => {
-      await new Promise<void>((resolve) => { tls.close(() => { resolve() }) })
+      await new Promise<void>((resolve) => {
+        tls.close(() => { resolve() })
+        // Closing the listener alone waits for every connected TLS socket.
+        // A paired phone's WebSocket or an incomplete handshake may never
+        // end by itself; drop these peers only when the carrier is disposed.
+        for (const socket of connections) socket.destroy()
+      })
       this.tls = undefined
       this.tlsPort = undefined
       this.fingerprint = undefined

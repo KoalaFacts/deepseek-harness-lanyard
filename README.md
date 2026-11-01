@@ -132,6 +132,7 @@ What stays at the machine is the GUI's configuration plane, and the network neve
 
 ## Limitations
 
+- **Stopping or restarting dsh disconnects live phones.** Lanyard closes active TLS sockets and incomplete handshakes during shutdown; an open phone WebSocket cannot indefinitely delay the host stopping. Reconnect after dsh starts again. This is separate from `--keep-awake`, which prevents idle sleep while dsh runs.
 - **`--host 0.0.0.0` means every network this machine is on** — Wi-Fi, Ethernet, a VPN. Anything on them can reach the TLS listener, though nothing gets past it without a session. Use it on networks you trust, not café or hotel Wi-Fi.
 - **Signing one device out signs out all of them.** Every session is signed by one secret — the `client-connection` browser-session record in dsh's credential store — and replacing it is the only revocation there is.
 - **A tunnel counts as local.** `adb reverse` or `ssh -R` makes the phone a loopback peer: it still needs dsh's session, but reaches the configuration plane. Treat it as handing over your keyboard.

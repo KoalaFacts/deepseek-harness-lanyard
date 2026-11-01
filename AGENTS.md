@@ -70,6 +70,7 @@ Admission itself is upstream's decision: a network peer passes a seat only if `c
 
 Break any of these and the plugin fails **open** — serving the LAN with no gate — while tests may still look green. Each has a test that fails when mutated; keep it that way.
 
+- **TLS teardown must close accepted sockets, including unfinished handshakes.** `tls.Server.close()` only stops accepting and waits for connected phones; a WebSocket or stalled TLS handshake can otherwise prevent dsh from stopping. Track the raw `connection` sockets and destroy them only during disposal. The regression must hold an established TLS peer and a pre-handshake peer open during teardown.
 - **TLS is terminated in-process and the decrypted socket handed to the inherited `node:http` server.** A TCP-forwarding proxy would make every request read as a loopback peer and silently lift both the session requirement and the configuration pin. Do not "simplify" this into a proxy. Held down by the real-LAN-peer test in `tests/gated-webserver.spec.ts`.
 - **Loopback means the socket peer, never the `Host` header.** On an all-interfaces bind any client can claim `Host: localhost`.
 - **A network peer is admitted only on upstream's say-so, and no connection means no admission.** `admit()` reads `ctx.connection` per request, because Connection mounts after the carrier it registers on; before it mounts, after it is disposed, and on a connection that predates browser authentication, every network peer is refused. Treating "nothing to ask" as "nothing to check" would serve the LAN with no gate at all.
