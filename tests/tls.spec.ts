@@ -100,7 +100,7 @@ describe('the tls row', () => {
     expect(readFileSync(keyPath, 'utf8')).toBe(original[1])
   })
 
-  it('reuses existing material, so a paired device's accepted exception survives a restart', async () => {
+  it('reuses existing material, so a paired device\'s accepted exception survives a restart', async () => {
     const dir = unusedDir()
     await provide({ enabled: true, dir })
     const first = readFileSync(join(dir, 'cert.pem'), 'utf8')
