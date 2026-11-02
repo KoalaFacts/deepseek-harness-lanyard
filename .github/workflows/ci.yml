@@ -36,6 +36,8 @@ jobs:
       - run: npm run test:mutation:tls
       # Malformed absolute request targets must not trigger route exceptions.
       - run: npm run test:mutation:request-target
+      # A delayed pairing announcement must never reuse an obsolete launch-token issuer.
+      - run: npm run test:mutation:pairing-readiness
       # A main-branch CI tarball lets someone test a real install before npm
       # publication. Only the already-built, 32-file-gated payload is packed;
       # never run lifecycle scripts or upload installable PR artifacts.
