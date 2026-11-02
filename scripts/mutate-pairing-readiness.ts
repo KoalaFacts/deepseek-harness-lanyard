@@ -66,7 +66,8 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
       || !(failure.failureMessages ?? []).some(message =>
-        message.includes('AssertionError:') && message.includes('no browser authentication'))) {
+        message.includes('AssertionError:') && message.includes('to contain')
+        && message.includes('lanyard: this dsh has no browser auth'))) {
       throw new Error(`${label}: unguarded initial Connection lookup survived or failed for another reason: ${failures}`)
     }
   } else if (focus === warningCaseName) {
