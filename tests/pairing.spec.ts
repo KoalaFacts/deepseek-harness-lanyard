@@ -492,6 +492,32 @@ describe('the pairing row', () => {
     }
   })
 
+  it.each(['lookup', 'await'] as const)(
+    'refuses a throwing Loader %s without exposing a launch token', async (phase) => {
+      const printed: string[] = []
+      vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+      const fakeContext = {
+        get: (name: string) => {
+          if (name === 'connection') return issuer
+          if (name === 'loader') {
+            if (phase === 'lookup') throw new Error(`upstream Loader getter included ${LAUNCH_TOKEN}`)
+            return { await: () => { throw new Error(`upstream Loader await included ${LAUNCH_TOKEN}`) } }
+          }
+          return undefined
+        },
+      } as unknown as Context
+      let failure: unknown
+      try {
+        await Pairing.apply(fakeContext, { printPairingUrl: true, printPairingQr: false })
+      } catch (error) {
+        failure = error
+      }
+      expect(String(failure)).toBe('Error: lanyard: could not read DSH startup readiness; no pairing link was printed; restart dsh to retry')
+      expect(String(failure)).not.toContain(LAUNCH_TOKEN)
+      expect(printed).toEqual([])
+    },
+  )
+
   it('does not leak a failing webServer lookup after delayed readiness', async () => {
     const printed: string[] = []
     const errors: string[] = []

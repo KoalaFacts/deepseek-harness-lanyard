@@ -35,6 +35,9 @@ const warningCaseName = 'warns concrete LAN bind users not to open the upstream 
 const carrierSnapshotCaseName = 'keeps one TLS carrier snapshot when webServer changes during pairing'
 const carrierSnapshotGuarded = "    const { scheme = 'http', networkPort, certificateFingerprint } = server"
 const carrierSnapshotUnsafe = "    const { scheme = 'http', networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer"
+const loaderReadinessCaseName = 'refuses a throwing Loader'
+const loaderReadinessGuarded = "  const settled = (() => {\n    try {\n      return ctx.get('loader')?.await()\n    } catch {\n      // Upstream can replace Loader during startup. Its getter or await()\n      // may throw a diagnostic with a launch token; never propagate it.\n      throw new Error('lanyard: could not read DSH startup readiness; no pairing link was printed; restart dsh to retry')\n    }\n  })()"
+const loaderReadinessUnsafe = "  const settled = ctx.get('loader')?.await()"
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const reportsDir = mkdtempSync(join(tmpdir(), 'lanyard-pairing-readiness-mutant-'))
 
@@ -58,7 +61,7 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
   const matches = (report.testResults ?? [])
     .flatMap(suite => suite.assertionResults ?? [])
     .filter(test => test.fullName?.includes(focus))
-  const count = focus === caseName ? 2 : 1
+  const count = focus === caseName || focus === loaderReadinessCaseName ? 2 : 1
   if (matches.length !== count) throw new Error(`${label}: expected ${count} delayed readiness cases, got ${matches.length}`)
   const failures = matches.flatMap(test => test.failureMessages ?? []).join('\\n')
   if (!expectFailure) {
@@ -70,6 +73,12 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
       || !(failure.failureMessages ?? []).some(message =>
         message.includes('AssertionError:') && message.includes('lanyard: TLS service unavailable'))) {
       throw new Error(`${label}: unguarded TLS-service lookup survived or failed for another reason: ${failures}`)
+    }
+  } else if (focus === loaderReadinessCaseName) {
+    if (result.status === 0 || matches.some(test =>
+      test.status !== 'failed' || !(test.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('could not read DSH startup readiness')))) {
+      throw new Error(`${label}: unguarded Loader readiness survived or failed for another reason: ${failures}`)
     }
   } else if (focus === activationCaseName) {
     const failure = matches[0]
@@ -129,6 +138,11 @@ try {
   run('activation-baseline', false, activationCaseName)
   writeFileSync(sourcePath, original.replace(activationGuarded, activationUnsafe))
   try { run('unguarded-activation', true, activationCaseName) }
+  finally { writeFileSync(sourcePath, original) }
+  if (original.split(loaderReadinessGuarded).length !== 2) throw new Error('Loader readiness guard anchor missing or ambiguous')
+  run('loader-readiness-baseline', false, loaderReadinessCaseName)
+  writeFileSync(sourcePath, original.replace(loaderReadinessGuarded, loaderReadinessUnsafe))
+  try { run('unguarded-loader-readiness', true, loaderReadinessCaseName) }
   finally { writeFileSync(sourcePath, original) }
   if (original.split(guarded).length !== 2) throw new Error('pairing readiness guard anchor missing or ambiguous')
   run('baseline', false)

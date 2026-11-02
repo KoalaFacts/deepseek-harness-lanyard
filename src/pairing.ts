@@ -531,7 +531,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   // Same readiness contract as the shipped URL line: wait for the Loader tree,
   // or print at once in a hand-built context that has no Loader.
-  const settled = ctx.get('loader')?.await()
+  const settled = (() => {
+    try {
+      return ctx.get('loader')?.await()
+    } catch {
+      // Upstream can replace Loader during startup. Its getter or await()
+      // may throw a diagnostic with a launch token; never propagate it.
+      throw new Error('lanyard: could not read DSH startup readiness; no pairing link was printed; restart dsh to retry')
+    }
+  })()
   if (settled === undefined) {
     await announce()
     return
