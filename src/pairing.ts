@@ -441,12 +441,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       return
     }
     const reachable = networkPort
-    const link = pairingLink(issuer, scheme, reachable, lanAddress)
+    // Connection can be replaced while the Loader settles, including after a
+    // service restart. The issuer captured at activation may hold a launch
+    // token the currently mounted Connection no longer accepts. Re-read once
+    // for this entire announcement, before printing any token-bearing link.
+    let currentIssuer: unknown
+    try {
+      currentIssuer = ctx.get('connection')
+    } catch {
+      currentIssuer = undefined
+    }
+    if (!isLaunchLinkIssuer(currentIssuer)) {
+      ctx.logger.error(
+        'lanyard: browser authentication is no longer available at pairing readiness; '
+        + 'no pairing link or QR code is printed; restart dsh to retry',
+      )
+      return
+    }
+    const link = pairingLink(currentIssuer, scheme, reachable, lanAddress)
     // Validate every URL before printing even the first one. An upstream
     // contract drift on an alternative interface must not leave a partly
     // usable, token-bearing set of pairing instructions in terminal logs.
     const alternatives = offered.filter(address => address !== lanAddress)
-      .map(address => ({ address, link: pairingLink(issuer, scheme, reachable, address) }))
+      .map(address => ({ address, link: pairingLink(currentIssuer, scheme, reachable, address) }))
     if (link === undefined || alternatives.some(alternative => alternative.link === undefined)) {
       ctx.logger.error(
         'lanyard: stop dsh now — upstream returned an unsafe pairing URL for the verified HTTPS listener; '

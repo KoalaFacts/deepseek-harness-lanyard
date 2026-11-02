@@ -427,6 +427,41 @@ describe('the pairing row', () => {
     }
   })
 
+  it.each(['replaced', 'unavailable'])(
+    'does not print a stale launch token when the connection is %s before readiness', async (change) => {
+      const printed: string[] = []
+      const errors: string[] = []
+      vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+      ctx = new Context()
+      ctx.provide('webRuntime', { lanAddresses: ['192.168.1.5'] })
+      ctx.provide('connection', issuer)
+      ctx.provide('webServer', {
+        scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT,
+      })
+      let releaseReadiness!: () => void
+      const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve })
+      ctx.provide('loader', { await: () => readiness })
+      vi.spyOn(ctx.logger, 'error').mockImplementation(((line: unknown) => { errors.push(String(line)) }) as never)
+      await ctx.plugin(Pairing, {} as PairingConfig).await()
+      const getService = ctx.get.bind(ctx)
+      const freshIssuer = { authenticatedUrl: (base: string) => `${base}?token=refreshed-session-token` }
+      const currentConnection: unknown = change === 'replaced' ? freshIssuer : undefined
+      vi.spyOn(ctx, 'get').mockImplementation(((key: string) =>
+        key === 'connection' ? currentConnection : getService(key as never)) as typeof ctx.get)
+      releaseReadiness()
+      await vi.waitFor(() => {
+        if (change === 'replaced') {
+          expect(printed).toContain('lanyard: pair a device by opening https://192.168.1.5:3443/?token=refreshed-session-token once')
+        } else {
+          expect(errors).toContain('lanyard: browser authentication is no longer available at pairing readiness; no pairing link or QR code is printed; restart dsh to retry')
+        }
+      })
+      expect(printed.join(' ')).not.toContain(LAUNCH_TOKEN)
+      if (change === 'unavailable') expect(printed).toEqual([])
+      expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+    },
+  )
+
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
     // `port` is this machine's plaintext listener, bound to loopback; a link
     // naming it sends the phone to a port nothing on the network answers.
