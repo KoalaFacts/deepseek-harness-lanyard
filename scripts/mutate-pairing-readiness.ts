@@ -13,6 +13,9 @@ import { join, resolve } from 'node:path'
 const sourcePath = resolve('src/pairing.ts')
 const original = readFileSync(sourcePath, 'utf8')
 const guarded = "      currentIssuer = ctx.get('connection')"
+const serviceGuarded = "    try {\n      if (ctx.get('webServer') !== undefined) await announce()\n    } catch {\n      // A service can be replaced or fail during Loader readiness. The\n      // accessor's error may contain session data; never let it escape the\n      // detached readiness promise or copy its diagnostic to a log.\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }"
+const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announce()"
+const serviceCaseName = 'does not leak a failing webServer lookup after delayed readiness'
 const unsafe = "      currentIssuer = issuer /* MUTANT: use stale startup issuer */"
 const caseName = 'does not print a stale launch token when the connection is'
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
@@ -25,11 +28,11 @@ interface Assertion {
 }
 interface Report { testResults?: Array<{ assertionResults?: Assertion[] }> }
 
-function run(label: string, expectFailure: boolean): void {
+function run(label: string, expectFailure: boolean, focus = caseName): void {
   const reportPath = join(reportsDir, label + '.json')
   const result = spawnSync(pnpm, [
     'exec', 'vitest', 'run', 'tests/pairing.spec.ts',
-    '-t', caseName, '--reporter=json', '--outputFile', reportPath,
+    '-t', focus, '--reporter=json', '--outputFile', reportPath,
   ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 2_000_000 })
   if (result.error) throw new Error(`${label}: Vitest did not start: ${result.error.message}`)
   let report: Report
@@ -37,12 +40,20 @@ function run(label: string, expectFailure: boolean): void {
   catch { throw new Error(`${label}: no readable Vitest JSON report (exit ${String(result.status)}): ${result.stderr}`) }
   const matches = (report.testResults ?? [])
     .flatMap(suite => suite.assertionResults ?? [])
-    .filter(test => test.fullName?.includes(caseName))
-  if (matches.length !== 2) throw new Error(`${label}: expected two delayed readiness cases, got ${matches.length}`)
+    .filter(test => test.fullName?.includes(focus))
+  const count = focus === caseName ? 2 : 1
+  if (matches.length !== count) throw new Error(`${label}: expected ${count} delayed readiness cases, got ${matches.length}`)
   const failures = matches.flatMap(test => test.failureMessages ?? []).join('\\n')
   if (!expectFailure) {
     if (result.status !== 0 || matches.some(test => test.status !== 'passed'))
       throw new Error(`${label}: baseline did not pass: ${failures}`)
+  } else if (focus === serviceCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('lanyard: TLS service unavailable'))) {
+      throw new Error(`${label}: unguarded TLS-service lookup survived or failed for another reason: ${failures}`)
+    }
   } else {
     // Vitest abbreviates long quoted values inside assertion failures. The
     // stale-issuer mutant does fail both focused tests, but the expected
@@ -66,6 +77,11 @@ try {
   run('baseline', false)
   writeFileSync(sourcePath, original.replace(guarded, unsafe))
   try { run('stale-issuer', true) }
+  finally { writeFileSync(sourcePath, original) }
+  if (original.split(serviceGuarded).length !== 2) throw new Error('pairing TLS-service guard anchor missing or ambiguous')
+  run('tls-service-baseline', false, serviceCaseName)
+  writeFileSync(sourcePath, original.replace(serviceGuarded, serviceUnsafe))
+  try { run('unguarded-tls-service', true, serviceCaseName) }
   finally { writeFileSync(sourcePath, original) }
 } finally {
   writeFileSync(sourcePath, original)

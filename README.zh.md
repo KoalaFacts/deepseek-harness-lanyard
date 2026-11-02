@@ -76,7 +76,7 @@ Lanyard 用同目录的排他锁目录（`cert.pem.lanyard-lock` 和 `key.pem.la
 
 直接组合载体时，`tls: null` 与省略 `tls` 一样，表示没有显式提供 PEM 证书和私钥。对网络开放监听仍然必须提供自动生成或显式指定的 TLS 文件。
 
-本机照样用原来的 `http://127.0.0.1:3080`；网络上的设备走 TLS，用单独的端口，默认 3443。启动时会打印配对链接、证书指纹，以及链接对应的二维码。如果 DSH 在启动就绪前替换了浏览器认证服务，Lanyard 会使用当前服务生成配对令牌，不打印已失效的旧链接；如果认证服务已不存在，则不输出链接或二维码，并提示重启 DSH：
+本机照样用原来的 `http://127.0.0.1:3080`；网络上的设备走 TLS，用单独的端口，默认 3443。启动时会打印配对链接、证书指纹，以及链接对应的二维码。如果 DSH 在启动就绪前替换了浏览器认证服务，Lanyard 会使用当前服务生成配对令牌，不打印已失效的旧链接；如果认证服务已不存在，则不输出链接或二维码，并提示重启 DSH。如果启动就绪时读取 TLS 服务发生异常，Lanyard 会输出不含敏感信息的固定恢复提示，不会泄露上游异常内容或留下未处理的就绪 Promise 错误：
 
 ```
 lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token

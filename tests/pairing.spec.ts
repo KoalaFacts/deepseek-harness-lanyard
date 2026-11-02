@@ -462,6 +462,37 @@ describe('the pairing row', () => {
     },
   )
 
+  it('does not leak a failing webServer lookup after delayed readiness', async () => {
+    const printed: string[] = []
+    const errors: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    ctx = new Context()
+    ctx.provide('webRuntime', { lanAddresses: ['192.168.1.5'] })
+    ctx.provide('connection', issuer)
+    ctx.provide('webServer', {
+      scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT,
+    })
+    let releaseReadiness!: () => void
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve })
+    ctx.provide('loader', { await: () => readiness })
+    vi.spyOn(ctx.logger, 'error').mockImplementation(((line: unknown) => { errors.push(String(line)) }) as never)
+    await ctx.plugin(Pairing, {} as PairingConfig).await()
+    const getService = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+      if (key === 'webServer') throw new Error(`upstream service diagnostic includes ${LAUNCH_TOKEN}`)
+      return getService(key as never)
+    }) as typeof ctx.get)
+    try {
+      releaseReadiness()
+      await vi.waitFor(() => {
+        expect(errors).toContain('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')
+      })
+    } finally {
+      lookup.mockRestore()
+    }
+    expect(printed).toEqual([])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
     // `port` is this machine's plaintext listener, bound to loopback; a link
     // naming it sends the phone to a port nothing on the network answers.

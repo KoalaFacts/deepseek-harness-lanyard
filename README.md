@@ -76,7 +76,7 @@ Lanyard coordinates its own certificate writers with exclusive sibling lock dire
 
 When composing the carrier directly, `tls: null` means no explicit PEM pair, just like an omitted `tls`. A network bind still requires generated or explicit TLS material.
 
-This machine keeps its usual `http://127.0.0.1:3080`, and devices on the network get TLS on a port of their own, 3443 by default. On startup it prints the pairing link, the certificate's fingerprint, and a QR code of the link. If DSH replaces its browser-authentication service before startup settles, Lanyard uses the currently active launch-token issuer instead of printing an obsolete link; if no issuer remains, it prints no pairing link or QR and asks you to restart DSH:
+This machine keeps its usual `http://127.0.0.1:3080`, and devices on the network get TLS on a port of their own, 3443 by default. On startup it prints the pairing link, the certificate's fingerprint, and a QR code of the link. If DSH replaces its browser-authentication service before startup settles, Lanyard uses the currently active launch-token issuer instead of printing an obsolete link; if no issuer remains, it prints no pairing link or QR and asks you to restart DSH. If the TLS service becomes unreadable while startup settles, pairing reports a fixed recovery message rather than leaking an upstream exception or leaving an unhandled readiness failure:
 
 ```
 lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token

@@ -520,7 +520,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   void settled.then(async () => {
     // The tree can be disposed while the boot was in flight (an early SIGTERM);
     // a pairing link for a dead server would only mislead.
-    if (ctx.get('webServer') !== undefined) await announce()
+    try {
+      if (ctx.get('webServer') !== undefined) await announce()
+    } catch {
+      // A service can be replaced or fail during Loader readiness. The
+      // accessor's error may contain session data; never let it escape the
+      // detached readiness promise or copy its diagnostic to a log.
+      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')
+    }
     // Loader reports a failed boot; this row only stays quiet.
   }, () => {})
 }
