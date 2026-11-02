@@ -638,6 +638,24 @@ describe('the fallback seat', () => {
     return handler
   }
 
+  it('refuses malformed absolute request targets without throwing from the fallback seat', async () => {
+    const handler = await gatedFallback()
+    // node:http accepts these targets before the WHATWG URL parser rejects
+    // them. Public pairing/static assets must not exempt malformed requests.
+    for (const target of ['http://[', 'http://%', '//[::broken']) {
+      for (const peer of ['192.168.1.5', '127.0.0.1']) {
+        const refused = response()
+        await expect(Promise.resolve(handler(req(target, peer, { cookie: SESSION }), refused)))
+          .resolves.toBeUndefined()
+        expect([target, peer, refused.status, refused.body])
+          .toEqual([target, peer, 403, REFUSAL_BODY])
+      }
+    }
+    const valid = response()
+    await handler(req('/?token=launch-token', '192.168.1.5'), valid)
+    expect([valid.status, valid.body]).toEqual([200, 'DIST'])
+  })
+
   it('lets the pairing exchange and the built frontend through to a device holding no session yet', async () => {
     // Pairing is `GET /?token=…` from a device with nothing to present; the
     // seat's owner authenticates the index itself.

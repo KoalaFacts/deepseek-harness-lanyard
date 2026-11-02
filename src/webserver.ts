@@ -730,7 +730,15 @@ export class GatedWebServer extends WebServer {
    */
   private permits(req: IncomingMessage, admission: Admission): boolean {
     /* v8 ignore next -- node always sets url on server requests */
-    const raw = new URL(req.url ?? '/', 'http://x').pathname
+    let raw: string
+    try {
+      raw = new URL(req.url ?? '/', 'http://x').pathname
+    } catch {
+      // node:http accepts malformed absolute-form request targets such as
+      // "http://[". Never let their URL parse errors escape a route promise
+      // (or let an unparsable target use the public fallback exemption).
+      return false
+    }
     if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
     const decoded = decodedPathname(raw)
     // A pathname whose escapes do not decode, or whose opened name cannot be
