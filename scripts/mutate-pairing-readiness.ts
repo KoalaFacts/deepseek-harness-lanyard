@@ -22,8 +22,8 @@ const lanSnapshotCaseName = 'refreshes the LAN address snapshot after delayed re
 const legacyRuntimeCaseName = 'pairs a concrete LAN bind without querying a broken legacy webRuntime'
 const legacyRuntimeGuarded = "    const runtime = (host === undefined || host === '0.0.0.0')\n      ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n      : undefined"
 const legacyRuntimeUnsafe = "    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined"
-const lanSnapshotGuarded = "  if (!config.printPairingUrl) return\n  const announce = async (): Promise<void> => {\n    // A delayed Loader may replace the listener or refresh its LAN snapshot.\n    // Resolve both at announcement time, not at plugin activation, so a phone\n    // never receives a link naming an interface the current server does not use.\n    const host = (ctx.webServer as unknown as SchemeAwareServer).host\n    // Concrete binds on current dsh do not need the legacy webRuntime service.\n    // Skip that optional lookup: a broken getter must not break pairing with\n    // an otherwise healthy TLS listener bound to one known IPv4 address.\n    const runtime = (host === undefined || host === '0.0.0.0')\n      ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n      : undefined\n"
-const lanSnapshotUnsafe = "  if (!config.printPairingUrl) return\n  const host = (ctx.webServer as unknown as SchemeAwareServer).host\n  // Concrete binds on current dsh do not need the legacy webRuntime service.\n  // Skip that optional lookup: a broken getter must not break pairing with\n  // an otherwise healthy TLS listener bound to one known IPv4 address.\n  const runtime = (host === undefined || host === '0.0.0.0')\n    ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n    : undefined\n  const announce = async (): Promise<void> => {\n"
+const lanSnapshotGuarded = "  if (!config.printPairingUrl) return\n  const announce = async (): Promise<void> => {\n    // A delayed Loader may replace the listener or refresh its LAN snapshot.\n    // Resolve both at announcement time, not at plugin activation, so a phone\n    // never receives a link naming an interface the current server does not use.\n    const server = ctx.webServer as unknown as SchemeAwareServer\n    const host = server.host\n    // Concrete binds on current dsh do not need the legacy webRuntime service.\n    // Skip that optional lookup: a broken getter must not break pairing with\n    // an otherwise healthy TLS listener bound to one known IPv4 address.\n    const runtime = (host === undefined || host === '0.0.0.0')\n      ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n      : undefined\n"
+const lanSnapshotUnsafe = "  if (!config.printPairingUrl) return\n  const server = ctx.webServer as unknown as SchemeAwareServer\n  const host = server.host\n  // Concrete binds on current dsh do not need the legacy webRuntime service.\n  // Skip that optional lookup: a broken getter must not break pairing with\n  // an otherwise healthy TLS listener bound to one known IPv4 address.\n  const runtime = (host === undefined || host === '0.0.0.0')\n    ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n    : undefined\n  const announce = async (): Promise<void> => {\n"
 const serviceGuarded = "    try {\n      if (ctx.get('webServer') !== undefined) await announce()\n    } catch {\n      // A service can be replaced or fail during Loader readiness. The\n      // accessor's error may contain session data; never let it escape the\n      // detached readiness promise or copy its diagnostic to a log.\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }"
 const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announce()"
 const serviceCaseName = 'does not leak a failing webServer lookup after delayed readiness'
@@ -32,6 +32,9 @@ const caseName = 'does not print a stale launch token when the connection is'
 const warningGuarded = "    console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`\n      + ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token')"
 const warningUnsafe = "    console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`\n      + (host === undefined || host === '0.0.0.0'\n        ? ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token' : ''))"
 const warningCaseName = 'warns concrete LAN bind users not to open the upstream plaintext token link'
+const carrierSnapshotCaseName = 'keeps one TLS carrier snapshot when webServer changes during pairing'
+const carrierSnapshotGuarded = "    const { scheme = 'http', networkPort, certificateFingerprint } = server"
+const carrierSnapshotUnsafe = "    const { scheme = 'http', networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer"
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const reportsDir = mkdtempSync(join(tmpdir(), 'lanyard-pairing-readiness-mutant-'))
 
@@ -89,6 +92,13 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
       || !(failure.failureMessages ?? []).some(message => message.includes('synthetic legacy runtime failure'))) {
       throw new Error(`${label}: an unnecessary legacy runtime lookup survived or failed for another reason: ${failures}`)
     }
+  } else if (focus === carrierSnapshotCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('to be'))) {
+      throw new Error(`${label}: mixed-server snapshot mutant survived or failed for another reason: ${failures}`)
+    }
   } else if (focus === warningCaseName) {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
@@ -140,6 +150,11 @@ try {
   writeFileSync(sourcePath, original.replace(serviceGuarded, serviceUnsafe))
   try { run('unguarded-tls-service', true, serviceCaseName) }
   finally { writeFileSync(sourcePath, original) }
+  if (original.split(carrierSnapshotGuarded).length !== 2) throw new Error('TLS carrier snapshot guard anchor missing or ambiguous')
+  run('carrier-snapshot-baseline', false, carrierSnapshotCaseName)
+  writeFileSync(sourcePath, original.replace(carrierSnapshotGuarded, carrierSnapshotUnsafe))
+  try { run('mixed-server-snapshot', true, carrierSnapshotCaseName) }
+  finally { writeFileSync(sourcePath, original) }
   if (original.split(warningGuarded).length !== 2) throw new Error('concrete LAN warning anchor missing or ambiguous')
   run('concrete-warning-baseline', false, warningCaseName)
   writeFileSync(sourcePath, original.replace(warningGuarded, warningUnsafe))
@@ -150,4 +165,4 @@ try {
   rmSync(reportsDir, { recursive: true, force: true })
 }
 if (readFileSync(sourcePath, 'utf8') !== original) throw new Error('pairing source restoration failed')
-process.stdout.write('Pairing activation, readiness, LAN snapshot and concrete-LAN plaintext warning source mutations killed; source restored.\n')
+process.stdout.write('Pairing activation, readiness, LAN and TLS carrier snapshots, and concrete-LAN plaintext warning source mutations killed; source restored.\n')

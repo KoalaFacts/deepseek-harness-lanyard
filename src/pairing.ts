@@ -392,7 +392,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // A delayed Loader may replace the listener or refresh its LAN snapshot.
     // Resolve both at announcement time, not at plugin activation, so a phone
     // never receives a link naming an interface the current server does not use.
-    const host = (ctx.webServer as unknown as SchemeAwareServer).host
+    const server = ctx.webServer as unknown as SchemeAwareServer
+    const host = server.host
     // Concrete binds on current dsh do not need the legacy webRuntime service.
     // Skip that optional lookup: a broken getter must not break pairing with
     // an otherwise healthy TLS listener bound to one known IPv4 address.
@@ -416,7 +417,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // somewhere a phone can reach; the gated carrier reports the TLS port as
     // `networkPort`. A shipped carrier has neither that nor a scheme, and is
     // refused just below.
-    const { scheme = 'http', networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
+    const { scheme = 'http', networkPort, certificateFingerprint } = server
     // A LAN address with a plaintext carrier means lanyard's is not the one
     // serving — say, upstream renamed the row this bundle disables — so the
     // network is meeting a carrier without this gate, over plaintext. A link

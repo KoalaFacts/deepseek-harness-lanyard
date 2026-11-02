@@ -534,6 +534,27 @@ describe('the pairing row', () => {
     ])
   })
 
+  it('keeps one TLS carrier snapshot when webServer changes during pairing', async () => {
+    // A live service replacement between two property reads must not combine
+    // the old listener IP with a new listener port in a token-bearing URL.
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    const first = { host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT }
+    const replacement = { host: '10.0.0.9', scheme: 'https', port: 3080, networkPort: 3444, certificateFingerprint: CERT_FINGERPRINT }
+    let serverReads = 0
+    const errors: string[] = []
+    const volatileContext = {
+      get: (key: string) => key === 'connection' ? issuer : undefined,
+      get webServer() { return ++serverReads === 1 ? first : replacement },
+      logger: { error: (line: string) => { errors.push(line) } },
+    } as unknown as Context
+    await Pairing.apply(volatileContext, { printPairingUrl: true, printPairingQr: false })
+    expect(serverReads).toBe(1)
+    expect(printed).toContain(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+    expect(printed.join(' ')).not.toContain('https://192.168.1.5:3444/')
+    expect(errors).toEqual([])
+  })
+
   it('pairs a concrete LAN bind without querying a broken legacy webRuntime', async () => {
     // Newer dsh versions no longer provide webRuntime. Even a throwing
     // optional-service getter must not prevent a concrete TLS pairing link.
