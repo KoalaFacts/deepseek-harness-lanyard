@@ -85,7 +85,7 @@ lanyard: the phone should show certificate SHA-256 7F:52:AF:73:DB:4B:08:A0:9E:56
 lanyard: or scan this with the phone
 ```
 
-Ignore the `(LAN: …)` link on dsh's own `dsh web:` line: it is plain http and carries the launch token. Nothing answers it, but someone impersonating your machine on the network could.
+Ignore the `(LAN: …)` link on dsh's own `dsh web:` line: it is plain http and carries the launch token. Nothing answers it, but someone impersonating your machine on the network could. This warning applies to concrete `--host <LAN IPv4>` binds as well as older wildcard binds: open only Lanyard's verified HTTPS pairing link.
 
 ### Flags
 

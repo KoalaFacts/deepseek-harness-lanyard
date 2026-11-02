@@ -475,9 +475,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // the LAN address and carries the launch token. Nothing answers it, so a
     // passive listener learns nothing — but whoever impersonated this machine
     // on the network would receive the token, so say not to open it.
+    // The inherited dsh web line advertises a plaintext LAN address even on
+    // a concrete --host bind. An impersonator could collect its launch token;
+    // never hide this warning merely because the bind is not a wildcard.
     console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`
-      + (host === undefined || host === '0.0.0.0'
-        ? ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token' : ''))
+      + ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token')
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.

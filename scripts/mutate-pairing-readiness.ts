@@ -1,7 +1,9 @@
 /**
  * Source-level mutation gate for delayed pairing readiness. The pairing row
  * must use the current upstream authentication service, not a launch-token
- * issuer captured before the Loader settled. This is a source mutation of
+ * issuer captured before the Loader settled, and the concrete-LAN warning must
+ * not disappear just because the user selected a specific interface. Both
+ * checks mutate the real source under focused Vitest cases. This is a source mutation of
  * the real module under the real Vitest cases, not a model of the function.
  * Always restore the checked-out source, including on assertion failure.
  */
@@ -18,6 +20,9 @@ const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announc
 const serviceCaseName = 'does not leak a failing webServer lookup after delayed readiness'
 const unsafe = "      currentIssuer = issuer /* MUTANT: use stale startup issuer */"
 const caseName = 'does not print a stale launch token when the connection is'
+const warningGuarded = "    console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`\n      + ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token')"
+const warningUnsafe = "    console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`\n      + (host === undefined || host === '0.0.0.0'\n        ? ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token' : ''))"
+const warningCaseName = 'warns concrete LAN bind users not to open the upstream plaintext token link'
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const reportsDir = mkdtempSync(join(tmpdir(), 'lanyard-pairing-readiness-mutant-'))
 
@@ -54,6 +59,13 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
         message.includes('AssertionError:') && message.includes('lanyard: TLS service unavailable'))) {
       throw new Error(`${label}: unguarded TLS-service lookup survived or failed for another reason: ${failures}`)
     }
+  } else if (focus === warningCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('do not open'))) {
+      throw new Error(`${label}: omitted plaintext-link warning survived or failed for another reason: ${failures}`)
+    }
   } else {
     // Vitest abbreviates long quoted values inside assertion failures. The
     // stale-issuer mutant does fail both focused tests, but the expected
@@ -83,9 +95,14 @@ try {
   writeFileSync(sourcePath, original.replace(serviceGuarded, serviceUnsafe))
   try { run('unguarded-tls-service', true, serviceCaseName) }
   finally { writeFileSync(sourcePath, original) }
+  if (original.split(warningGuarded).length !== 2) throw new Error('concrete LAN warning anchor missing or ambiguous')
+  run('concrete-warning-baseline', false, warningCaseName)
+  writeFileSync(sourcePath, original.replace(warningGuarded, warningUnsafe))
+  try { run('missing-concrete-warning', true, warningCaseName) }
+  finally { writeFileSync(sourcePath, original) }
 } finally {
   writeFileSync(sourcePath, original)
   rmSync(reportsDir, { recursive: true, force: true })
 }
 if (readFileSync(sourcePath, 'utf8') !== original) throw new Error('pairing source restoration failed')
-process.stdout.write('Delayed pairing issuer source mutation killed; source restored.\n')
+process.stdout.write('Pairing readiness and concrete-LAN plaintext warning source mutations killed; source restored.\n')

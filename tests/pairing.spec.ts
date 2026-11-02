@@ -294,7 +294,7 @@ describe('the pairing row', () => {
     { lanAddresses = ['192.168.1.5'], connection = issuer as unknown, server, onError }: {
       lanAddresses?: string[]
       connection?: unknown
-      server?: { scheme: 'http' | 'https'; port: number; networkPort?: number; certificateFingerprint?: string }
+      server?: { host?: string; scheme: 'http' | 'https'; port: number; networkPort?: number; certificateFingerprint?: string }
       onError?: (line: string) => void
     } = {},
   ): Promise<string[]> {
@@ -502,6 +502,16 @@ describe('the pairing row', () => {
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
       `lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`,
     ])
+  })
+
+  it('warns concrete LAN bind users not to open the upstream plaintext token link', async () => {
+    // Upstream's dsh web line still carries an HTTP LAN token URL when --host
+    // names a concrete IPv4; the lack of a wildcard must not suppress advice.
+    const printed = await mount({}, {
+      server: { host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+    })
+    expect(printed[0]).toContain('do not open the (LAN: …) link on the dsh web line')
+    expect(printed[1]).toBe(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
   })
 
   it('pairs over the likeliest address, and offers a link for each other one a phone could share', async () => {

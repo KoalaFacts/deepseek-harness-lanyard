@@ -85,7 +85,7 @@ lanyard: the phone should show certificate SHA-256 7F:52:AF:73:DB:4B:08:A0:9E:56
 lanyard: or scan this with the phone
 ```
 
-dsh 自己那行 `dsh web:` 里的 `(LAN: …)` 链接别去点：它走明文 http，还带着启动令牌。正常情况下没有任何东西会应答它，但如果有人在网络里冒充你的电脑，就能拿到令牌。
+dsh 自己那行 `dsh web:` 里的 `(LAN: …)` 链接别去点：它走明文 http，还带着启动令牌。正常情况下没有任何东西会应答它，但如果有人在网络里冒充你的电脑，就能拿到令牌。 即使使用明确的 `--host <局域网 IPv4>`（而不是旧版通配地址），这条警告也适用；手机只能打开 Lanyard 提供且已核对证书指纹的 HTTPS 配对链接。
 
 ### 命令行参数
 
