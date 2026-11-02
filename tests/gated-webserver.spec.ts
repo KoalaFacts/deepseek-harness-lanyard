@@ -269,7 +269,13 @@ describe('GatedWebServer', () => {
         tlsCertPath: kind === 'certificate' ? oversized : certPath,
         tlsKeyPath: kind === 'private key' ? oversized : keyPath,
       })
-      await expect(fiber.await()).rejects.toThrow(new RegExp(`TLS ${kind} exceeds the 1 MiB PEM size limit`))
+      // A mutant allowing the oversized but valid PEM prefix can start the Cordis
+      // service. Its object has reflective getters that throw if Vitest formats
+      // it as a fulfilled promise; normalize success to a harmless scalar so
+      // this test fails on the missing size rejection, not in the reporter.
+      await expect(fiber.await().then(() => 'started')).rejects.toThrow(
+        new RegExp(`TLS ${kind} exceeds the 1 MiB PEM size limit`),
+      )
       await ctx.fiber.dispose()
       ctx = undefined
     }
