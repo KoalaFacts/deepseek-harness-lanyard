@@ -39,14 +39,23 @@ function run(label: string, expectFailure: boolean): void {
     .flatMap(suite => suite.assertionResults ?? [])
     .filter(test => test.fullName?.includes(caseName))
   if (matches.length !== 2) throw new Error(`${label}: expected two delayed readiness cases, got ${matches.length}`)
-  const failures = matches.flatMap(test => test.failureMessages ?? []).join('\n')
+  const failures = matches.flatMap(test => test.failureMessages ?? []).join('\\n')
   if (!expectFailure) {
     if (result.status !== 0 || matches.some(test => test.status !== 'passed'))
       throw new Error(`${label}: baseline did not pass: ${failures}`)
   } else {
-    if (result.status === 0 || matches.some(test => test.status !== 'failed')
-      || !/refreshed-session-token/i.test(failures)
-      || !/browser authentication is no longer available at pairing readiness/i.test(failures)) {
+    // Vitest abbreviates long quoted values inside assertion failures. The
+    // stale-issuer mutant does fail both focused tests, but the expected
+    // refreshed token and refusal can be truncated in the JSON report.
+    // Identify each intended failed assertion without requiring full tokens.
+    const failedAtExpectedAssertion = (variant: 'replaced' | 'unavailable', target: string): boolean => {
+      const test = matches.find(candidate => candidate.fullName?.includes(`connection is ${variant} before readiness`))
+      return test?.status === 'failed' && (test.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('to include') && message.includes(target))
+    }
+    if (result.status === 0
+      || !failedAtExpectedAssertion('replaced', 'lanyard: pair a device by opening')
+      || !failedAtExpectedAssertion('unavailable', 'lanyard: browser authentication is no')) {
       throw new Error(`${label}: stale-issuer mutant survived or failed for another reason: ${failures}`)
     }
   }
