@@ -77,7 +77,9 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
   } else if (focus === loaderReadinessCaseName) {
     if (result.status === 0 || matches.some(test =>
       test.status !== 'failed' || !(test.failureMessages ?? []).some(message =>
-        message.includes('AssertionError:') && message.includes('could not read DSH startup readiness')))) {
+        message.includes('AssertionError:')
+        && message.includes("expected 'Error: upstream Loader")
+        && message.includes("to be 'Error: lanyard:")))) {
       throw new Error(`${label}: unguarded Loader readiness survived or failed for another reason: ${failures}`)
     }
   } else if (focus === activationCaseName) {
