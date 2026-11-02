@@ -384,6 +384,29 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     expect([denied.status, denied.body]).toEqual([403, REFUSAL_BODY])
   })
 
+  it('refuses a LAN peer when the connection service lookup itself throws', async () => {
+    const handler = await gatedHandler('/api')
+    const originalGet = Context.prototype.get
+    const lookup = vi.spyOn(Context.prototype, 'get').mockImplementation((function (this: Context, ...args: unknown[]) {
+      if (args[0] === 'connection') throw new Error('synthetic connection lookup secret')
+      return Reflect.apply(originalGet, this, args)
+    }) as typeof originalGet)
+    try {
+      const denied = response()
+      await expect(Promise.resolve(handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), denied)))
+        .resolves.toBeUndefined()
+      expect([denied.status, denied.body]).toEqual([403, REFUSAL_BODY])
+      // This is only the additional LAN gate; localhost retains its old
+      // behavior, even if the upstream connection service is temporarily down.
+      const local = response()
+      await expect(Promise.resolve(handler(req('/api/session/list', '127.0.0.1'), local)))
+        .resolves.toBeUndefined()
+      expect([local.status, local.body]).toEqual([200, 'REACHED'])
+    } finally {
+      lookup.mockRestore()
+    }
+  })
+
   it('keeps the configuration plane at the machine even for a paired device', async () => {
     const handler = await gatedHandler('/api')
     for (const endpoint of ['settings/update', 'credentials/set', 'dynamicCordisRunner/invoke', 'session/openWorkspacePath']) {

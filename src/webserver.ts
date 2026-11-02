@@ -781,7 +781,18 @@ export class GatedWebServer extends WebServer {
     // registers its own routes here, and may be replaced while the carrier
     // lives. Whatever the lookup finds, a network peer it cannot vouch for is
     // refused.
-    if (!admit(req, this.ctx.get('connection'))) return false
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      let authority: unknown
+      try {
+        authority = this.ctx.get('connection')
+      } catch {
+        // The service lookup can itself throw while Connection is replaced or
+        // torn down. Its error may carry session diagnostics: refuse a network
+        // peer without rejecting the route promise or logging the exception.
+        return false
+      }
+      if (!admit(req, authority)) return false
+    }
     // Both readings are classified: upstream resolves the endpoint from the raw
     // pathname and rejects a `%` outright, but a version that starts decoding
     // would otherwise turn `%2F` into a way to spell a pinned method unpinned.

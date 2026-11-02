@@ -36,6 +36,8 @@ jobs:
       - run: npm run test:mutation:tls
       # Malformed absolute request targets must not trigger route exceptions.
       - run: npm run test:mutation:request-target
+      # A failing upstream Connection service lookup must not reject LAN HTTP handlers.
+      - run: npm run test:mutation:connection-lookup
       # A delayed pairing announcement must never reuse an obsolete launch-token issuer.
       - run: npm run test:mutation:pairing-readiness
       # A main-branch CI tarball lets someone test a real install before npm
