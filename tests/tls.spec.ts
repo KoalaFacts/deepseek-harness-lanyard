@@ -1,8 +1,8 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { createPrivateKey, X509Certificate } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { createHash, createPrivateKey, X509Certificate } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { generate } from 'selfsigned'
@@ -370,6 +370,38 @@ describe('generateMaterial', () => {
       await generateMaterial(certPath, keyPath, ['192.168.1.5'])
       expect(readFileSync(entry, 'utf8')).toBe(savedEntry)
       expect(readFileSync(survivor, 'utf8')).toBe(savedSurvivor)
+    }
+  })
+
+  it.each(['cert.pem', 'key.pem'] as const)('refuses oversized but parseable managed %s before identity reuse', async (oversized) => {
+    const { certPath, keyPath } = paths()
+    try {
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      const originalCert = readFileSync(certPath, 'utf8')
+      const originalKey = readFileSync(keyPath, 'utf8')
+      const path = oversized === 'cert.pem' ? certPath : keyPath
+      // An invalid oversized fixture already fails the old parser, while
+      // Node/OpenSSL accepts a PEM followed by >1 MiB of blank lines.
+      const padded = (oversized === 'cert.pem' ? originalCert : originalKey) + '\n'.repeat(1024 * 1024 + 1)
+      if (oversized === 'cert.pem') {
+        expect(new X509Certificate(padded).checkPrivateKey(createPrivateKey(originalKey))).toBe(true)
+      } else {
+        expect(new X509Certificate(originalCert).checkPrivateKey(createPrivateKey(padded))).toBe(true)
+      }
+      writeFileSync(path, padded)
+      const digest = (file: string): string => createHash('sha256').update(readFileSync(file)).digest('hex')
+      const before = [digest(certPath), digest(keyPath)]
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5']))
+        .rejects.toThrow(/existing TLS certificate and private key cannot be used together.*left unchanged/i)
+      expect([digest(certPath), digest(keyPath)]).toEqual(before)
+      expect(statSync(path).size).toBe(Buffer.byteLength(padded))
+      // Restore a normal-sized matching pair without rotating the identity.
+      writeFileSync(path, oversized === 'cert.pem' ? originalCert : originalKey)
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      expect(readFileSync(certPath, 'utf8')).toBe(originalCert)
+      expect(readFileSync(keyPath, 'utf8')).toBe(originalKey)
+    } finally {
+      rmSync(dirname(certPath), { recursive: true, force: true })
     }
   })
 

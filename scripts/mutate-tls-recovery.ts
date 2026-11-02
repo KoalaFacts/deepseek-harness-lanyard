@@ -119,6 +119,14 @@ const mutants: Mutant[] = [
     failure: /EISDIR|expected.*to throw/i,
   },
   {
+    label: 'bounded saved managed TLS PEM reads',
+    from: "if (total > MAX_MANAGED_PEM_BYTES) throw new Error('Managed TLS PEM exceeds the 1 MiB size limit')",
+    to: "if (false /* MUTANT: accept oversized saved managed PEM */) throw new Error('Managed TLS PEM exceeds the 1 MiB size limit')",
+    file: 'tests/tls.spec.ts',
+    test: 'refuses oversized but parseable managed cert.pem before identity reuse',
+    failure: /promise resolved|resolved instead of rejecting/i,
+  },
+  {
     label: 'bounded operator-provided TLS PEM reads',
     from: 'if (total > MAX_EXPLICIT_PEM_BYTES) throw new Error(oversized)',
     to: 'if (false /* MUTANT: accept an oversized PEM */) throw new Error(oversized)',

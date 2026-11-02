@@ -8,7 +8,7 @@
  * @module
  */
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -87,7 +87,7 @@ export function lanIpv4Addresses(): string[] {
 export function certificateCovers(certPath: string, addresses: string[]): boolean {
   let named: string
   try {
-    named = new X509Certificate(readFileSync(certPath)).subjectAltName ?? ''
+    named = new X509Certificate(readManagedPem(certPath)).subjectAltName ?? ''
   } catch {
     return false
   }
@@ -163,6 +163,35 @@ function materialEntryExists(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false }) !== undefined
 }
 
+/**
+ * Bound saved managed PEM reads, even for valid certs/keys followed by huge
+ * whitespace. A pathname size check before readFileSync cannot protect
+ * against a non-cooperating writer changing the file during that read.
+ */
+const MAX_MANAGED_PEM_BYTES = 1024 * 1024
+
+function readManagedPem(path: string): string {
+  // Do not block on a FIFO substituted after the entry check on POSIX.
+  const fd = openSync(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK))
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error('Managed TLS PEM must be a regular file')
+    const chunks: Buffer[] = []
+    let total = 0
+    while (total <= MAX_MANAGED_PEM_BYTES) {
+      const length = Math.min(64 * 1024, MAX_MANAGED_PEM_BYTES + 1 - total)
+      const chunk = Buffer.allocUnsafe(length)
+      const bytesRead = readSync(fd, chunk, 0, length, null)
+      if (bytesRead === 0) break
+      chunks.push(chunk.subarray(0, bytesRead))
+      total += bytesRead
+    }
+    if (total > MAX_MANAGED_PEM_BYTES) throw new Error('Managed TLS PEM exceeds the 1 MiB size limit')
+    return Buffer.concat(chunks, total).toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** The complete material transaction, called only with both writer locks held. */
 async function generateLockedMaterial(certPath: string, keyPath: string, addresses: string[]): Promise<void> {
   const hasCertificate = materialEntryExists(certPath)
@@ -190,9 +219,9 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
     let cert: X509Certificate
     let savedKey: string
     try {
-      const certificate = readFileSync(certPath, 'utf8')
+      const certificate = readManagedPem(certPath)
       cert = new X509Certificate(certificate)
-      savedKey = readFileSync(keyPath, 'utf8')
+      savedKey = readManagedPem(keyPath)
       previousIdentity = { certificate, key: savedKey }
       if (!cert.checkPrivateKey(createPrivateKey(savedKey))) throw new Error('key mismatch')
     } catch {
@@ -242,7 +271,7 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
       // Do not touch an existing identity or any key another writer changed.
       if (!hasCertificate && !hasKey) {
         try {
-          if (!existsSync(certPath) && readFileSync(keyPath, 'utf8') === pems.private) {
+          if (!existsSync(certPath) && readManagedPem(keyPath) === pems.private) {
             unlinkSync(keyPath)
           }
         } catch { /* Fail closed if cleanup fails; preserve the original error. */ }
@@ -250,8 +279,8 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
         // The old certificate is still on disk; roll back only this attempt's
         // replacement key. A non-cooperating writer must never be overwritten.
         try {
-          if (readFileSync(certPath, 'utf8') !== previousIdentity.certificate
-            || readFileSync(keyPath, 'utf8') !== pems.private) {
+          if (readManagedPem(certPath) !== previousIdentity.certificate
+            || readManagedPem(keyPath) !== pems.private) {
             throw new Error('TLS identity changed during failed renewal; refusing unsafe rollback')
           }
           writeAtomic(keyPath, previousIdentity.key, 0o600)
