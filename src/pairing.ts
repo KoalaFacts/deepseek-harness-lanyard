@@ -369,7 +369,15 @@ export function shouldDrawQr(wanted: boolean, isTerminal: boolean): boolean {
  * @param config - validated {@link Config}.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const issuer: unknown = ctx.get('connection')
+  let issuer: unknown
+  try {
+    issuer = ctx.get('connection')
+  } catch {
+    // Cordis may throw during an initial service replacement, before the
+    // readiness callback can apply its separate guard. The diagnostic may
+    // contain the launch token: reject with the fixed missing-auth message.
+    issuer = undefined
+  }
   // Without upstream's browser authentication there is no session for a device
   // to hold, and the gate refuses every network peer it cannot vouch for. Fail
   // the load now rather than print a link that could never work.

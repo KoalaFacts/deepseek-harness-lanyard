@@ -538,6 +538,28 @@ describe('the pairing row', () => {
     ])
   })
 
+  it('fails pairing activation without leaking a throwing initial connection lookup', async () => {
+    // A failed initial lookup is different from a service disappearing while
+    // Loader readiness is pending: this happens before any link can be issued.
+    ctx = new Context()
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    const getService = ctx.get.bind(ctx)
+    vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+      if (key === 'connection') throw new Error(`upstream lookup diagnostic carries ${LAUNCH_TOKEN}`)
+      return getService(key as never)
+    }) as typeof ctx.get)
+    let failure: unknown
+    try {
+      await Pairing.apply(ctx, { printPairingUrl: true, printPairingQr: true })
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toContain('lanyard: this dsh has no browser authentication to pair a device with')
+    expect(String(failure)).not.toContain(LAUNCH_TOKEN)
+    expect(printed).toEqual([])
+  })
+
   it('fails the load without leaking an upstream issuer accessor error', async () => {
     const connection = Object.defineProperty({}, 'authenticatedUrl', {
       get() { throw new Error(`synthetic upstream accessor leaked ${LAUNCH_TOKEN}`) },

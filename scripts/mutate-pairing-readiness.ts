@@ -1,6 +1,6 @@
 /**
  * Source-level mutation gate for delayed pairing readiness. The pairing row
- * must use the current upstream authentication service, not a launch-token
+ * must catch a throwing initial upstream Connection lookup, then use the current authentication service, not a launch-token
  * issuer captured before the Loader settled, and the concrete-LAN warning must
  * not disappear just because the user selected a specific interface. Both
  * checks mutate the real source under focused Vitest cases. This is a source mutation of
@@ -14,6 +14,9 @@ import { join, resolve } from 'node:path'
 
 const sourcePath = resolve('src/pairing.ts')
 const original = readFileSync(sourcePath, 'utf8')
+const activationGuarded = "  let issuer: unknown\n  try {\n    issuer = ctx.get('connection')\n  } catch {\n    // Cordis may throw during an initial service replacement, before the\n    // readiness callback can apply its separate guard. The diagnostic may\n    // contain the launch token: reject with the fixed missing-auth message.\n    issuer = undefined\n  }"
+const activationUnsafe = "  const issuer: unknown = ctx.get('connection')"
+const activationCaseName = "fails pairing activation without leaking a throwing initial connection lookup"
 const guarded = "      currentIssuer = ctx.get('connection')"
 const serviceGuarded = "    try {\n      if (ctx.get('webServer') !== undefined) await announce()\n    } catch {\n      // A service can be replaced or fail during Loader readiness. The\n      // accessor's error may contain session data; never let it escape the\n      // detached readiness promise or copy its diagnostic to a log.\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }"
 const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announce()"
@@ -59,6 +62,13 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
         message.includes('AssertionError:') && message.includes('lanyard: TLS service unavailable'))) {
       throw new Error(`${label}: unguarded TLS-service lookup survived or failed for another reason: ${failures}`)
     }
+  } else if (focus === activationCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('no browser authentication'))) {
+      throw new Error(`${label}: unguarded initial Connection lookup survived or failed for another reason: ${failures}`)
+    }
   } else if (focus === warningCaseName) {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
@@ -85,6 +95,11 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
 }
 
 try {
+  if (original.split(activationGuarded).length !== 2) throw new Error('initial pairing lookup guard anchor missing or ambiguous')
+  run('activation-baseline', false, activationCaseName)
+  writeFileSync(sourcePath, original.replace(activationGuarded, activationUnsafe))
+  try { run('unguarded-activation', true, activationCaseName) }
+  finally { writeFileSync(sourcePath, original) }
   if (original.split(guarded).length !== 2) throw new Error('pairing readiness guard anchor missing or ambiguous')
   run('baseline', false)
   writeFileSync(sourcePath, original.replace(guarded, unsafe))
@@ -105,4 +120,4 @@ try {
   rmSync(reportsDir, { recursive: true, force: true })
 }
 if (readFileSync(sourcePath, 'utf8') !== original) throw new Error('pairing source restoration failed')
-process.stdout.write('Pairing readiness and concrete-LAN plaintext warning source mutations killed; source restored.\n')
+process.stdout.write('Pairing activation, readiness and concrete-LAN plaintext warning source mutations killed; source restored.\n')
