@@ -518,6 +518,27 @@ describe('the pairing row', () => {
     },
   )
 
+  it('does not leak a failing webServer lookup without Loader', async () => {
+    const printed: string[] = []
+    const errors: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    const bareContext = {
+      get: (key: string) => key === 'connection' ? issuer : undefined,
+      get webServer() { throw new Error(`upstream TLS-service getter leaked ${LAUNCH_TOKEN}`) },
+      logger: { error: (line: string) => { errors.push(line) } },
+    } as unknown as Context
+    let failure: unknown
+    try {
+      await Pairing.apply(bareContext, { printPairingUrl: true, printPairingQr: false })
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toBe('undefined')
+    expect(printed).toEqual([])
+    expect(errors).toEqual(['lanyard: TLS service unavailable at pairing readiness; restart dsh to retry'])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
+
   it('does not leak a failing webServer lookup after delayed readiness', async () => {
     const printed: string[] = []
     const errors: string[] = []

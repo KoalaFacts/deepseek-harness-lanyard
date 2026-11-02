@@ -541,7 +541,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
   })()
   if (settled === undefined) {
-    await announce()
+    // Hand-built contexts without Loader announce immediately. Their errors
+    // need the same nonsecret recovery path as delayed readiness callbacks.
+    try {
+      await announce()
+    } catch {
+      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')
+    }
     return
   }
   void settled.then(async () => {

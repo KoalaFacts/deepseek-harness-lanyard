@@ -27,6 +27,9 @@ const lanSnapshotUnsafe = "  if (!config.printPairingUrl) return\n  const server
 const serviceGuarded = "    try {\n      if (ctx.get('webServer') !== undefined) await announce()\n    } catch {\n      // A service can be replaced or fail during Loader readiness. The\n      // accessor's error may contain session data; never let it escape the\n      // detached readiness promise or copy its diagnostic to a log.\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }"
 const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announce()"
 const serviceCaseName = 'does not leak a failing webServer lookup after delayed readiness'
+const immediateServiceCaseName = 'does not leak a failing webServer lookup without Loader'
+const immediateServiceGuarded = "  if (settled === undefined) {\n    // Hand-built contexts without Loader announce immediately. Their errors\n    // need the same nonsecret recovery path as delayed readiness callbacks.\n    try {\n      await announce()\n    } catch {\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }\n    return\n  }"
+const immediateServiceUnsafe = "  if (settled === undefined) {\n    await announce()\n    return\n  }"
 const unsafe = "      currentIssuer = issuer /* MUTANT: use stale startup issuer */"
 const caseName = 'does not print a stale launch token when the connection is'
 const warningGuarded = "    console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`\n      + ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token')"
@@ -73,6 +76,13 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
       || !(failure.failureMessages ?? []).some(message =>
         message.includes('AssertionError:') && message.includes('lanyard: TLS service unavailable'))) {
       throw new Error(`${label}: unguarded TLS-service lookup survived or failed for another reason: ${failures}`)
+    }
+  } else if (focus === immediateServiceCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('upstream TLS-service getter'))) {
+      throw new Error(`${label}: unguarded immediate TLS-service lookup survived or failed for another reason: ${failures}`)
     }
   } else if (focus === loaderReadinessCaseName) {
     if (result.status === 0 || matches.some(test =>
@@ -165,6 +175,11 @@ try {
   run('tls-service-baseline', false, serviceCaseName)
   writeFileSync(sourcePath, original.replace(serviceGuarded, serviceUnsafe))
   try { run('unguarded-tls-service', true, serviceCaseName) }
+  finally { writeFileSync(sourcePath, original) }
+  if (original.split(immediateServiceGuarded).length !== 2) throw new Error('immediate TLS-service guard anchor missing or ambiguous')
+  run('immediate-tls-service-baseline', false, immediateServiceCaseName)
+  writeFileSync(sourcePath, original.replace(immediateServiceGuarded, immediateServiceUnsafe))
+  try { run('unguarded-immediate-tls-service', true, immediateServiceCaseName) }
   finally { writeFileSync(sourcePath, original) }
   if (original.split(carrierSnapshotGuarded).length !== 2) throw new Error('TLS carrier snapshot guard anchor missing or ambiguous')
   run('carrier-snapshot-baseline', false, carrierSnapshotCaseName)
