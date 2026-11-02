@@ -109,8 +109,12 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
     }
   } else if (focus === legacyRuntimeCaseName) {
     const failure = matches[0]
+    // The immediate no-Loader error guard now contains the upstream getter
+    // exception. The focused test still detects the forbidden getter access
+    // directly, instead of receiving the getter's raw diagnostic.
     if (result.status === 0 || failure?.status !== 'failed'
-      || !(failure.failureMessages ?? []).some(message => message.includes('synthetic legacy runtime failure'))) {
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('expected true to be false'))) {
       throw new Error(`${label}: an unnecessary legacy runtime lookup survived or failed for another reason: ${failures}`)
     }
   } else if (focus === carrierSnapshotCaseName) {
