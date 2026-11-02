@@ -1,5 +1,5 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
@@ -340,6 +340,36 @@ describe('generateMaterial', () => {
       expect(new X509Certificate(readFileSync(certPath))
         .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
       expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
+    }
+  })
+
+  it('refuses non-regular saved TLS entries before reuse and preserves the matching survivor', async () => {
+    // A directory is a deterministic non-symlink regression. A named pipe is
+    // worse: readFileSync() can block forever if no writer connects, so avoid
+    // hanging the test runner to demonstrate the same missing isFile guard.
+    for (const replaced of ['cert.pem', 'key.pem'] as const) {
+      const { certPath, keyPath } = paths()
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      const entry = replaced === 'cert.pem' ? certPath : keyPath
+      const survivor = replaced === 'cert.pem' ? keyPath : certPath
+      const savedEntry = readFileSync(entry, 'utf8')
+      const savedSurvivor = readFileSync(survivor, 'utf8')
+      rmSync(entry)
+      mkdirSync(entry)
+      try {
+        await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+          .rejects.toThrow(/managed TLS certificate and private key must be regular files.*left unchanged/i)
+        expect(lstatSync(entry).isDirectory()).toBe(true)
+        expect(readFileSync(survivor, 'utf8')).toBe(savedSurvivor)
+      } finally {
+        rmSync(entry, { recursive: true, force: true })
+        writeFileSync(entry, savedEntry, { mode: 0o600 })
+      }
+      // Operator recovery: restore the same regular file and retry with no
+      // unexpected identity rotation on the original LAN address.
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      expect(readFileSync(entry, 'utf8')).toBe(savedEntry)
+      expect(readFileSync(survivor, 'utf8')).toBe(savedSurvivor)
     }
   })
 

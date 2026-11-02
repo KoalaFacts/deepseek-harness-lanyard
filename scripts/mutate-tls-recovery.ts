@@ -21,11 +21,19 @@ interface Mutant {
 const mutants: Mutant[] = [
   {
     label: 'valid managed TLS symlink identity preservation',
-    from: 'if (hasCertificate && (lstatSync(certPath).isSymbolicLink() || lstatSync(keyPath).isSymbolicLink())) {',
+    from: 'if (hasCertificate && (!lstatSync(certPath).isFile() || !lstatSync(keyPath).isFile())) {',
     to: 'if (false /* MUTANT: allow a managed TLS symlink to be severed during renewal */) {',
     file: 'tests/tls.spec.ts',
     test: 'refuses valid linked managed TLS material before renewal can sever its pointer',
     failure: /promise resolved/i,
+  },
+  {
+    label: 'non-regular managed TLS entries beyond symlinks',
+    from: 'if (hasCertificate && (!lstatSync(certPath).isFile() || !lstatSync(keyPath).isFile())) {',
+    to: 'if (hasCertificate && (lstatSync(certPath).isSymbolicLink() || lstatSync(keyPath).isSymbolicLink())) {',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses non-regular saved TLS entries before reuse and preserves the matching survivor',
+    failure: /cannot be used together|EISDIR|expected.*to throw/i,
   },
   {
     label: 'dangling managed TLS identity symlink presence',

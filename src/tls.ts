@@ -172,12 +172,12 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
     // operator moving one file. Never destroy the survivor to "repair" it.
     throw new Error('Existing TLS certificate and private key are incomplete. Files were left unchanged; restore the missing file from a matching pair before restarting.')
   }
-  // A rename over a saved symlink replaces the symlink itself, not its target.
-  // Even a valid linked pair would silently stop using its original identity
-  // on SAN/expiry renewal. Managed identities must use regular file entries;
-  // refuse before reuse as well so the failure does not depend on the LAN IP.
-  if (hasCertificate && (lstatSync(certPath).isSymbolicLink() || lstatSync(keyPath).isSymbolicLink())) {
-    throw new Error('Managed TLS certificate and private key must be regular files, not symbolic links. Files were left unchanged; restore the matching pair as regular files before restarting.')
+  // Rename replaces a symlink rather than its target. Non-file entries are
+  // unsafe too: a FIFO can block readFileSync forever, and directories or
+  // device nodes are not certificate material. Check both entries before any
+  // synchronous PEM read, even when the LAN address has not changed.
+  if (hasCertificate && (!lstatSync(certPath).isFile() || !lstatSync(keyPath).isFile())) {
+    throw new Error('Managed TLS certificate and private key must be regular files, not symbolic links or special filesystem entries. Files were left unchanged; restore the matching pair as regular files before restarting.')
   }
   // A LAN-address-only certificate reissue must not replace the matching
   // private key. If the certificate rename fails, the saved pair must still
