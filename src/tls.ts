@@ -170,6 +170,9 @@ function materialEntryExists(path: string): boolean {
  */
 const MAX_MANAGED_PEM_BYTES = 1024 * 1024
 
+/** Keep a bounded-input recovery error distinct from malformed or mismatched PEM. */
+class ManagedPemTooLarge extends Error {}
+
 function readManagedPem(path: string): string {
   // Do not block on a FIFO substituted after the entry check on POSIX.
   const fd = openSync(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK))
@@ -185,7 +188,7 @@ function readManagedPem(path: string): string {
       chunks.push(chunk.subarray(0, bytesRead))
       total += bytesRead
     }
-    if (total > MAX_MANAGED_PEM_BYTES) throw new Error('Managed TLS PEM exceeds the 1 MiB size limit')
+    if (total > MAX_MANAGED_PEM_BYTES) throw new ManagedPemTooLarge('Managed TLS PEM exceeds the 1 MiB size limit')
     return Buffer.concat(chunks, total).toString('utf8')
   } finally {
     closeSync(fd)
@@ -224,7 +227,12 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
       savedKey = readManagedPem(keyPath)
       previousIdentity = { certificate, key: savedKey }
       if (!cert.checkPrivateKey(createPrivateKey(savedKey))) throw new Error('key mismatch')
-    } catch {
+    } catch (error) {
+      // An otherwise parseable PEM may exceed the enforced read budget. Report
+      // the recovery action rather than misdiagnose it as a mismatched pair.
+      if (error instanceof ManagedPemTooLarge) {
+        throw new ManagedPemTooLarge('Existing TLS certificate or private key exceeds the 1 MiB PEM size limit. Files were left unchanged; restore a matching pair with each file no larger than 1 MiB before restarting.')
+      }
       // Check identity before SANs: a moved LAN address must never make a
       // mismatched or unreadable saved pair eligible for automatic replacement.
       throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
@@ -364,7 +372,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await generateMaterial(certPath, keyPath, addresses)
     assertOwnerOnlyManagedMaterial(config.dir, keyPath)
   } catch (error) {
-    throw new Error(`lanyard-tls: could not generate TLS material in ${config.dir}`, { cause: error })
+    // Keep the size-limit recovery visible at the top level; a CLI may show
+    // only this error and omit nested causes during startup failure.
+    const message = error instanceof ManagedPemTooLarge
+      ? `lanyard-tls: ${error.message}`
+      : `lanyard-tls: could not generate TLS material in ${config.dir}`
+    throw new Error(message, { cause: error })
   }
   ctx.provide(LANYARD_TLS_SERVICE, { paths: { certPath, keyPath } } satisfies LanyardTlsValues)
 }

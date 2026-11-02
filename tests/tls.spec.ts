@@ -392,7 +392,11 @@ describe('generateMaterial', () => {
       const digest = (file: string): string => createHash('sha256').update(readFileSync(file)).digest('hex')
       const before = [digest(certPath), digest(keyPath)]
       await expect(generateMaterial(certPath, keyPath, ['192.168.1.5']))
-        .rejects.toThrow(/existing TLS certificate and private key cannot be used together.*left unchanged/i)
+        .rejects.toThrow(/existing TLS certificate or private key exceeds the 1 MiB PEM size limit.*left unchanged.*matching pair/i)
+      // The top-level startup error must name the limit even if the host hides
+      // nested causes; otherwise this looks like an unrelated key mismatch.
+      await expect(provide({ enabled: true, dir: dirname(certPath), host: '192.168.1.5' }))
+        .rejects.toThrow(/lanyard-tls: existing TLS certificate or private key exceeds the 1 MiB PEM size limit/i)
       expect([digest(certPath), digest(keyPath)]).toEqual(before)
       expect(statSync(path).size).toBe(Buffer.byteLength(padded))
       // Restore a normal-sized matching pair without rotating the identity.
