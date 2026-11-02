@@ -1,7 +1,7 @@
 /**
  * Source-level mutation gate for delayed pairing readiness. The pairing row
  * must catch a throwing initial upstream Connection lookup, then use the current authentication service, not a launch-token
- * issuer captured before the Loader settled, and the concrete-LAN warning must
+ * issuer captured before the Loader settled, must refresh the LAN snapshot, and the concrete-LAN warning must
  * not disappear just because the user selected a specific interface. Both
  * checks mutate the real source under focused Vitest cases. This is a source mutation of
  * the real module under the real Vitest cases, not a model of the function.
@@ -18,6 +18,9 @@ const activationGuarded = "  let issuer: unknown\n  try {\n    issuer = ctx.get(
 const activationUnsafe = "  const issuer: unknown = ctx.get('connection')"
 const activationCaseName = "fails pairing activation without leaking a throwing initial connection lookup"
 const guarded = "      currentIssuer = ctx.get('connection')"
+const lanSnapshotCaseName = 'refreshes the LAN address snapshot after delayed readiness'
+const lanSnapshotGuarded = "  if (!config.printPairingUrl) return\n  const announce = async (): Promise<void> => {\n    // A delayed Loader may replace the listener or refresh its LAN snapshot.\n    // Resolve both at announcement time, not at plugin activation, so a phone\n    // never receives a link naming an interface the current server does not use.\n    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined"
+const lanSnapshotUnsafe = "  if (!config.printPairingUrl) return\n  const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined\n  const announce = async (): Promise<void> => {"
 const serviceGuarded = "    try {\n      if (ctx.get('webServer') !== undefined) await announce()\n    } catch {\n      // A service can be replaced or fail during Loader readiness. The\n      // accessor's error may contain session data; never let it escape the\n      // detached readiness promise or copy its diagnostic to a log.\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }"
 const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announce()"
 const serviceCaseName = 'does not leak a failing webServer lookup after delayed readiness'
@@ -70,6 +73,13 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
         && message.includes('lanyard: this dsh has no browser auth'))) {
       throw new Error(`${label}: unguarded initial Connection lookup survived or failed for another reason: ${failures}`)
     }
+  } else if (focus === lanSnapshotCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message =>
+        message.includes('AssertionError:') && message.includes('to include'))) {
+      throw new Error(`${label}: stale-LAN-snapshot mutant survived or failed for another reason: ${failures}`)
+    }
   } else if (focus === warningCaseName) {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
@@ -106,6 +116,11 @@ try {
   writeFileSync(sourcePath, original.replace(guarded, unsafe))
   try { run('stale-issuer', true) }
   finally { writeFileSync(sourcePath, original) }
+  if (original.split(lanSnapshotGuarded).length !== 2) throw new Error('LAN snapshot timing anchor missing or ambiguous')
+  run('lan-snapshot-baseline', false, lanSnapshotCaseName)
+  writeFileSync(sourcePath, original.replace(lanSnapshotGuarded, lanSnapshotUnsafe))
+  try { run('stale-lan-snapshot', true, lanSnapshotCaseName) }
+  finally { writeFileSync(sourcePath, original) }
   if (original.split(serviceGuarded).length !== 2) throw new Error('pairing TLS-service guard anchor missing or ambiguous')
   run('tls-service-baseline', false, serviceCaseName)
   writeFileSync(sourcePath, original.replace(serviceGuarded, serviceUnsafe))
@@ -121,4 +136,4 @@ try {
   rmSync(reportsDir, { recursive: true, force: true })
 }
 if (readFileSync(sourcePath, 'utf8') !== original) throw new Error('pairing source restoration failed')
-process.stdout.write('Pairing activation, readiness and concrete-LAN plaintext warning source mutations killed; source restored.\n')
+process.stdout.write('Pairing activation, readiness, LAN snapshot and concrete-LAN plaintext warning source mutations killed; source restored.\n')

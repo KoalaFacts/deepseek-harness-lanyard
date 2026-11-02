@@ -462,6 +462,36 @@ describe('the pairing row', () => {
     },
   )
 
+  it('refreshes the LAN address snapshot after delayed readiness instead of printing a stale pairing link', async () => {
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    ctx = new Context()
+    ctx.provide('webRuntime', { lanAddresses: ['192.168.1.5'] })
+    ctx.provide('connection', issuer)
+    ctx.provide('webServer', {
+      scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT,
+    })
+    let releaseReadiness!: () => void
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve })
+    ctx.provide('loader', { await: () => readiness })
+    await ctx.plugin(Pairing, {} as PairingConfig).await()
+
+    // Simulate the upstream LAN snapshot being replaced before Loader settles.
+    // An old QR for .5 is wrong even while the new TLS front serves .9.
+    const originalGet = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) =>
+      key === 'webRuntime' ? { lanAddresses: ['10.0.0.9'] } : originalGet(key as never)) as typeof ctx.get)
+    try {
+      releaseReadiness()
+      await vi.waitFor(() => {
+        expect(printed).toContain(`lanyard: pair a device by opening https://10.0.0.9:3443/?token=${LAUNCH_TOKEN} once`)
+      })
+      expect(printed.join(' ')).not.toContain('192.168.1.5')
+    } finally {
+      lookup.mockRestore()
+    }
+  })
+
   it('does not leak a failing webServer lookup after delayed readiness', async () => {
     const printed: string[] = []
     const errors: string[] = []

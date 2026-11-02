@@ -388,22 +388,25 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     )
   }
   if (!config.printPairingUrl) return
-  const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
-  const host = (ctx.webServer as unknown as SchemeAwareServer).host
-  // New dsh no longer provides webRuntime and binds one concrete interface.
-  // Never advertise other interfaces that this listener does not serve.
-  const addresses = host !== undefined && host !== '0.0.0.0'
-    ? isLoopbackAddress(host) ? [] : [host]
-    : runtime?.lanAddresses ?? []
-  if (addresses.length === 0) return
-  const { ranked, offered } = rankLanAddresses(addresses, internals.networkInterfaces())
-  // A loopback bind has no network address to pair over. A tunnelled device
-  // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
-  // `dsh web:` link like any local browser.
-  if (ranked.length === 0) return
-  // Only an address a phone could be on is worth a link and a code.
-  const lanAddress = offered[0]
   const announce = async (): Promise<void> => {
+    // A delayed Loader may replace the listener or refresh its LAN snapshot.
+    // Resolve both at announcement time, not at plugin activation, so a phone
+    // never receives a link naming an interface the current server does not use.
+    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
+    const host = (ctx.webServer as unknown as SchemeAwareServer).host
+    // New dsh no longer provides webRuntime and binds one concrete interface.
+    // Never advertise other interfaces that this listener does not serve.
+    const addresses = host !== undefined && host !== '0.0.0.0'
+      ? isLoopbackAddress(host) ? [] : [host]
+      : runtime?.lanAddresses ?? []
+    if (addresses.length === 0) return
+    const { ranked, offered } = rankLanAddresses(addresses, internals.networkInterfaces())
+    // A loopback bind has no network address to pair over. A tunnelled device
+    // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
+    // `dsh web:` link like any local browser.
+    if (ranked.length === 0) return
+    // Only an address a phone could be on is worth a link and a code.
+    const lanAddress = offered[0]
     // `port` is this machine's plaintext listener, bound to loopback — not
     // somewhere a phone can reach; the gated carrier reports the TLS port as
     // `networkPort`. A shipped carrier has neither that nor a scheme, and is
