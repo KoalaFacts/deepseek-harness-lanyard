@@ -386,8 +386,11 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
 
   it('refuses a LAN peer when the connection service lookup itself throws', async () => {
     const handler = await gatedHandler('/api')
-    const originalGet = Context.prototype.get
-    const lookup = vi.spyOn(Context.prototype, 'get').mockImplementation((function (this: Context, ...args: unknown[]) {
+    // Cordis mixes ctx.get into Context through the reflection service;
+    // Context.prototype itself has no "get" member to spy on.
+    const reflect = (ctx as Context).reflect
+    const originalGet = reflect.get
+    const lookup = vi.spyOn(reflect, 'get').mockImplementation((function (this: typeof reflect, ...args: unknown[]) {
       if (args[0] === 'connection') throw new Error('synthetic connection lookup secret')
       return Reflect.apply(originalGet, this, args)
     }) as typeof originalGet)
