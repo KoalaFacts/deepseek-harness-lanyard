@@ -19,8 +19,11 @@ const activationUnsafe = "  const issuer: unknown = ctx.get('connection')"
 const activationCaseName = "fails pairing activation without leaking a throwing initial connection lookup"
 const guarded = "      currentIssuer = ctx.get('connection')"
 const lanSnapshotCaseName = 'refreshes the LAN address snapshot after delayed readiness'
-const lanSnapshotGuarded = "  if (!config.printPairingUrl) return\n  const announce = async (): Promise<void> => {\n    // A delayed Loader may replace the listener or refresh its LAN snapshot.\n    // Resolve both at announcement time, not at plugin activation, so a phone\n    // never receives a link naming an interface the current server does not use.\n    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined"
-const lanSnapshotUnsafe = "  if (!config.printPairingUrl) return\n  const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined\n  const announce = async (): Promise<void> => {"
+const legacyRuntimeCaseName = 'pairs a concrete LAN bind without querying a broken legacy webRuntime'
+const legacyRuntimeGuarded = "    const runtime = (host === undefined || host === '0.0.0.0')\n      ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n      : undefined"
+const legacyRuntimeUnsafe = "    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined"
+const lanSnapshotGuarded = "  if (!config.printPairingUrl) return\n  const announce = async (): Promise<void> => {\n    // A delayed Loader may replace the listener or refresh its LAN snapshot.\n    // Resolve both at announcement time, not at plugin activation, so a phone\n    // never receives a link naming an interface the current server does not use.\n    const host = (ctx.webServer as unknown as SchemeAwareServer).host\n    // Concrete binds on current dsh do not need the legacy webRuntime service.\n    // Skip that optional lookup: a broken getter must not break pairing with\n    // an otherwise healthy TLS listener bound to one known IPv4 address.\n    const runtime = (host === undefined || host === '0.0.0.0')\n      ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n      : undefined\n"
+const lanSnapshotUnsafe = "  if (!config.printPairingUrl) return\n  const host = (ctx.webServer as unknown as SchemeAwareServer).host\n  // Concrete binds on current dsh do not need the legacy webRuntime service.\n  // Skip that optional lookup: a broken getter must not break pairing with\n  // an otherwise healthy TLS listener bound to one known IPv4 address.\n  const runtime = (host === undefined || host === '0.0.0.0')\n    ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n    : undefined\n  const announce = async (): Promise<void> => {\n"
 const serviceGuarded = "    try {\n      if (ctx.get('webServer') !== undefined) await announce()\n    } catch {\n      // A service can be replaced or fail during Loader readiness. The\n      // accessor's error may contain session data; never let it escape the\n      // detached readiness promise or copy its diagnostic to a log.\n      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')\n    }"
 const serviceUnsafe = "    if (ctx.get('webServer') !== undefined) await announce()"
 const serviceCaseName = 'does not leak a failing webServer lookup after delayed readiness'
@@ -80,6 +83,12 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
         message.includes('AssertionError:') && message.includes('to include'))) {
       throw new Error(`${label}: stale-LAN-snapshot mutant survived or failed for another reason: ${failures}`)
     }
+  } else if (focus === legacyRuntimeCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message => message.includes('synthetic legacy runtime failure'))) {
+      throw new Error(`${label}: an unnecessary legacy runtime lookup survived or failed for another reason: ${failures}`)
+    }
   } else if (focus === warningCaseName) {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
@@ -120,6 +129,11 @@ try {
   run('lan-snapshot-baseline', false, lanSnapshotCaseName)
   writeFileSync(sourcePath, original.replace(lanSnapshotGuarded, lanSnapshotUnsafe))
   try { run('stale-lan-snapshot', true, lanSnapshotCaseName) }
+  finally { writeFileSync(sourcePath, original) }
+  if (original.split(legacyRuntimeGuarded).length !== 2) throw new Error('legacy runtime lookup guard anchor missing or ambiguous')
+  run('legacy-runtime-baseline', false, legacyRuntimeCaseName)
+  writeFileSync(sourcePath, original.replace(legacyRuntimeGuarded, legacyRuntimeUnsafe))
+  try { run('unnecessary-legacy-runtime-lookup', true, legacyRuntimeCaseName) }
   finally { writeFileSync(sourcePath, original) }
   if (original.split(serviceGuarded).length !== 2) throw new Error('pairing TLS-service guard anchor missing or ambiguous')
   run('tls-service-baseline', false, serviceCaseName)

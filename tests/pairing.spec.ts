@@ -534,6 +534,28 @@ describe('the pairing row', () => {
     ])
   })
 
+  it('pairs a concrete LAN bind without querying a broken legacy webRuntime', async () => {
+    // Newer dsh versions no longer provide webRuntime. Even a throwing
+    // optional-service getter must not prevent a concrete TLS pairing link.
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    ctx = new Context()
+    ctx.provide('connection', issuer)
+    ctx.provide('webServer', {
+      host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443,
+      certificateFingerprint: CERT_FINGERPRINT,
+    })
+    const originalGet = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+      if (key === 'webRuntime') throw new Error('synthetic legacy runtime failure with ' + LAUNCH_TOKEN)
+      return originalGet(key as never)
+    }) as typeof ctx.get)
+    await ctx.plugin(Pairing, {} as PairingConfig).await()
+    expect(lookup.mock.calls.some(([key]) => key === 'webRuntime')).toBe(false)
+    expect(printed).toContain(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+    expect(printed.join(' ')).not.toContain('synthetic legacy runtime failure')
+  })
+
   it('warns concrete LAN bind users not to open the upstream plaintext token link', async () => {
     // Upstream's dsh web line still carries an HTTP LAN token URL when --host
     // names a concrete IPv4; the lack of a wildcard must not suppress advice.

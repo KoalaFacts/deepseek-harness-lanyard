@@ -392,8 +392,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // A delayed Loader may replace the listener or refresh its LAN snapshot.
     // Resolve both at announcement time, not at plugin activation, so a phone
     // never receives a link naming an interface the current server does not use.
-    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
     const host = (ctx.webServer as unknown as SchemeAwareServer).host
+    // Concrete binds on current dsh do not need the legacy webRuntime service.
+    // Skip that optional lookup: a broken getter must not break pairing with
+    // an otherwise healthy TLS listener bound to one known IPv4 address.
+    const runtime = (host === undefined || host === '0.0.0.0')
+      ? ctx.get('webRuntime') as WebRuntimeValues | undefined
+      : undefined
     // New dsh no longer provides webRuntime and binds one concrete interface.
     // Never advertise other interfaces that this listener does not serve.
     const addresses = host !== undefined && host !== '0.0.0.0'
