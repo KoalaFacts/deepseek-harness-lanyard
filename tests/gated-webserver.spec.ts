@@ -6,7 +6,7 @@ import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { X509Certificate } from 'node:crypto'
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -252,6 +252,26 @@ describe('GatedWebServer', () => {
       }
     } finally {
       rmSync(nonregularDir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses oversized operator-provided TLS PEMs without reading past 1 MiB', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    const oversized = join(dirname(certPath), 'oversized.pem')
+    for (const kind of ['certificate', 'private key'] as const) {
+      // A valid PEM prefix plus surplus whitespace is closer to an accidental
+      // oversize chain than random garbage; neither role may read it unbounded.
+      const original = kind === 'certificate' ? ca : readFileSync(keyPath, 'utf8')
+      writeFileSync(oversized, `${original}\n${' '.repeat(1024 * 1024)}`)
+      ctx = withSession()
+      const fiber = ctx.plugin(GatedWebServer, {
+        host: '127.0.0.1', port: 0, networkPort: 0,
+        tlsCertPath: kind === 'certificate' ? oversized : certPath,
+        tlsKeyPath: kind === 'private key' ? oversized : keyPath,
+      })
+      await expect(fiber.await()).rejects.toThrow(new RegExp(`TLS ${kind} exceeds the 1 MiB PEM size limit`))
+      await ctx.fiber.dispose()
+      ctx = undefined
     }
   })
 

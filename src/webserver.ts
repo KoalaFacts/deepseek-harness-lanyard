@@ -385,7 +385,13 @@ function secureCookiesOf(res: ServerResponse): void {
  * descriptor being read is a regular file, not an earlier path snapshot.
  * Windows does not have the same POSIX nonblocking-open contract: stat the
  * path before opening to reject nonregular entries there as well.
+ *
+ * A regular descriptor can also point to an enormous file or a dynamic pseudo
+ * file reporting size zero. Bound actual reads, not only descriptor type.
  */
+const MAX_EXPLICIT_PEM_BYTES = 1024 * 1024
+const PEM_READ_CHUNK_BYTES = 64 * 1024
+
 async function readExplicitPem(path: string, kind: 'certificate' | 'private key'): Promise<Buffer> {
   const nonregular = `lanyard: TLS ${kind} must resolve to a regular file`
   if (process.platform === 'win32' && !(await stat(path)).isFile()) {
@@ -394,7 +400,20 @@ async function readExplicitPem(path: string, kind: 'certificate' | 'private key'
   const handle = await open(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK))
   try {
     if (!(await handle.stat()).isFile()) throw new Error(nonregular)
-    return await handle.readFile()
+    const oversized = `lanyard: TLS ${kind} exceeds the 1 MiB PEM size limit`
+    const chunks: Buffer[] = []
+    let total = 0
+    // Read at most one byte beyond the limit; readFile() would buffer to EOF.
+    while (total <= MAX_EXPLICIT_PEM_BYTES) {
+      const length = Math.min(PEM_READ_CHUNK_BYTES, MAX_EXPLICIT_PEM_BYTES + 1 - total)
+      const chunk = Buffer.allocUnsafe(length)
+      const { bytesRead } = await handle.read(chunk, 0, length, null)
+      if (bytesRead === 0) break
+      chunks.push(chunk.subarray(0, bytesRead))
+      total += bytesRead
+    }
+    if (total > MAX_EXPLICIT_PEM_BYTES) throw new Error(oversized)
+    return Buffer.concat(chunks, total)
   } finally {
     await handle.close()
   }

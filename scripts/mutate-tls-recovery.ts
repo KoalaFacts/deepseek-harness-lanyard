@@ -118,6 +118,15 @@ const mutants: Mutant[] = [
     test: 'refuses nonregular explicit TLS PEM paths without waiting for a FIFO writer',
     failure: /EISDIR|expected.*to throw/i,
   },
+  {
+    label: 'bounded operator-provided TLS PEM reads',
+    from: 'if (total > MAX_EXPLICIT_PEM_BYTES) throw new Error(oversized)',
+    to: 'if (false /* MUTANT: accept an oversized PEM */) throw new Error(oversized)',
+    source: 'src/webserver.ts',
+    file: 'tests/gated-webserver.spec.ts',
+    test: 'refuses oversized operator-provided TLS PEMs without reading past 1 MiB',
+    failure: /expected.*to throw|promise resolved/i,
+  },
 ]
 
 const root = process.cwd()
