@@ -41,7 +41,8 @@
  */
 
 import { createServer as createTlsServer } from 'node:tls'
-import { readFile } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { X509Certificate } from 'node:crypto'
 import { posix } from 'node:path'
 import { isIP } from 'node:net'
@@ -374,6 +375,31 @@ function secureCookiesOf(res: ServerResponse): void {
   }))) as ServerResponse['writeHead']
 }
 
+/**
+ * Read caller-managed TLS material without ever blocking on a POSIX FIFO.
+ *
+ * A user-supplied PEM path may legitimately be a symlink (e.g. a certificate
+ * manager's current link), so check the *opened target*, not lstat(path).
+ * O_NONBLOCK prevents a same-user file replacement from turning open() into
+ * an indefinite FIFO wait. A FileHandle stat then verifies that the exact
+ * descriptor being read is a regular file, not an earlier path snapshot.
+ * Windows does not have the same POSIX nonblocking-open contract: stat the
+ * path before opening to reject nonregular entries there as well.
+ */
+async function readExplicitPem(path: string, kind: 'certificate' | 'private key'): Promise<Buffer> {
+  const nonregular = `lanyard: TLS ${kind} must resolve to a regular file`
+  if (process.platform === 'win32' && !(await stat(path)).isFile()) {
+    throw new Error(nonregular)
+  }
+  const handle = await open(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK))
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(nonregular)
+    return await handle.readFile()
+  } finally {
+    await handle.close()
+  }
+}
+
 /** Whether a request arrived through this carrier's TLS front. */
 function overTls(req: IncomingMessage): boolean {
   return (req.socket as Partial<TLSSocket>).encrypted === true
@@ -660,7 +686,10 @@ export class GatedWebServer extends WebServer {
     const { tlsCertPath, tlsKeyPath } = this.gate
     if (tlsCertPath === undefined || tlsKeyPath === undefined) return
     const routed = assertServer((this as unknown as { server: unknown }).server)
-    const [cert, key] = await Promise.all([readFile(tlsCertPath), readFile(tlsKeyPath)])
+    const [cert, key] = await Promise.all([
+      readExplicitPem(tlsCertPath, 'certificate'),
+      readExplicitPem(tlsKeyPath, 'private key'),
+    ])
     const fingerprint = new X509Certificate(cert).fingerprint256
     const tls = createTlsServer({ cert, key })
     // Track underlying TCP sockets, including peers that never finish TLS

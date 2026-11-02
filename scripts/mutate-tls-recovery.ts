@@ -14,6 +14,8 @@ interface Mutant {
   from: string
   to: string
   file: string
+  /** Source file to mutate; defaults to src/tls.ts. */
+  source?: string
   test: string
   failure: RegExp
 }
@@ -107,6 +109,15 @@ const mutants: Mutant[] = [
     test: 'refuses to overwrite a surviving identity file when cert.pem is missing',
     failure: /promise resolved/i,
   },
+  {
+    label: 'operator PEM path must resolve to a regular file before read',
+    from: 'if (!(await handle.stat()).isFile()) throw new Error(nonregular)',
+    to: 'if (false /* MUTANT: read a FIFO or directory as TLS PEM */) throw new Error(nonregular)',
+    source: 'src/webserver.ts',
+    file: 'tests/gated-webserver.spec.ts',
+    test: 'refuses nonregular explicit TLS PEM paths without waiting for a FIFO writer',
+    failure: /EISDIR|expected.*to throw/i,
+  },
 ]
 
 const root = process.cwd()
@@ -155,16 +166,21 @@ function runTest(mutant: Mutant, label: string, expectFailure: boolean): void {
 
 try {
   for (const [index, mutant] of mutants.entries()) {
-    if (original.split(mutant.from).length !== 2) {
+    const targetSource = mutant.source === undefined ? sourcePath : resolve(root, mutant.source)
+    const sourceOriginal = mutant.source === undefined ? original : readFileSync(targetSource, 'utf8')
+    if (sourceOriginal.split(mutant.from).length !== 2) {
       throw new Error(`Mutation anchor is missing or ambiguous for ${mutant.label}`)
     }
     const id = String(index)
     runTest(mutant, id + '-baseline', false)
-    writeFileSync(sourcePath, original.replace(mutant.from, mutant.to))
+    writeFileSync(targetSource, sourceOriginal.replace(mutant.from, mutant.to))
     try {
       runTest(mutant, id + '-mutant', true)
     } finally {
-      writeFileSync(sourcePath, original)
+      writeFileSync(targetSource, sourceOriginal)
+    }
+    if (readFileSync(targetSource, 'utf8') !== sourceOriginal) {
+      throw new Error(`Mutation source restoration failed for ${mutant.label}`)
     }
   }
 } finally {

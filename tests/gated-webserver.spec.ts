@@ -6,9 +6,10 @@ import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { X509Certificate } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer, { type Config as WebServerConfig, type WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -221,6 +222,49 @@ describe('GatedWebServer', () => {
       host: networkBindHost(host), port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
     })
     await expect(fiber.await()).rejects.toThrow(/192\.0\.2\.254.*not assigned.*--host.*local-only use/s)
+  })
+
+  it('refuses nonregular explicit TLS PEM paths without waiting for a FIFO writer', async () => {
+    const { certPath, keyPath } = await certificateFiles()
+    const nonregularDir = mkdtempSync(join(tmpdir(), 'lanyard-explicit-tls-'))
+    const specialPaths = [nonregularDir]
+    try {
+      // Linux's node:fs/promises.readFile() blocks on this FIFO without a
+      // writer; the production descriptor check must reject it first.
+      if (process.platform === 'linux') {
+        const pipe = join(nonregularDir, 'waiting.pipe')
+        execFileSync('mkfifo', [pipe])
+        specialPaths.push(pipe)
+      }
+      for (const special of specialPaths) {
+        for (const kind of ['certificate', 'private key'] as const) {
+          ctx = withSession()
+          const fiber = ctx.plugin(GatedWebServer, {
+            host: '127.0.0.1', port: 0, networkPort: 0,
+            tlsCertPath: kind === 'certificate' ? special : certPath,
+            tlsKeyPath: kind === 'private key' ? special : keyPath,
+          })
+          await expect(fiber.await()).rejects.toThrow(
+            new RegExp(`TLS ${kind} must resolve to a regular file`),
+          )
+          await ctx.fiber.dispose(); ctx = undefined
+        }
+      }
+    } finally {
+      rmSync(nonregularDir, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('accepts an explicit TLS PEM symlink whose target is a regular file', async () => {
+    const { certPath, keyPath } = await certificateFiles()
+    const linked = join(dirname(certPath), 'current-cert.pem')
+    symlinkSync(certPath, linked)
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0,
+      tlsCertPath: linked, tlsKeyPath: keyPath,
+    }).await()
+    expect((ctx.get('webServer') as GatedWebServer).scheme).toBe('https')
   })
 
   it('refuses TLS material configured by halves', async () => {
