@@ -144,6 +144,13 @@ describe('rankLanAddresses', () => {
 })
 
 describe('isLaunchLinkIssuer', () => {
+  it('rejects a throwing issuer accessor without propagating a token-bearing diagnostic', () => {
+    const broken = Object.defineProperty({}, 'authenticatedUrl', {
+      get() { throw new Error(`synthetic launch token diagnostic ${LAUNCH_TOKEN}`) },
+    })
+    expect(isLaunchLinkIssuer(broken)).toBe(false)
+  })
+
   it('recognises a connection that issues launch-token links, and nothing else', () => {
     expect(isLaunchLinkIssuer(issuer)).toBe(true)
     for (const candidate of [undefined, {}, { authenticatedUrl: 'x' }, { requestRejection: () => undefined }]) {
@@ -453,6 +460,23 @@ describe('the pairing row', () => {
     expect(printed).toEqual([
       'lanyard: no network a phone can join — 192.168.122.1, 172.17.0.1 are container or virtual-machine bridges inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh',
     ])
+  })
+
+  it('fails the load without leaking an upstream issuer accessor error', async () => {
+    const connection = Object.defineProperty({}, 'authenticatedUrl', {
+      get() { throw new Error(`synthetic upstream accessor leaked ${LAUNCH_TOKEN}`) },
+    })
+    let failure: unknown
+    try {
+      await mount({}, {
+        connection,
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toMatch(/no browser authentication to pair a device with/)
+    expect(String(failure)).not.toContain(LAUNCH_TOKEN)
   })
 
   it('fails the load on a dsh whose connection cannot issue pairing links', async () => {

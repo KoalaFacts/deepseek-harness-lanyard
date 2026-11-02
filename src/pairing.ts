@@ -96,7 +96,13 @@ export const Config: z<Config> = z.object({
  * @param candidate - `ctx.connection`, whatever it holds.
  */
 export function isLaunchLinkIssuer(candidate: unknown): candidate is LaunchLinkIssuer {
-  return typeof (candidate as Partial<LaunchLinkIssuer> | undefined)?.authenticatedUrl === 'function'
+  try {
+    return typeof (candidate as Partial<LaunchLinkIssuer> | undefined)?.authenticatedUrl === 'function'
+  } catch {
+    // Even reading a broken upstream issuer property can throw a diagnostic
+    // containing the launch token. Refuse pairing without propagating it.
+    return false
+  }
 }
 
 /**
