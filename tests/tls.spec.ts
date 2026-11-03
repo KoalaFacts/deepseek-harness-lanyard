@@ -3,6 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createHash, createPrivateKey, X509Certificate } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -260,8 +261,11 @@ describe('generateMaterial', () => {
       '  else { console.error(error); process.exitCode = 3 }',
       '}',
     ].join('\n')
+    // Run a checked-in shell program instead of constructing a bash -c command.
+    // Child source and PEM paths remain separate argv entries, forwarded using
+    // the fixture's quoted "$@"; no path becomes shell source code.
     const limited = spawnSync('bash', [
-      '-c', 'ulimit -f 1; trap "" XFSZ; exec "$@"', 'lanyard-fsize',
+      fileURLToPath(new URL('./fixtures/file-size-limit.sh', import.meta.url)),
       process.execPath, '--input-type=module', '-e', childSource, certPath, keyPath,
     ], { cwd: process.cwd(), encoding: 'utf8', timeout: 90_000 })
     expect(limited.error).toBeUndefined()
