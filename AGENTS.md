@@ -16,6 +16,8 @@ Everything in it — the self-signed TLS, the gate that holds every network requ
 
 ## Commands
 
+`--public-url` only advertises the upstream Web UI root; it does not grant Host trust or alter Lanyard's HTTPS phone pairing. `resolveStartupValues()` must refuse an input with a path beyond the origin's optional single slash, **including a dot-segment path which URL parsing would normalize to root**. Keep the positive and negative CLI regressions in `tests/startup.spec.ts` and document user-visible validation in both READMEs.
+
 ### Compatibility with the 0.2.1 prerelease line
 
 The older-release wildcard examples in this document apply to 0.2.0 and earlier. The 0.2.1 carrier accepts concrete interface addresses and rejects wildcards in its schema; this plugin preserves that schema unchanged. Use an assigned IPv4 address on that line. Every non-loopback bind, not just `0.0.0.0`, requires TLS. The e2e harness probes the installed carrier schema, preferring a concrete address and using the legacy wildcard only when that carrier itself validates it.

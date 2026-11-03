@@ -57,6 +57,27 @@ describe('the lanyard web command line', () => {
       .toEqual({ trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true })
   })
 
+  it.each([
+    'https://dsh.example',
+    'https://dsh.example/',
+    'http://localhost:3080/',
+    'https://[::1]:3443/',
+  ])('accepts an absolute --public-url root %s', (url) => {
+    expect(parse(['--public-url', url])).toMatchObject({ publicUrl: url })
+  })
+
+  it.each([
+    'https://dsh.example/workspace',
+    'https://dsh.example//',
+    'https://dsh.example/workspace/..',
+    'https://dsh.example/%2e/',
+    'https://dsh.example\\\\other',
+    'https://dsh.example?token=1',
+    'https://user@dsh.example/',
+  ])('rejects a non-root or unsafe --public-url %s', (url) => {
+    expect(String(parse(['--public-url', url]))).toMatch(/--public-url must be an absolute HTTP\\(S\\) root/)
+  })
+
   it('refuses a non-numeric port', () => {
     expect(String(parse(['--port', '80a']))).toMatch(/--port must be a number/)
   })
