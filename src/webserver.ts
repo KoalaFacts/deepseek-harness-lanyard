@@ -557,8 +557,17 @@ export class GatedWebServer extends WebServer {
     assertRegistrarsWrapped()
     // Our generated certificates and device-address selection cover IPv4.
     // Do not inherit next's wider bind surface until those contracts cover it.
-    if (isIP(config.host) === 6) {
+    // Node treats an empty hostname (and an omitted host passed to listen)
+    // as a wildcard bind. Never let a typo or a direct composition expose a
+    // LAN TLS listener on every adapter instead of the one the user selected.
+    // An omitted host is loopback; only an explicit legacy 0.0.0.0 remains
+    // wildcard-capable, with the existing mandatory TLS + session gate.
+    const bindHost = config.host ?? '127.0.0.1'
+    if (isIP(bindHost) === 6) {
       throw new Error('lanyard: IPv6 binds are not supported; choose one concrete local IPv4 address')
+    }
+    if (isIP(bindHost) !== 4) {
+      throw new Error('lanyard: bind host must be a concrete IPv4 literal; omit --host to serve loopback only')
     }
     // The inherited server is always the loopback listener on the configured
     // port — the one every local URL names — and never sees the network: under
@@ -580,7 +589,7 @@ export class GatedWebServer extends WebServer {
     if ((config.tlsCertPath === undefined) !== (config.tlsKeyPath === undefined)) {
       throw new Error('lanyard: tlsCertPath and tlsKeyPath must be configured together')
     }
-    if (!isLoopbackAddress(config.host) && !servesTls) {
+    if (!isLoopbackAddress(bindHost) && !servesTls) {
       throw new Error(
         'lanyard: a network bind requires TLS material (tlsCertPath and tlsKeyPath), because the launch token '
         + 'and the session cookie that authenticate a device would otherwise cross the network in plaintext',
@@ -596,7 +605,7 @@ export class GatedWebServer extends WebServer {
         + 'TLS front devices reach need a port each',
       )
     }
-    this.gate = config
+    this.gate = { ...config, host: bindHost }
     this.publicPaths = config.publicPaths ?? [...DEFAULT_PUBLIC_PATHS]
     this.publicPathExcludedSuffixes = config.publicPathExcludedSuffixes ?? [...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]
     this.loopbackOnlyPaths = config.loopbackOnlyPaths ?? [...DEFAULT_LOOPBACK_ONLY_PATHS]

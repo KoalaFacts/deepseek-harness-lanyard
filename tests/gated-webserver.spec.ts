@@ -215,6 +215,33 @@ describe('GatedWebServer', () => {
     await expect(fiber.await()).rejects.toThrow(/network bind requires TLS material/)
   })
 
+  it('refuses an empty TLS bind host instead of selecting a wildcard listener', () => {
+    ctx = new Context()
+    // A direct caller can bypass CLI validation; even with valid TLS paths an
+    // empty string must be rejected before node:net treats it as 0.0.0.0 / ::.
+    expect(() => new GatedWebServer(ctx!, {
+      host: '', port: 0, networkPort: 0,
+      tlsCertPath: 'unused-cert.pem', tlsKeyPath: 'unused-key.pem',
+    })).toThrow(/bind host must be a concrete IPv4 literal/)
+  })
+
+  it.each(['localhost', 'not-a-bind-address'])('refuses non-IP host %s even with TLS configured', (host) => {
+    ctx = new Context()
+    expect(() => new GatedWebServer(ctx!, {
+      host, port: 0, networkPort: 0,
+      tlsCertPath: 'unused-cert.pem', tlsKeyPath: 'unused-key.pem',
+    })).toThrow(/bind host must be a concrete IPv4 literal/)
+  })
+
+  it('defaults an omitted direct TLS bind host to loopback, not wildcard', () => {
+    ctx = new Context()
+    const server = new GatedWebServer(ctx, {
+      port: 0, networkPort: 0,
+      tlsCertPath: 'unused-cert.pem', tlsKeyPath: 'unused-key.pem',
+    } as Config)
+    expect(server.host).toBe('127.0.0.1')
+  })
+
   it('refuses a bind host it cannot serve, rather than quietly serving loopback under that name', async () => {
     // Neither carrier accepts an arbitrary hostname in place of its bind literal.
     ctx = new Context()
