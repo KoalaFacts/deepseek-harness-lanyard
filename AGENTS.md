@@ -16,7 +16,7 @@ Everything in it — the self-signed TLS, the gate that holds every network requ
 
 ## Commands
 
-`--public-url` only advertises the upstream Web UI root; it does not grant Host trust or alter Lanyard's HTTPS phone pairing. `resolveStartupValues()` must refuse an input with a path beyond the origin's optional single slash, **including a dot-segment path which URL parsing would normalize to root**. Keep the positive and negative CLI regressions in `tests/startup.spec.ts` and document user-visible validation in both READMEs.
+`--public-url` only advertises the upstream Web UI base; it does not grant Host trust or alter Lanyard's HTTPS phone pairing. **Do not reject legitimate paths**: the upstream next-compat contract explicitly accepts `https://example.test/ui/`. `resolveStartupValues()` must instead refuse dot-segment or backslash paths that URL parsing would silently rewrite, while continuing to reject invalid schemes, credentials, whitespace, queries and fragments. Keep the positive and negative CLI regressions in `tests/startup.spec.ts` and the compatibility case in `tests/next-compat.spec.ts`; document user-visible validation in both READMEs.
 
 ### Compatibility with the 0.2.1 prerelease line
 

@@ -115,15 +115,16 @@ export function resolveStartupValues(program: Command): WebStartupValues {
   if (options.publicUrl !== undefined) {
     const value = options.publicUrl
     const authority = value.slice(value.indexOf('://') + 3).split(/[/\\]/, 1)[0] ?? ''
-    // A syntactically valid URL can still name /workspace or a normalized
-    // traversal such as /workspace/..; neither is the advertised Web UI root.
-    // Check the original path suffix, not only URL.parse().pathname, which
-    // normalizes dot segments and could turn a non-root input into '/'.
+    // Upstream supports a Web UI rooted under a path (e.g. /ui/), so do not
+    // reject path prefixes. But do reject a URL that parses to a *different*
+    // pathname: URL parsing normalizes /ui/.. or encoded dot segments into /
+    // and turns backslashes into path separators, silently changing what the
+    // operator thought they had advertised.
     const suffix = value.slice(value.indexOf('://') + 3 + authority.length)
-    // Match upstream's public-root contract before any row can advertise it.
+    const parsed = URL.parse(value)
     if (/[\u0000-\u0020\u007f]/u.test(value) || !/^https?:\/\//iu.test(value)
       || /[?#]/u.test(value) || authority === '' || authority.includes('@')
-      || (suffix !== '' && suffix !== '/') || URL.parse(value) === null) {
+      || parsed === null || (suffix !== '' && suffix !== parsed.pathname)) {
       program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
     }
   }

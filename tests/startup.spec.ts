@@ -60,21 +60,21 @@ describe('the lanyard web command line', () => {
   it.each([
     'https://dsh.example',
     'https://dsh.example/',
+    'https://dsh.example/ui/',
+    'https://dsh.example//',
     'http://localhost:3080/',
     'https://[::1]:3443/',
-  ])('accepts an absolute --public-url root %s', (url) => {
+  ])('accepts an absolute --public-url base, including supported path prefixes: %s', (url) => {
     expect(parse(['--public-url', url])).toMatchObject({ publicUrl: url })
   })
 
   it.each([
-    'https://dsh.example/workspace',
-    'https://dsh.example//',
     'https://dsh.example/workspace/..',
     'https://dsh.example/%2e/',
     'https://dsh.example\\\\other',
     'https://dsh.example?token=1',
     'https://user@dsh.example/',
-  ])('rejects a non-root or unsafe --public-url %s', (url) => {
+  ])('rejects a rewritten or unsafe --public-url %s', (url) => {
     expect(String(parse(['--public-url', url]))).toContain('--public-url must be an absolute HTTP(S) root')
   })
 
