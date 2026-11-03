@@ -126,8 +126,16 @@ export function resolveStartupValues(program: Command): WebStartupValues {
   // listener, not the flag, means a composition that configures the carrier
   // directly meets the same refusal.
   for (const [flag, value] of [['--port', options.port], ['--network-port', options.networkPort]] as const) {
-    if (value !== undefined && !/^\d+$/.test(value)) {
+    if (value === undefined) continue
+    if (!/^\d+$/.test(value)) {
       program.error(`error: ${flag} must be a number, got ${JSON.stringify(value)}`)
+    }
+    // A syntactically numeric value may overflow Number or the OS's TCP port
+    // range. Refuse it here with a flag-specific recovery error instead of
+    // publishing Infinity or deferring an opaque listen failure to the carrier.
+    const port = Number(value)
+    if (!Number.isSafeInteger(port) || port > 65_535) {
+      program.error(`error: ${flag} must be an integer between 0 and 65535`)
     }
   }
   return {

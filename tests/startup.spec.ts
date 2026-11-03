@@ -61,6 +61,21 @@ describe('the lanyard web command line', () => {
     expect(String(parse(['--port', '80a']))).toMatch(/--port must be a number/)
   })
 
+  it.each([
+    ['--port', '65536'],
+    ['--network-port', '65536'],
+    ['--port', '999999999999999999999999999999999999'],
+    ['--network-port', '999999999999999999999999999999999999'],
+  ])('rejects out-of-range %s %s before starting a listener', (flag, value) => {
+    expect(String(parse([flag, value]))).toMatch(new RegExp(`${flag} must be an integer between 0 and 65535`))
+  })
+
+  it('preserves zero for OS-assigned ports and allows the highest TCP port', () => {
+    expect(parse(['--port', '0', '--network-port', '0'])).toMatchObject({ port: 0, networkPort: 0 })
+    expect(parse(['--port', '65535'])).toMatchObject({ port: 65535 })
+    expect(parse(['--network-port', '65535'])).toMatchObject({ networkPort: 65535 })
+  })
+
   it('carries --network-port through, and refuses a non-numeric one', () => {
     // The port devices on the network reach over TLS; `--port` stays this
     // machine's plaintext listener, exactly as the stock provider means it.
