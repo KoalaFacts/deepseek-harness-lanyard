@@ -75,7 +75,7 @@ describe('the lanyard web command line', () => {
     'https://dsh.example?token=1',
     'https://user@dsh.example/',
   ])('rejects a non-root or unsafe --public-url %s', (url) => {
-    expect(String(parse(['--public-url', url]))).toMatch(/--public-url must be an absolute HTTP\\(S\\) root/)
+    expect(String(parse(['--public-url', url]))).toContain('--public-url must be an absolute HTTP(S) root')
   })
 
   it('refuses a non-numeric port', () => {
