@@ -119,12 +119,23 @@ export function resolveStartupValues(program: Command): WebStartupValues {
     // reject path prefixes. But do reject a URL that parses to a *different*
     // pathname: URL parsing normalizes /ui/.. or encoded dot segments into /
     // and turns backslashes into path separators, silently changing what the
-    // operator thought they had advertised.
+    // operator thought they had advertised. Harmless UTF-8 percent-encoding of
+    // non-ASCII characters is not a path rewrite.
     const suffix = value.slice(value.indexOf('://') + 3 + authority.length)
     const parsed = URL.parse(value)
+    // URL serializes /café/ as /caf%C3%A9/. Encode only raw non-ASCII
+    // characters for this comparison: preserve existing % escapes so that
+    // encoded dot segments, and any separator rewrites, are still rejected.
+    let expectedPathname = suffix
+    try {
+      expectedPathname = suffix.replace(/[^\x00-\x7F]/gu, character => encodeURIComponent(character))
+    } catch {
+      // Unpaired surrogates would be silently rewritten to replacement chars.
+      program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
+    }
     if (/[\u0000-\u0020\u007f]/u.test(value) || !/^https?:\/\//iu.test(value)
       || /[?#]/u.test(value) || authority === '' || authority.includes('@')
-      || parsed === null || (suffix !== '' && suffix !== parsed.pathname)) {
+      || parsed === null || (suffix !== '' && expectedPathname !== parsed.pathname)) {
       program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
     }
   }

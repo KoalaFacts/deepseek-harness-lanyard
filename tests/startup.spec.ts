@@ -61,6 +61,9 @@ describe('the lanyard web command line', () => {
     'https://dsh.example',
     'https://dsh.example/',
     'https://dsh.example/ui/',
+    'https://dsh.example/café/',
+    'https://dsh.example/文档/📱/',
+    'https://dsh.example/caf%C3%A9/',
     'https://dsh.example//',
     'http://localhost:3080/',
     'https://[::1]:3443/',
@@ -70,6 +73,9 @@ describe('the lanyard web command line', () => {
 
   it.each([
     'https://dsh.example/workspace/..',
+    'https://dsh.example/café/..',
+    'https://dsh.example/café/%2e%2e/',
+    'https://dsh.example/café\\other',
     'https://dsh.example/%2e/',
     'https://dsh.example\\\\other',
     'https://dsh.example?token=1',
