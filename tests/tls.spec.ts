@@ -1,6 +1,7 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { createHash, createPrivateKey, X509Certificate } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -239,6 +240,37 @@ describe('generateMaterial', () => {
     } finally {
       rmSync(blockedTemp, { force: true })
     }
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    expect(new X509Certificate(readFileSync(certPath))
+      .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+  })
+
+  it.skipIf(process.platform === 'win32')('cleans a partially written TLS temp after a disk-limit error and allows a retry', async () => {
+    // A real POSIX file-size limit lets writeFileSync create part of the key
+    // temp before throwing EFBIG; a mocked pre-open error would miss this bug.
+    const { certPath, keyPath } = paths()
+    const childSource = [
+      "import { generateMaterial } from './src/tls.ts'",
+      'try {',
+      "  await generateMaterial(process.argv[1], process.argv[2], ['192.168.1.5'])",
+      "  console.error('unexpected successful TLS generation with a 1 KiB file limit')",
+      '  process.exitCode = 2',
+      '} catch (error) {',
+      "  if (error?.code === 'EFBIG') console.log('EXPECTED_EFBIG')",
+      '  else { console.error(error); process.exitCode = 3 }',
+      '}',
+    ].join('\n')
+    const limited = spawnSync('bash', [
+      '-c', 'ulimit -f 1; trap "" XFSZ; exec "$@"', 'lanyard-fsize',
+      process.execPath, '--input-type=module', '-e', childSource, certPath, keyPath,
+    ], { cwd: process.cwd(), encoding: 'utf8', timeout: 90_000 })
+    expect(limited.error).toBeUndefined()
+    expect(limited.status, limited.stderr).toBe(0)
+    expect(limited.stdout).toContain('EXPECTED_EFBIG')
+    // The shell exec preserves the node PID used in temporary file names.
+    expect(existsSync(`${keyPath}.${String(limited.pid)}.tmp`)).toBe(false)
+    expect(existsSync(keyPath)).toBe(false)
+    expect(existsSync(certPath)).toBe(false)
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])
     expect(new X509Certificate(readFileSync(certPath))
       .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)

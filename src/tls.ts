@@ -309,17 +309,23 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
 /** Write through a sibling temp file and rename, so a reader sees old-or-new, never partial. */
 function writeAtomic(path: string, content: string, mode: number): void {
   const temp = `${path}.${String(process.pid)}.tmp`
-  // 'wx' on the temp file only: a leftover temp means another process is
-  // mid-write, which is worth failing on. The rename over `path` is what makes
-  // replacing an existing certificate work at all.
-  writeFileSync(temp, content, { mode, flag: 'wx' })
+  // Exclusive creation distinguishes a previous writer's temp from this
+  // attempt's. writeFileSync may leave a partially written temp before it
+  // throws (e.g. ENOSPC/EFBIG); rename failure is not the only cleanup path.
+  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, mode)
+  let closed = false
   try {
+    writeFileSync(fd, content)
+    closeSync(fd)
+    closed = true
     renameSync(temp, path)
   } catch (error) {
-    // The exclusive create succeeded, so this temp belongs to this attempt.
-    // Remove it after a failed rename; otherwise retrying in this same process
-    // hits EEXIST forever. Never remove a temp that failed the 'wx' guard.
-    try { unlinkSync(temp) } catch { /* Preserve the original rename failure. */ }
+    if (!closed) {
+      try { closeSync(fd) } catch { /* Preserve the original write/close error. */ }
+    }
+    // Reaching here proves the exclusive open succeeded, so only this attempt's
+    // partial temp is removed. An existing temp fails at open and is untouched.
+    try { unlinkSync(temp) } catch { /* Preserve the original failure. */ }
     throw error
   }
 }

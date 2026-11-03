@@ -102,6 +102,14 @@ const mutants: Mutant[] = [
     failure: /expected true to be false/i,
   },
   {
+    label: 'partial-write TLS temporary-file cleanup',
+    from: 'try { unlinkSync(temp) }',
+    to: 'try { void temp /* MUTANT: strand a partial private-key temp */ }',
+    file: 'tests/tls.spec.ts',
+    test: 'cleans a partially written TLS temp after a disk-limit error and allows a retry',
+    failure: /expected true to be false/i,
+  },
+  {
     label: 'incomplete saved identity fail-closed guard',
     from: 'if (hasCertificate !== hasKey)',
     to: 'if (false /* MUTANT: accept an incomplete saved identity */)',
