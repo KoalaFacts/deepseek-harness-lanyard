@@ -78,12 +78,12 @@ Lanyard 用同目录的排他锁目录（`cert.pem.lanyard-lock` 和 `key.pem.la
 
 直接组合载体时，`tls: null` 与省略 `tls` 一样，表示没有显式提供 PEM 证书和私钥。对网络开放监听仍然必须提供自动生成或显式指定的 TLS 文件。
 
-本机照样用原来的 `http://127.0.0.1:3080`；网络上的设备走 TLS，用单独的端口，默认 3443。启动时会打印配对链接、证书指纹，以及链接对应的二维码。如果启动就绪被延迟，Lanyard 会重新读取当前监听地址和局域网地址列表，避免给手机打印旧 IP 的配对链接。每次输出配对信息时仅使用一次 TLS 监听器快照，避免服务热替换时将旧地址与新端口或新证书指纹混用。 指定具体 IPv4 绑定地址时不依赖旧版 `webRuntime` 服务，即使该可选服务已移除或查询失败，也不会因此阻止配对链接输出。如果 DSH 在启动就绪前替换了浏览器认证服务，Lanyard 会使用当前服务生成配对令牌，不打印已失效的旧链接；如果认证服务已不存在，则不输出链接或二维码，并提示重启 DSH。如果启动就绪时读取 TLS 服务发生异常，或者在没有 Loader 的手工组合中立即输出配对信息时发生同类异常，Lanyard 都会输出不含敏感信息的固定恢复提示，而不会泄露上游异常内容或向外抛出可能包含令牌的错误。如果读取 DSH 的 Loader 服务或启动就绪等待时同步抛错，启动会以固定且不泄露令牌的错误中止，不打印配对链接；请修复上游启动故障后重启 DSH：
+本机照样用原来的 `http://127.0.0.1:3080`；网络上的设备走 TLS，用单独的端口，默认 3443。启动时会先打印证书指纹，再打印带有令牌的配对链接和二维码。手机提示证书不受信任时，请先核对指纹，再决定是否信任。如果启动就绪被延迟，Lanyard 会重新读取当前监听地址和局域网地址列表，避免给手机打印旧 IP 的配对链接。每次输出配对信息时仅使用一次 TLS 监听器快照，避免服务热替换时将旧地址与新端口或新证书指纹混用。 指定具体 IPv4 绑定地址时不依赖旧版 `webRuntime` 服务，即使该可选服务已移除或查询失败，也不会因此阻止配对链接输出。如果 DSH 在启动就绪前替换了浏览器认证服务，Lanyard 会使用当前服务生成配对令牌，不打印已失效的旧链接；如果认证服务已不存在，则不输出链接或二维码，并提示重启 DSH。如果启动就绪时读取 TLS 服务发生异常，或者在没有 Loader 的手工组合中立即输出配对信息时发生同类异常，Lanyard 都会输出不含敏感信息的固定恢复提示，而不会泄露上游异常内容或向外抛出可能包含令牌的错误。如果读取 DSH 的 Loader 服务或启动就绪等待时同步抛错，启动会以固定且不泄露令牌的错误中止，不打印配对链接；请修复上游启动故障后重启 DSH：
 
 ```
 lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token
-lanyard: pair a device by opening https://192.168.1.5:3443/?token=<launch token> once
 lanyard: the phone should show certificate SHA-256 7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3 — if it ever shows another, do not continue
+lanyard: pair a device by opening https://192.168.1.5:3443/?token=<launch token> once
 lanyard: or scan this with the phone
 ```
 

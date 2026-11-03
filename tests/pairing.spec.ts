@@ -613,8 +613,8 @@ describe('the pairing row', () => {
     const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT } })
     expect(printed).toEqual([
       'lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token',
-      `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
       `lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`,
+      `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
     ])
   })
 
@@ -668,7 +668,8 @@ describe('the pairing row', () => {
       server: { host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
     })
     expect(printed[0]).toContain('do not open the (LAN: …) link on the dsh web line')
-    expect(printed[1]).toBe(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+    expect(printed[1]).toBe(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
+    expect(printed[2]).toBe(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
   })
 
   it('pairs over the likeliest address, and offers a link for each other one a phone could share', async () => {
@@ -676,7 +677,9 @@ describe('the pairing row', () => {
       lanAddresses: ['10.8.0.2', '192.168.1.5'],
       server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
     })
-    expect(printed.slice(1, 3)).toEqual([
+    // Never present a token-bearing primary or alternative before the identity check.
+    expect(printed[1]).toBe(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
+    expect(printed.slice(2, 4)).toEqual([
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
       `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
     ])

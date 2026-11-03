@@ -512,6 +512,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // never hide this warning merely because the bind is not a wildcard.
     console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`
       + ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token')
+    // Put the certificate identity before every token-bearing link; the user
+    // must compare it on the phone before accepting the self-signed TLS peer.
+    console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.
@@ -520,7 +523,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
     // The certificate is self-signed, so the phone's warning is the only check
     // there is; this is what makes it a check rather than a formality.
-    console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
     let code: string
