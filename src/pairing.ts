@@ -153,10 +153,11 @@ export function pairingLink(
  *
  * Linux names them by lowercase prefix, and macOS puts its virtual-machine NAT
  * on `bridge100` and up (`bridge0` is Thunderbolt Bridge, a real link, and
- * stays physical). Matched case-sensitively, so `veth` does not swallow
+ * stays physical). Match bridge100 and every higher-numbered bridge,
+ * not only bridge100–199. Matched case-sensitively, so `veth` does not swallow
  * Windows's `vEthernet`.
  */
-const MACHINE_INTERNAL_INTERFACE = /^(?:docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge1\d\d)/
+const MACHINE_INTERNAL_INTERFACE = /^(?:docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge[1-9]\d{2,})/
 
 /**
  * Windows's friendly names for the same thing. Only the NAT switches are

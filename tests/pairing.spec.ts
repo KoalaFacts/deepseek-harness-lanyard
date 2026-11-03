@@ -115,6 +115,14 @@ describe('rankLanAddresses', () => {
       .toEqual({ ranked: ['10.0.1.7', '192.168.64.1'], offered: ['10.0.1.7'] })
   })
 
+  it('excludes macOS bridge200 VM NAT without hiding physical bridge0', () => {
+    const machine = interfaces({ bridge200: '192.168.65.1', bridge0: '10.5.0.8', en0: '10.0.1.7' })
+    expect(rankLanAddresses(['192.168.65.1', '10.5.0.8', '10.0.1.7'], machine)).toEqual({
+      ranked: ['10.5.0.8', '10.0.1.7', '192.168.65.1'],
+      offered: ['10.5.0.8', '10.0.1.7'],
+    })
+  })
+
   it('tells Windows\'s NAT switches from an external one carrying the real address', () => {
     // Binding an external Hyper-V switch moves the machine's LAN address onto
     // a vEthernet adapter; hiding it as a bridge would leave nothing to pair.

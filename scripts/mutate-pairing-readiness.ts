@@ -19,6 +19,9 @@ const activationUnsafe = "  const issuer: unknown = ctx.get('connection')"
 const activationCaseName = "fails pairing activation without leaking a throwing initial connection lookup"
 const guarded = "      currentIssuer = ctx.get('connection')"
 const lanSnapshotCaseName = 'refreshes the LAN address snapshot after delayed readiness'
+const macBridgeCaseName = 'excludes macOS bridge200 VM NAT without hiding physical bridge0'
+const macBridgeGuarded = String.raw`bridge[1-9]\d{2,}`
+const macBridgeUnsafe = String.raw`bridge1\d\d`
 const legacyRuntimeCaseName = 'pairs a concrete LAN bind without querying a broken legacy webRuntime'
 const legacyRuntimeGuarded = "    const runtime = (host === undefined || host === '0.0.0.0')\n      ? ctx.get('webRuntime') as WebRuntimeValues | undefined\n      : undefined"
 const legacyRuntimeUnsafe = "    const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined"
@@ -100,6 +103,12 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
         && message.includes('lanyard: this dsh has no browser auth'))) {
       throw new Error(`${label}: unguarded initial Connection lookup survived or failed for another reason: ${failures}`)
     }
+  } else if (focus === macBridgeCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message => message.includes('AssertionError:'))) {
+      throw new Error(`${label}: macOS bridge200 was not caught by the focused assertion: ${failures}`)
+    }
   } else if (focus === lanSnapshotCaseName) {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
@@ -164,6 +173,11 @@ try {
   run('baseline', false)
   writeFileSync(sourcePath, original.replace(guarded, unsafe))
   try { run('stale-issuer', true) }
+  finally { writeFileSync(sourcePath, original) }
+  if (original.split(macBridgeGuarded).length !== 2) throw new Error('macOS virtual bridge exclusion anchor missing or ambiguous')
+  run('mac-bridge-baseline', false, macBridgeCaseName)
+  writeFileSync(sourcePath, original.replace(macBridgeGuarded, macBridgeUnsafe))
+  try { run('mac-bridge-100-only', true, macBridgeCaseName) }
   finally { writeFileSync(sourcePath, original) }
   if (original.split(lanSnapshotGuarded).length !== 2) throw new Error('LAN snapshot timing anchor missing or ambiguous')
   run('lan-snapshot-baseline', false, lanSnapshotCaseName)
