@@ -115,6 +115,29 @@ describe('rankLanAddresses', () => {
       .toEqual({ ranked: ['10.0.1.7', '192.168.64.1'], offered: ['10.0.1.7'] })
   })
 
+  it('does not offer an IP shared by a physical adapter and a virtual bridge, regardless of OS order', () => {
+    // The old Map<IP, adapter-name> used the *last* matching adapter. If a
+    // physical adapter came after Docker, an ambiguous address was advertised
+    // as reachable, even though the same IPv4 belonged to a VM-only bridge.
+    for (const machine of [
+      interfaces({ docker0: '192.168.1.40', en0: '192.168.1.40', wlan0: '10.1.2.3' }),
+      interfaces({ en0: '192.168.1.40', docker0: '192.168.1.40', wlan0: '10.1.2.3' }),
+    ]) {
+      expect(rankLanAddresses(['192.168.1.40', '10.1.2.3'], machine)).toEqual({
+        ranked: ['10.1.2.3', '192.168.1.40'],
+        offered: ['10.1.2.3'],
+      })
+    }
+  })
+
+  it('treats an IP also claimed by an overlay as overlay, not physical', () => {
+    const machine = interfaces({ wg0: '192.168.100.2', eth0: '192.168.100.2', wlan0: '10.0.0.5' })
+    expect(rankLanAddresses(['192.168.100.2', '10.0.0.5'], machine)).toEqual({
+      ranked: ['10.0.0.5', '192.168.100.2'],
+      offered: ['10.0.0.5', '192.168.100.2'],
+    })
+  })
+
   it('excludes macOS bridge200 VM NAT without hiding physical bridge0', () => {
     const machine = interfaces({ bridge200: '192.168.65.1', bridge0: '10.5.0.8', en0: '10.0.1.7' })
     expect(rankLanAddresses(['192.168.65.1', '10.5.0.8', '10.0.1.7'], machine)).toEqual({

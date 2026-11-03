@@ -226,12 +226,23 @@ export interface RankedAddresses {
 export function rankLanAddresses(
   addresses: readonly string[], interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
 ): RankedAddresses {
-  const nameOf = new Map<string, string>()
+  // An IP can appear on more than one adapter (e.g. an overlapping Docker
+  // bridge and Wi-Fi subnet). The last interface reported by the OS must not
+  // decide whether we print a token-bearing phone link. Treat an ambiguous
+  // address as the least phone-reachable kind reported for it.
+  const kindOf = new Map<string, InterfaceKind>()
   for (const [name, entries] of Object.entries(interfaces)) {
-    for (const entry of entries ?? []) if (entry.family === 'IPv4') nameOf.set(entry.address, name)
+    const candidate = interfaceKind(name)
+    for (const entry of entries ?? []) {
+      if (entry.family !== 'IPv4') continue
+      const previous = kindOf.get(entry.address)
+      if (previous === undefined || KIND_RANK[candidate] > KIND_RANK[previous]) {
+        kindOf.set(entry.address, candidate)
+      }
+    }
   }
   const ranked = addresses
-    .map((address, index) => ({ address, index, kind: interfaceKind(nameOf.get(address)), range: rangeRank(address) }))
+    .map((address, index) => ({ address, index, kind: kindOf.get(address) ?? 'physical', range: rangeRank(address) }))
     .sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind] || a.range - b.range || a.index - b.index)
   return {
     ranked: ranked.map(candidate => candidate.address),
