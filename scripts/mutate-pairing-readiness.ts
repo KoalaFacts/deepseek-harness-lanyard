@@ -20,6 +20,9 @@ const activationCaseName = "fails pairing activation without leaking a throwing 
 const guarded = "      currentIssuer = ctx.get('connection')"
 const lanSnapshotCaseName = 'refreshes the LAN address snapshot after delayed readiness'
 const macBridgeCaseName = 'excludes macOS bridge200 VM NAT without hiding physical bridge0'
+const duplicateCaseName = 'prints each alternate IPv4 only once when runtime repeats it'
+const uniqueDestinationsGuarded = '  const ranked = [...new Set(addresses)]'
+const uniqueDestinationsUnsafe = '  const ranked = addresses'
 const macBridgeGuarded = String.raw`bridge[1-9]\d{2,}`
 const macBridgeUnsafe = String.raw`bridge1\d\d`
 const legacyRuntimeCaseName = 'pairs a concrete LAN bind without querying a broken legacy webRuntime'
@@ -109,6 +112,12 @@ function run(label: string, expectFailure: boolean, focus = caseName): void {
       || !(failure.failureMessages ?? []).some(message => message.includes('AssertionError:'))) {
       throw new Error(`${label}: macOS bridge200 was not caught by the focused assertion: ${failures}`)
     }
+  } else if (focus === duplicateCaseName) {
+    const failure = matches[0]
+    if (result.status === 0 || failure?.status !== 'failed'
+      || !(failure.failureMessages ?? []).some(message => message.includes('AssertionError:'))) {
+      throw new Error(`${label}: duplicate pairing destinations survived the source mutant: ${failures}`)
+    }
   } else if (focus === lanSnapshotCaseName) {
     const failure = matches[0]
     if (result.status === 0 || failure?.status !== 'failed'
@@ -178,6 +187,11 @@ try {
   run('mac-bridge-baseline', false, macBridgeCaseName)
   writeFileSync(sourcePath, original.replace(macBridgeGuarded, macBridgeUnsafe))
   try { run('mac-bridge-100-only', true, macBridgeCaseName) }
+  finally { writeFileSync(sourcePath, original) }
+  if (original.split(uniqueDestinationsGuarded).length !== 2) throw new Error('unique pairing destination anchor missing or ambiguous')
+  run('unique-destinations-baseline', false, duplicateCaseName)
+  writeFileSync(sourcePath, original.replace(uniqueDestinationsGuarded, uniqueDestinationsUnsafe))
+  try { run('duplicate-destinations-mutant', true, duplicateCaseName) }
   finally { writeFileSync(sourcePath, original) }
   if (original.split(lanSnapshotGuarded).length !== 2) throw new Error('LAN snapshot timing anchor missing or ambiguous')
   run('lan-snapshot-baseline', false, lanSnapshotCaseName)

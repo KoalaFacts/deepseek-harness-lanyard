@@ -241,7 +241,10 @@ export function rankLanAddresses(
       }
     }
   }
-  const ranked = addresses
+  // An upstream LAN snapshot can contain the same IPv4 once per interface.
+  // Rank unique destinations so one phone network gets one token-bearing link,
+  // while kindOf still considers *all* adapters claiming that address.
+  const ranked = [...new Set(addresses)]
     .map((address, index) => ({ address, index, kind: kindOf.get(address) ?? 'physical', range: rangeRank(address) }))
     .sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind] || a.range - b.range || a.index - b.index)
   return {

@@ -130,6 +130,12 @@ describe('rankLanAddresses', () => {
     }
   })
 
+  it('deduplicates repeated IPv4 destinations without trusting an ambiguous bridge address', () => {
+    const machine = interfaces({ en0: '192.168.1.40', docker0: '192.168.1.40', wlan0: '10.1.2.3' })
+    expect(rankLanAddresses(['192.168.1.40', '10.1.2.3', '192.168.1.40', '10.1.2.3'], machine))
+      .toEqual({ ranked: ['10.1.2.3', '192.168.1.40'], offered: ['10.1.2.3'] })
+  })
+
   it('treats an IP also claimed by an overlay as overlay, not physical', () => {
     const machine = interfaces({ wg0: '192.168.100.2', eth0: '192.168.100.2', wlan0: '10.0.0.5' })
     expect(rankLanAddresses(['192.168.100.2', '10.0.0.5'], machine)).toEqual({
@@ -672,6 +678,16 @@ describe('the pairing row', () => {
     })
     expect(printed.slice(1, 3)).toEqual([
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
+      `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
+    ])
+  })
+
+  it('prints each alternate IPv4 only once when runtime repeats it', async () => {
+    const printed = await mount({}, {
+      lanAddresses: ['192.168.1.5', '10.8.0.2', '10.8.0.2', '192.168.1.5'],
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+    })
+    expect(printed.filter(line => line.startsWith('lanyard: or, from a device on the '))).toEqual([
       `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
     ])
   })
