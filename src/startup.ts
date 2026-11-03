@@ -123,12 +123,13 @@ export function resolveStartupValues(program: Command): WebStartupValues {
     // non-ASCII characters is not a path rewrite.
     const suffix = value.slice(value.indexOf('://') + 3 + authority.length)
     const parsed = URL.parse(value)
-    // URL serializes /café/ as /caf%C3%A9/. Encode only raw non-ASCII
-    // characters for this comparison: preserve existing % escapes so that
-    // encoded dot segments, and any separator rewrites, are still rejected.
+    // WHATWG URL harmlessly encodes non-ASCII and the ASCII path-encode set
+    // (quotes, angle brackets, backticks, braces). Compare those canonical
+    // encodings without normalizing raw %, dot segments or backslashes:
+    // rewrites of operator-supplied paths must still fail closed.
     let expectedPathname = suffix
     try {
-      expectedPathname = suffix.replace(/[^\x00-\x7F]/gu, character => encodeURIComponent(character))
+      expectedPathname = suffix.replace(/["<>\x60{}]|[^\x00-\x7F]/gu, character => encodeURIComponent(character))
     } catch {
       // Unpaired surrogates would be silently rewritten to replacement chars.
       program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
