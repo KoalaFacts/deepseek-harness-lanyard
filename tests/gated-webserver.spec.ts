@@ -133,6 +133,43 @@ describe('GatedWebServer', () => {
     expect((await get('127.0.0.1', server.networkPort, '/api/session/list', {}, ca)).status).toBe(200)
   })
 
+  it.each(['lookup', 'await'] as const)(
+    'keeps TLS listening when optional Loader %s throws before readiness',
+    async (failurePoint) => {
+      const { certPath, keyPath, ca } = await certificateFiles()
+      ctx = withSession()
+      const originalGet = ctx.get.bind(ctx)
+      const secret = 'synthetic Loader diagnostic secret'
+      const warnings: string[] = []
+      vi.spyOn(ctx.logger, 'warn').mockImplementation(((value: unknown) => {
+        warnings.push(String(value))
+      }) as never)
+      const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+        if (key === 'loader') {
+          if (failurePoint === 'lookup') throw new Error(secret)
+          return { await: () => { throw new Error(secret) } }
+        }
+        return originalGet(key as never)
+      }) as typeof ctx.get)
+      try {
+        await ctx.plugin(GatedWebServer, {
+          host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0,
+        }).await()
+        const server = originalGet('webServer') as GatedWebServer
+        server.register({
+          kind: 'exact', path: '/readiness-check',
+          handler: (_req, res) => { res.writeHead(200); res.end('ready') },
+        })
+        expect(server.scheme).toBe('https')
+        expect((await get('127.0.0.1', server.networkPort, '/readiness-check', {}, ca)).status).toBe(200)
+      } finally {
+        lookup.mockRestore()
+      }
+      expect(warnings).toContain('lanyard: could not check DSH Loader readiness; unclaimed-route diagnostics unavailable for this startup')
+      expect(warnings.join(' ')).not.toContain(secret)
+    },
+  )
+
   it('does not wait for a paired TLS socket or an incomplete handshake on shutdown', async () => {
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()

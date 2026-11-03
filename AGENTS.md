@@ -209,6 +209,8 @@ Inherited from the harness; follow them so this reads like the code it composes 
 
 ## Verification
 
+The carrier's Loader readiness lookup is only for optional route-claim drift warnings, not a prerequisite for the TLS listener. A throwing `ctx.get('loader')` or synchronous `await()` during service replacement must not abort network startup or expose upstream exception text. Emit the fixed warning, keep the actual admission and route pins unchanged, and preserve the focused real-TLS regression for both failure points and the source mutation that propagates the exception. This does **not** claim that route-claim drift was checked on that startup.
+
 Four layers, each covering what the one below cannot:
 
 | | |

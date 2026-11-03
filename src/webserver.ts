@@ -699,7 +699,15 @@ export class GatedWebServer extends WebServer {
     // complete once the tree has settled. A hand-built context has no Loader
     // and therefore no settle point — reporting there would warn about paths
     // whose rows simply have not mounted yet.
-    const settled = this.ctx.get('loader')?.await() as Promise<unknown> | undefined
+    let settled: Promise<unknown> | undefined
+    try {
+      settled = this.ctx.get('loader')?.await() as Promise<unknown> | undefined
+    } catch (error) {
+      // This is only a route-claim diagnostic. A transient service replacement
+      // must not prevent the TLS listener from starting or expose upstream
+      // exception text, which can include sensitive authentication state.
+      this.ctx.logger.warn('lanyard: could not check DSH Loader readiness; unclaimed-route diagnostics unavailable for this startup')
+    }
     // A failed boot reports itself; this row stays quiet.
     void settled?.then(() => { this.reportUnclaimedPaths() }, () => {})
     const { tlsCertPath, tlsKeyPath } = this.gate

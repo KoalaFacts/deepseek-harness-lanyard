@@ -127,6 +127,15 @@ const mutants: Mutant[] = [
     failure: /promise resolved|resolved instead of rejecting/i,
   },
   {
+    label: 'optional Loader diagnostics do not interrupt TLS startup',
+    from: "this.ctx.logger.warn('lanyard: could not check DSH Loader readiness; unclaimed-route diagnostics unavailable for this startup')",
+    to: 'throw error /* MUTANT: allow optional Loader error to abort TLS startup */',
+    source: 'src/webserver.ts',
+    file: 'tests/gated-webserver.spec.ts',
+    test: 'keeps TLS listening when optional Loader lookup throws before readiness',
+    failure: /synthetic Loader diagnostic secret/i,
+  },
+  {
     label: 'bounded operator-provided TLS PEM reads',
     from: 'if (total > MAX_EXPLICIT_PEM_BYTES) throw new Error(oversized)',
     to: 'if (false /* MUTANT: accept an oversized PEM */) throw new Error(oversized)',
