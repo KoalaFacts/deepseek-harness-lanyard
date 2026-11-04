@@ -191,6 +191,60 @@ describe('GatedWebServer', () => {
     expect(await completed).toBe('streamed')
   })
 
+  it('completes a Fetch resource HEAD response before a stalled body cancellation finishes', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+
+    let releaseCancellation: () => void = () => {}
+    const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve })
+    let cancelCalled = false
+    server.register({
+      kind: 'exact', path: '/head-resource',
+      resource: async () => new Response(new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelCalled = true
+          return cancellation
+        },
+      }), { status: 200, headers: { 'content-type': 'text/plain' } }),
+    })
+
+    const finished = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const client = httpsRequest({
+        host: '127.0.0.1', port: server.networkPort, path: '/head-resource', method: 'HEAD', ca,
+      }, (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', chunk => { chunks.push(Buffer.from(chunk)) })
+        response.on('end', () => {
+          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        })
+        response.on('error', reject)
+      })
+      client.on('error', reject)
+      client.end()
+    })
+
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    let arrived: { status: number; body: string } | undefined
+    try {
+      arrived = await Promise.race([
+        finished,
+        new Promise<undefined>(resolve => { deadline = setTimeout(() => { resolve(undefined) }, 1_500) }),
+      ])
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      // This unblocks the old, faulty path as well, so failing the assertion
+      // does not leave a suspended route/socket behind.
+      releaseCancellation()
+    }
+    expect(arrived).toEqual({ status: 200, body: '' })
+    expect(cancelCalled).toBe(true)
+    await finished
+  })
+
   it.each(['lookup', 'await'] as const)(
     'keeps TLS listening when optional Loader %s throws before readiness',
     async (failurePoint) => {

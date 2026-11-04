@@ -573,8 +573,15 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
     if (cookies.length > 0) outgoing['set-cookie'] = cookies
     res.writeHead(answer.status, outgoing)
     if (req.method === 'HEAD' || answer.body === null) {
-      await answer.body?.cancel()
+      // A HEAD client has no body to read. Do not hold its response open until
+      // a resource finishes cancelling an unused (possibly stalled) stream.
       res.end()
+      if (req.method === 'HEAD' && answer.body !== null) {
+        void answer.body.cancel().catch(() => {
+          // The response has already completed: a resource cancellation error
+          // must not reject the HTTP route or leave the phone waiting.
+        })
+      }
       return
     }
     // Upstream's Fetch carrier flushes headers before the first body chunk.
