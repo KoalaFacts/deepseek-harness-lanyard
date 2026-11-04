@@ -51,6 +51,8 @@ Useful environment variables:
 - `DSH_E2E_VERSION` — a dist-tag or exact version. Defaults to `latest`; empty is treated as unset.
 - `DSH_E2E_KEEP=1` — keep the throwaway workspace for inspection.
 
+On the 0.2.2+ phone-sized UI, the **Add workspace** sidebar button may be outside the viewport until the user opens the actual **Open sidebar** drawer toggle. The E2E must take that visible touch path before selecting a workspace; do not use forced clicks or programmatic DOM dispatch to paper over mobile navigation failures. This is a real user-flow check, not evidence from an actual phone.
+
 For a red `next` compatibility run, record the **resolved versions**, not only the requested dist-tag: the isolated CLI e2e prints its installed `dsh` and `dsh-web-app` versions, and the row-contract job prints all four resolved contract packages after installation. Dist-tags and their dependency graphs can change between runs; this diagnostic does not approve newly observed Remote methods or relax the fail-closed route policy.
 - `LANYARD_CHROMIUM` — a Chromium binary, when the machine's build does not match this Playwright version.
 

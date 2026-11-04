@@ -583,6 +583,17 @@ try {
       // actual first-time user; merely waiting for the composer would timeout.
       const workspacePath = join(cwd, 'phone-task-workspace')
       mkdirSync(workspacePath, { recursive: true })
+      // DSH 0.2.2+ starts narrow mobile screens with a collapsed navigation
+      // drawer. The Add workspace button exists but sits outside the viewport:
+      // a real phone user opens the drawer first. Do not force-click a hidden
+      // desktop/sidebar control; that would fake onboarding usability.
+      const closedNavigation = phonePage.locator('[data-sidebar-drawer][data-sidebar-collapsed]')
+      if (await closedNavigation.count() > 0) {
+        await phonePage.locator('[data-shell-leading]').getByRole('button', {
+          name: 'Open sidebar', exact: true,
+        }).click()
+        await closedNavigation.waitFor({ state: 'detached', timeout: 10_000 })
+      }
       await phonePage.getByRole('button', { name: 'Add workspace', exact: true }).click()
       const picker = phonePage.getByRole('dialog', { name: 'Select Workspace Directory' })
       await picker.waitFor({ timeout: 15_000 })
