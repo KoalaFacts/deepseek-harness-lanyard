@@ -74,9 +74,9 @@ Newer DSH Host carriers allow `{ resource: (Request, Peer?) => Promise<Response>
 | `lanyard-tls` | — | `lanyardTls` (PEM paths only, never key material) |
 | `lanyard-webserver` | `webserver` | `webServer` — a `WebServer` subclass; plaintext on loopback at `port`, TLS for the network at `networkPort`, and no all-interfaces bind without TLS |
 | `lanyard-keep-awake` | — | platform sleep inhibitor |
+| `lanyard-pairing` | — | the pairing line: upstream's launch-token link at the address and port a device reaches, links for the machine's other networks, the certificate fingerprint, and a QR code |
 
 On Windows a loaded host may take more than 20 seconds to initialize PowerShell `Add-Type`. The readiness gate allows up to 30 seconds but must still require the real `LANYARD_HOLD_READY` acknowledgement **after** successful `SetThreadExecutionState`, refuse startup if absent, and clean up the unconfirmed child. The native Windows test has a slightly longer deadline than production to avoid CI-only premature failures; neither timer nor a successful retry proves a physical sleep hold. Keep `README.md` and `README.zh.md` aligned.
-| `lanyard-pairing` | — | the pairing line: upstream's launch-token link at the address and port a device reaches, links for the machine's other networks, the certificate fingerprint, and a QR code |
 
 The gate works because **every consumer contributes through one of `WebServer`'s three registration seats** — `register`, `registerUpgrade`, and the single-owner `registerFallback` that answers whatever no named route matched. Overriding all three puts admission in front of every request the composition serves, so `dsh-client-connection` — which owns `/api` — runs completely unmodified. `assertRegistrarsWrapped()` fails the load if a future harness grows a fourth.
 
