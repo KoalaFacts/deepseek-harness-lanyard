@@ -97,6 +97,18 @@ describe('the lanyard web command line', () => {
     expect(String(parse(['--public-url', url]))).toContain('--public-url must be an absolute HTTP(S) root')
   })
 
+  it.each([
+    ['NEXT LINE', '\u0085'],
+    ['non-breaking space', '\u00a0'],
+    ['em space', '\u2003'],
+    ['line separator', '\u2028'],
+    ['ideographic space', '\u3000'],
+    ['byte-order mark', '\uFEFF'],
+  ])('refuses raw Unicode whitespace in --public-url (%s)', (_label, whitespace) => {
+    expect(String(parse(['--public-url', `https://dsh.example/café/a${whitespace}b/`])))
+      .toContain('--public-url must be an absolute HTTP(S) root')
+  })
+
   it('refuses a non-numeric port', () => {
     expect(String(parse(['--port', '80a']))).toMatch(/--port must be a number/)
   })

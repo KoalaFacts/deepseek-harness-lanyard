@@ -138,7 +138,9 @@ export function resolveStartupValues(program: Command): WebStartupValues {
     // while Node 24 percent-encodes it. Accept only that harmless variant;
     // neither option normalizes raw %, dot segments, or backslashes.
     const expectedWithEncodedCarets = expectedPathname.replace(/\^/gu, '%5E')
-    if (/[\u0000-\u0020\u007f]/u.test(value) || !/^https?:\/\//iu.test(value)
+    // WHATWG encodes raw Unicode spaces in paths, but they are still input
+    // whitespace (some are invisible). Reject them before comparing paths.
+    if (/[\u0000-\u0020\u007f\uFEFF]|\p{White_Space}/u.test(value) || !/^https?:\/\//iu.test(value)
       || /[?#]/u.test(value) || authority === '' || authority.includes('@')
       || parsed === null || (suffix !== '' && expectedPathname !== parsed.pathname
         && expectedWithEncodedCarets !== parsed.pathname)) {
