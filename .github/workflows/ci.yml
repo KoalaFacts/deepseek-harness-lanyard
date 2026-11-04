@@ -154,7 +154,7 @@ jobs:
     # Main: independently download/install the artifact a user receives.
     # The PR checkout is GitHub's tested merge ref (github.sha), not head.sha.
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    needs: [check, e2e, browser, windows-keep-awake]
+    needs: [node24-startup, check, e2e, browser, windows-keep-awake]
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
