@@ -56,6 +56,10 @@ For a red `next` compatibility run, record the **resolved versions**, not only t
 
 Scripts are TypeScript run directly by Node (type stripping, ≥22.18). No build step, no runner dependency; `npm run typecheck` covers `scripts/` too.
 
+## Fetch resource registration compatibility
+
+Newer DSH Host carriers allow `{ resource: (Request, Peer?) => Promise<Response> }` in both named and fallback registrations. **Never pass such a resource directly to the inherited HTTP route without the network admission gate**: Fetch Request carries no socket peer address, so it cannot enforce loopback and configuration pins. Adapt it to a socket handler *after* calling `permits()`, preserve all Set-Cookie headers and mark them Secure only on TLS, stream with backpressure and cancellation, and retain in-process `readResource(request, peer)` semantics where upstream supports them. The real-LAN resource regression in `tests/gated-webserver.spec.ts` must fail when a resource is called as a Node handler or bypasses admission.
+
 ## How the composition works
 
 `cordis.patch.yml` disables two shipped rows and inserts five. Patches apply in bundle order — `dsh-base`, then `dsh-web-app`, then this — and a later layer can target a row an earlier one inserted.

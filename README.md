@@ -14,6 +14,8 @@ That is all this does. It is not a gateway, not a reverse proxy, and not a way t
 
 This lifts the refusal and supplies what a network bind still lacks: TLS, dsh's own session check in front of every route a network device can reach, and a configuration plane that stays at the machine. It adds no login of its own. **No harness source changes**; it installs as an ordinary plugin bundle.
 
+Upstream DSH prereleases may register the GUI and browser bundles as Fetch resources rather than Node HTTP handlers. The same LAN TLS, cookie and admission restrictions apply to both forms; a green check against an older pinned DSH does not prove a newer prerelease is compatible.
+
 ## Install
 
 ```sh

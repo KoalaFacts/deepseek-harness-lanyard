@@ -41,6 +41,9 @@
  */
 
 import { createServer as createTlsServer } from 'node:tls'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import { open, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { X509Certificate } from 'node:crypto'
@@ -536,6 +539,60 @@ function openedName(decoded: string): string | undefined {
   return posix.normalize(decoded.replaceAll('\\', '/')).replace(/[/. ]+$/, '').toLowerCase()
 }
 
+
+/**
+ * Newer dsh carriers register Fetch resources as well as node:http handlers.
+ * Adapt a Fetch resource only AFTER the socket-backed admission decision:
+ * Fetch Request does not carry the real socket peer address and cannot safely
+ * decide whether a LAN caller may pass the loopback/session gate.
+ */
+type FetchResource = (request: Request) => Promise<Response>
+type FetchRoute = { kind: WebRoute['kind']; path: string; resource: FetchResource }
+type RegisteredRoute = { kind: WebRoute['kind']; path: string; resource?: FetchResource }
+
+/** Preserve GET/HEAD semantics, streaming, cancellation and all Set-Cookie lines. */
+async function serveFetchResource(req: IncomingMessage, res: ServerResponse, resource: FetchResource): Promise<void> {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' })
+    res.end()
+    return
+  }
+  const headers = new Headers()
+  for (const [name, value] of Object.entries(req.headers)) {
+    for (const item of typeof value === 'string' ? [value] : value ?? []) headers.append(name, item)
+  }
+  const abort = new AbortController()
+  const onClose = (): void => { if (!res.writableEnded) abort.abort() }
+  res.on('close', onClose)
+  try {
+    const answer = await resource(new Request(new URL(req.url ?? '/', 'http://x'), {
+      method: req.method, headers, signal: abort.signal,
+    }))
+    const outgoing: OutgoingHttpHeaders = Object.fromEntries(answer.headers)
+    const cookies = answer.headers.getSetCookie()
+    if (cookies.length > 0) outgoing['set-cookie'] = cookies
+    res.writeHead(answer.status, outgoing)
+    if (req.method === 'HEAD' || answer.body === null) {
+      await answer.body?.cancel()
+      res.end()
+      return
+    }
+    // Never buffer browser bundles or streaming resources into RAM. Pipeline
+    // forwards backpressure, closes the response, and cancels on disconnection.
+    await pipeline(Readable.fromWeb(answer.body as unknown as NodeReadableStream), res, { signal: abort.signal })
+  } finally {
+    res.off('close', onClose)
+  }
+}
+
+/** An in-process resource read already carries the caller's authorized Peer. */
+async function readFetchResource(resource: FetchResource, request: Request, peer: unknown): Promise<Response> {
+  const answer = await (Reflect.apply(resource, undefined, [request, peer]) as Promise<Response>)
+  if (request.method !== 'HEAD') return answer
+  await answer.body?.cancel()
+  return new Response(null, { status: answer.status, statusText: answer.statusText, headers: answer.headers })
+}
+
 export class GatedWebServer extends WebServer {
   static override Config: z<Config> = Config
 
@@ -548,6 +605,9 @@ export class GatedWebServer extends WebServer {
   private readonly authority: EndpointAuthority
   /** Route paths some row actually claimed, for the drift warning below. */
   private readonly claimedPaths = new Set<string>()
+  /** Exact/prefix registration order for preserving in-process Fetch reads. */
+  private readonly namedRoutes = new Map<string, RegisteredRoute>()
+  private fallbackResource: FetchResource | undefined
   private readonly networkPortConfigured: number
   private tls: TlsServer | undefined
   private tlsPort: number | undefined
@@ -616,6 +676,41 @@ export class GatedWebServer extends WebServer {
       pairedNamespaces: new Set(config.pairedNamespaces ?? DEFAULT_PAIRED_NAMESPACES),
       pairedRoutes: new Set(config.pairedRoutes ?? DEFAULT_PAIRED_ROUTES),
     }
+    this.installResourceReadAdapter()
+  }
+
+  /**
+   * Newer WebServer exposes readResource(request, peer). A socket-only adapter
+   * would make the UI's in-process resource reads return 404. Install this
+   * adapter only when that optional upstream method exists, so our pinned older
+   * WebServer remains compatible without importing a new API or widening LAN
+   * admission. The upstream reader still owns handler and absent-route cases.
+   */
+  private installResourceReadAdapter(): void {
+    const inherited: unknown = Reflect.get(WebServer.prototype, 'readResource')
+    if (typeof inherited !== 'function') return
+    Object.defineProperty(this, 'readResource', {
+      configurable: true,
+      value: async (request: Request, peer: unknown): Promise<Response> => {
+        const fallback = (): Promise<Response> => Reflect.apply(inherited, this, [request, peer]) as Promise<Response>
+        if (request.method !== 'GET' && request.method !== 'HEAD') return fallback()
+        const pathname = new URL(request.url).pathname
+        const exact = this.namedRoutes.get(`exact:${pathname}`)
+        let route = exact
+        if (route === undefined) {
+          for (const candidate of this.namedRoutes.values()) {
+            if (candidate.kind !== 'prefix') continue
+            if (pathname !== candidate.path && !pathname.startsWith(`${candidate.path}/`)) continue
+            if (route === undefined || candidate.path.length > route.path.length) route = candidate
+          }
+        }
+        // A handler route shadows the fallback just as it does over HTTP.
+        if (route !== undefined) {
+          return route.resource === undefined ? fallback() : readFetchResource(route.resource, request, peer)
+        }
+        return this.fallbackResource === undefined ? fallback() : readFetchResource(this.fallbackResource, request, peer)
+      },
+    })
   }
 
   /**
@@ -848,11 +943,12 @@ export class GatedWebServer extends WebServer {
    * @param route - kind, path, and the owning handler.
    * @returns the disposer removing the route.
    */
-  override register(route: WebRoute): () => void {
-    const inner = route.handler
+  override register(route: WebRoute | FetchRoute): () => void {
+    const resource = 'resource' in route ? route.resource : undefined
+    const handler = 'handler' in route ? route.handler : undefined
     this.claimedPaths.add(route.path)
-    return super.register({
-      ...route,
+    const dispose = super.register({
+      kind: route.kind, path: route.path,
       handler: async (req, res) => {
         if (!this.permits(req, this.posture(route.path))) {
           res.writeHead(403)
@@ -860,9 +956,13 @@ export class GatedWebServer extends WebServer {
           return
         }
         if (overTls(req)) secureCookiesOf(res)
-        await inner(req, res)
+        if (resource !== undefined) await serveFetchResource(req, res, resource)
+        else await handler?.(req, res)
       },
     })
+    const key = `${route.kind}:${route.path}`
+    this.namedRoutes.set(key, { kind: route.kind, path: route.path, ...resource === undefined ? {} : { resource } })
+    return () => { this.namedRoutes.delete(key); dispose() }
   }
 
   /**
@@ -899,16 +999,21 @@ export class GatedWebServer extends WebServer {
    * @param handler - owns the full response lifecycle of unmatched requests.
    * @returns the disposer releasing the seat.
    */
-  override registerFallback(handler: WebRoute['handler']): () => void {
-    return super.registerFallback(async (req, res) => {
+  override registerFallback(fallback: WebRoute['handler'] | { resource: FetchResource }): () => void {
+    const resource = typeof fallback === 'function' ? undefined : fallback.resource
+    const handler = typeof fallback === 'function' ? fallback : undefined
+    const dispose = super.registerFallback(async (req, res) => {
       if (!this.permits(req, this.fallbackAdmission)) {
         res.writeHead(403)
         res.end(REFUSAL_BODY)
         return
       }
       if (overTls(req)) secureCookiesOf(res)
-      await handler(req, res)
+      if (resource !== undefined) await serveFetchResource(req, res, resource)
+      else await handler?.(req, res)
     })
+    this.fallbackResource = resource
+    return () => { this.fallbackResource = undefined; dispose() }
   }
 }
 

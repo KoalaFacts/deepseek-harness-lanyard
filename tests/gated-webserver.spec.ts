@@ -611,6 +611,67 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     expect(seenPeer).toBe(lan)
   })
 
+
+  it('admits upstream Fetch resources only after the socket gate, preserving cookie security', async () => {
+    const lan = LAN as string
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: networkBindHost(lan), port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    // dsh 0.2.2+ registers both browser assets and its SPA fallback as
+    // { resource }, not as the earlier (req, res) handler. The old wrapper
+    // called the object as a function and answered HTTP 400 on pairing.
+    server.register({
+      kind: 'prefix', path: '/plugins',
+      resource: async () => new Response('js bundle', { status: 200 }),
+    })
+    server.registerFallback({
+      resource: async request => {
+        if (new URL(request.url).searchParams.has('token')) {
+          return new Response(null, {
+            status: 303, headers: { location: './', 'set-cookie': `${SESSION}; HttpOnly; SameSite=Strict` },
+          })
+        }
+        return new Response('<html><script></script></html>', { status: 200, headers: { 'content-type': 'text/html' } })
+      },
+    })
+    const request = (path: string, cookie?: string): Promise<{ status: number; cookies: string[]; location: string | undefined }> =>
+      new Promise((resolve, reject) => {
+        const client = httpsRequest({
+          host: lan, port: server.networkPort, path, method: 'GET', ca,
+          headers: cookie === undefined ? {} : { cookie },
+        }, res => {
+          res.resume()
+          res.on('end', () => resolve({
+            status: res.statusCode ?? 0, cookies: res.headers['set-cookie'] ?? [],
+            location: res.headers.location,
+          }))
+        })
+        client.on('error', reject)
+        client.end()
+      })
+    expect((await request('/plugins/client.js')).status).toBe(403)
+    expect((await request('/plugins/client.js', SESSION)).status).toBe(200)
+    expect((await request('/assets/index.js.map')).status).toBe(403)
+    const exchange = await request('/?token=launch-token')
+    expect([exchange.status, exchange.location]).toEqual([303, './'])
+    expect(exchange.cookies).toHaveLength(1)
+    expect(exchange.cookies[0]).toMatch(/; Secure$/)
+    expect((await request('/')).status).toBe(200) // Public fallback; index owner decides auth.
+    expect((await plainGet('127.0.0.1', server.port, '/?token=launch-token'))).toBe(303)
+
+    // Newer carriers can also read a resource in-process after admitting its
+    // Peer. Socket fallback adaptation must not silently turn that into 404.
+    const read = Reflect.get(server, 'readResource') as
+      | ((request: Request, peer: unknown) => Promise<Response>) | undefined
+    if (read !== undefined) {
+      const inProcess = await Reflect.apply(read, server, [new Request('http://x/plugins/client.js'), {}]) as Response
+      expect([inProcess.status, await inProcess.text()]).toEqual([200, 'js bundle'])
+    }
+  })
+
   it('keeps this machine on the port the stock carrier would bind, and gives the network its own', async () => {
     // Switching the plugin on must not move a desktop tab: the plaintext
     // listener stays on the configured port, bound to loopback, and devices
