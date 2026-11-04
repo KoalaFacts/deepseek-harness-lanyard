@@ -134,9 +134,14 @@ export function resolveStartupValues(program: Command): WebStartupValues {
       // Unpaired surrogates would be silently rewritten to replacement chars.
       program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
     }
+    // Supported Node versions differ: Node 22 leaves ^ raw in pathname,
+    // while Node 24 percent-encodes it. Accept only that harmless variant;
+    // neither option normalizes raw %, dot segments, or backslashes.
+    const expectedWithEncodedCarets = expectedPathname.replace(/\^/gu, '%5E')
     if (/[\u0000-\u0020\u007f]/u.test(value) || !/^https?:\/\//iu.test(value)
       || /[?#]/u.test(value) || authority === '' || authority.includes('@')
-      || parsed === null || (suffix !== '' && expectedPathname !== parsed.pathname)) {
+      || parsed === null || (suffix !== '' && expectedPathname !== parsed.pathname
+        && expectedWithEncodedCarets !== parsed.pathname)) {
       program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
     }
   }
