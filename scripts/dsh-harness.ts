@@ -609,6 +609,13 @@ export async function withDshDeployment<T>(
     console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${CLI_SPEC}`)
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
     installCli(workspace, CLI_SPEC)
+    // The requested dist-tag can move independently of the transitive graph.
+    // Log what this isolated consumer actually resolved, not merely @next.
+    const cliManifestPath = createRequire(join(workspace, 'package.json')).resolve(`${CLI_PACKAGE}/package.json`)
+    const cliManifest = JSON.parse(readFileSync(cliManifestPath, 'utf8')) as { version: string }
+    const webManifestPath = createRequire(cliManifestPath).resolve('@deepseek-ai/dsh-web-app/package.json')
+    const webManifest = JSON.parse(readFileSync(webManifestPath, 'utf8')) as { version: string }
+    console.log(`lanyard e2e: installed ${CLI_PACKAGE}@${cliManifest.version}, @deepseek-ai/dsh-web-app@${webManifest.version}`)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
 
 
