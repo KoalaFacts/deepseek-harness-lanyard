@@ -132,6 +132,8 @@ Three things to expect:
 
 **A paired phone has your account on this machine.** What it reaches includes a terminal and an agent that runs commands, both as you, so whatever you could do at the keyboard it can do too — editing dsh's configuration files by hand included. Pair only devices you own, and treat losing one like losing a laptop that is signed in.
 
+The **Schedule** view is also operator-level, not read-only. On DSH 0.2.2, creating or editing a task can schedule prompts or delete tasks; **Run now** triggers delivery immediately, and **Clear ended** permanently removes all ended tasks and their delivery history. These operations require a signed-in paired device behind Lanyard's TLS/session gate. Treat the phone like a signed-in desktop, not a read-only dashboard.
+
 What stays at the machine is the GUI's configuration plane, and the network never meets an unguarded route:
 
 - **Refused for everyone but a loopback peer:** settings, credentials, the account, model providers, installing or inspecting plugins, anything that opens something on the machine's own screen, and any Gateway namespace or `/api` route this build has not deliberately classified. That keeps credentials off the phone's screen and a stray tap from reconfiguring the install. It is not a wall against a device you paired — see above.

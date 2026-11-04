@@ -28,6 +28,8 @@ The replacement startup provider also carries `tls` and `publicUrl`. Explicit TL
 
 `terminal.attach` on 0.2.1 is a duplex replacement for `follow`, `resize`, and `write`: its input commands still write and resize the same terminal. It remains reachable for an already paired device, as that capability was before. The Remote-surface test accepts exactly the reviewed older or newer complete surface, not their union; every other change must still fail.
 
+On 0.2.2-rc.1, the six added `session` methods are passive: `events` reads history, `observeEvent`, `observeProjections` and `observeState` subscribe to changes, `state` reads execution state, and `wait` waits for idle/pending-input with bounded assistant output and no cancellation of Agent work. They expose information already accessible through paired `follow`/`page`/`control`. **Also review the renamed `schedule` surface, not just `session`:** `create`/`edit` manage all Host tasks (including deletion), `run` immediately delivers a task, and `deleteInactive` permanently removes all ended tasks and their delivery history. These are owner-level **writes**, not benign reads. The earlier `schedule/update`/`delete` and paired terminal already granted owner task-management authority; the existing TLS + upstream session gate remains mandatory for these endpoints. No new namespace or unauthenticated route is allowed. `tests/remote-surface.spec.ts` pins three distinct complete surfaces, including this 0.2.2 change; never accept a union or let an unreviewed method silently pass. This classification is not independent approval of the PR.
+
 ```sh
 pnpm install               # prepare runs tsc, so lib/ exists after install
 npm run check              # typecheck + unit suite + build gate — the default gate
