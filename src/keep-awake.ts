@@ -97,7 +97,9 @@ const RELEASE_TIMEOUT_MS = TERMINATE_GRACE_MS + 2_000
 const HOLD_CONFIRM_MS = 250
 
 // Add-Type initialization may take longer than the Unix failure-detection window.
-const WINDOWS_CONFIRM_TIMEOUT_MS = 20_000
+// A cold PowerShell Add-Type compile on a loaded Windows host can exceed 20 s;
+// wait a little longer for the real Win32 confirmation, never a timer-only success.
+const WINDOWS_CONFIRM_TIMEOUT_MS = 30_000
 
 /**
  * The inhibitors print nothing in normal operation. Collecting a small bound
@@ -130,7 +132,7 @@ async function confirmWindowsHold(held: {
     }
     await delay(50)
   }
-  return 'did not confirm a Windows sleep assertion within 20 seconds'
+  return `did not confirm a Windows sleep assertion within ${String(WINDOWS_CONFIRM_TIMEOUT_MS / 1000)} seconds`
 }
 
 

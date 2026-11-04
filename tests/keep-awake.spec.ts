@@ -483,7 +483,7 @@ describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecyc
           throw new Error(`PowerShell exited before holding (code ${String(powerShell.exitCode)}): ${errors}`)
         }
         expect(output).toContain(marker)
-      }, { timeout: 20_000, interval: 50 })
+      }, { timeout: 35_000, interval: 50 })
 
       expect(owner.kill('SIGKILL')).toBe(true)
       await vi.waitFor(() => {
@@ -494,7 +494,7 @@ describe.skipIf(process.platform !== 'win32')('Windows native keep-awake lifecyc
       owner.kill('SIGKILL')
       holder?.kill('SIGKILL')
     }
-  }, 30_000)
+  }, 45_000)
 
   it('rejects a non-terminating PowerShell error before printing the ready marker', async () => {
     // The Win32 assertion itself is valid; inject an error AFTER that call.
