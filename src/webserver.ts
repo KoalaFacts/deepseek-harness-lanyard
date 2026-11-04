@@ -600,7 +600,13 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
 async function readFetchResource(resource: FetchResource, request: Request, peer: unknown): Promise<Response> {
   const answer = await (Reflect.apply(resource, undefined, [request, peer]) as Promise<Response>)
   if (request.method !== 'HEAD') return answer
-  await answer.body?.cancel()
+  // Like the socket-backed HEAD path, the in-process reader must return its
+  // headers before an unused stream's cancellation settles (or rejects).
+  if (answer.body !== null) {
+    void answer.body.cancel().catch(() => {
+      // Cancellation is best-effort after the bodyless HEAD result is ready.
+    })
+  }
   return new Response(null, { status: answer.status, statusText: answer.statusText, headers: answer.headers })
 }
 

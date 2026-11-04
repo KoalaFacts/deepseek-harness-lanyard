@@ -245,6 +245,58 @@ describe('GatedWebServer', () => {
     await finished
   })
 
+  it('returns an in-process Fetch HEAD before stalled stream cancellation finishes', async () => {
+    // Pinned older carriers lack readResource; supply only that upstream
+    // method so this test also exercises our optional compatibility adapter.
+    const original = Object.getOwnPropertyDescriptor(WebServer.prototype, 'readResource')
+    if (original === undefined) {
+      Object.defineProperty(WebServer.prototype, 'readResource', {
+        configurable: true, value: async () => new Response(null, { status: 404 }),
+      })
+    }
+    let releaseCancellation: () => void = () => {}
+    const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve })
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      const { certPath, keyPath } = await certificateFiles()
+      ctx = withSession()
+      await ctx.plugin(GatedWebServer, {
+        host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+      }).await()
+      const server = ctx.get('webServer') as GatedWebServer
+      let cancelCalled = false
+      server.register({
+        kind: 'exact', path: '/inprocess-head-resource',
+        resource: async () => new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelCalled = true
+            return cancellation
+          },
+        }), { status: 200, headers: { 'x-lanyard-source': 'fetch' } }),
+      })
+
+      const read: unknown = Reflect.get(server, 'readResource')
+      if (typeof read !== 'function') throw new Error('in-process Fetch reader was not installed')
+      const pending = Reflect.apply(read, server, [
+        new Request('http://x/inprocess-head-resource', { method: 'HEAD' }), {},
+      ]) as Promise<Response>
+      const result = await Promise.race([
+        pending,
+        new Promise<undefined>(resolve => { deadline = setTimeout(() => { resolve(undefined) }, 1_500) }),
+      ])
+      expect(result?.status).toBe(200)
+      expect(result?.headers.get('x-lanyard-source')).toBe('fetch')
+      expect(result?.body).toBeNull()
+      expect(cancelCalled).toBe(true)
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      // Also release the buggy, awaited path so a failed assertion cannot
+      // leave an unfinished resource reader behind.
+      releaseCancellation()
+      if (original === undefined) Reflect.deleteProperty(WebServer.prototype, 'readResource')
+    }
+  })
+
   it.each(['lookup', 'await'] as const)(
     'keeps TLS listening when optional Loader %s throws before readiness',
     async (failurePoint) => {
