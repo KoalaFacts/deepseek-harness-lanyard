@@ -133,6 +133,64 @@ describe('GatedWebServer', () => {
     expect((await get('127.0.0.1', server.networkPort, '/api/session/list', {}, ca)).status).toBe(200)
   })
 
+
+  it('sends Fetch resource headers before the first slow body chunk over TLS', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+
+    let releaseChunk: () => void = () => {}
+    const maySendChunk = new Promise<void>(resolve => { releaseChunk = resolve })
+    server.register({
+      kind: 'exact', path: '/slow-resource',
+      resource: async () => new Response(new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await maySendChunk
+          controller.enqueue(new TextEncoder().encode('streamed'))
+          controller.close()
+        },
+      }), { status: 200, headers: { 'content-type': 'text/plain' } }),
+    })
+
+    let notifyHeaders: () => void = () => {}
+    const headersSeen = new Promise<void>(resolve => { notifyHeaders = resolve })
+    let responseStatus: number | undefined
+    const completed = new Promise<string>((resolve, reject) => {
+      const client = httpsRequest({
+        host: '127.0.0.1', port: server.networkPort, path: '/slow-resource', ca,
+      }, (response) => {
+        responseStatus = response.statusCode
+        notifyHeaders()
+        const chunks: Buffer[] = []
+        response.on('data', chunk => { chunks.push(Buffer.from(chunk)) })
+        response.on('end', () => { resolve(Buffer.concat(chunks).toString('utf8')) })
+        response.on('error', reject)
+      })
+      client.on('error', reject)
+      client.end()
+    })
+
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      // A blocked body cannot be used to flush headers. This fails on the
+      // prior adapter (writeHead without flushHeaders), even though a normal
+      // static asset whose first chunk is ready immediately still passes.
+      const arrived = await Promise.race([
+        headersSeen.then(() => true),
+        new Promise<boolean>(resolve => { deadline = setTimeout(() => { resolve(false) }, 1_500) }),
+      ])
+      expect(arrived).toBe(true)
+      expect(responseStatus).toBe(200)
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      releaseChunk()
+    }
+    expect(await completed).toBe('streamed')
+  })
+
   it.each(['lookup', 'await'] as const)(
     'keeps TLS listening when optional Loader %s throws before readiness',
     async (failurePoint) => {

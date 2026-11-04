@@ -577,6 +577,10 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
       res.end()
       return
     }
+    // Upstream's Fetch carrier flushes headers before the first body chunk.
+    // Without this, a slow resource makes the phone wait for the first chunk
+    // before it can even observe the response status or content type.
+    res.flushHeaders()
     // Never buffer browser bundles or streaming resources into RAM. Pipeline
     // forwards backpressure, closes the response, and cancels on disconnection.
     await pipeline(Readable.fromWeb(answer.body as unknown as NodeReadableStream), res, { signal: abort.signal })
