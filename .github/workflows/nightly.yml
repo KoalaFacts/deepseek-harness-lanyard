@@ -121,7 +121,7 @@ jobs:
         if: steps.drift.outputs.status == '1'
         run: |
           node scripts/sync-dsh.ts
-          pnpm install --lockfile-only --strict-peer-dependencies
+          pnpm install --lockfile-only --no-frozen-lockfile --strict-peer-dependencies
       - name: Upload unpublished dependency-update candidate
         if: steps.drift.outputs.status == '1'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
