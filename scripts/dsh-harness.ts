@@ -582,6 +582,80 @@ export interface DeploymentOptions {
   tarball?: string
 }
 
+/**
+ * Teardown of a disposable test deployment. A failed stop during restart must
+ * survive a later already-exited stop: never delete its diagnostic workspace.
+ * Keep the primary test/readiness error when final shutdown also fails.
+ * The injected operations let the regression exercise real lifecycle control
+ * flow without starting another DSH process or touching a user's DSH_HOME.
+ */
+interface WorkspaceCleanupOperations {
+  stop: (server: DshProcess) => Promise<void>
+  remove: (workspace: string) => void
+}
+
+export async function withDshWorkspace<T>(
+  workspace: string,
+  operation: (stop: (server: DshProcess) => Promise<void>) => Promise<T>,
+  currentServer: () => DshProcess | undefined,
+  operations: WorkspaceCleanupOperations = {
+    stop: stopDshProcess,
+    remove: path => rmSync(path, { recursive: true, force: true }),
+  },
+  keepRequested = process.env.DSH_E2E_KEEP !== undefined,
+): Promise<T> {
+  let shutdownFailed = false
+  const trackedStop = async (server: DshProcess): Promise<void> => {
+    try {
+      await operations.stop(server)
+    } catch (error) {
+      shutdownFailed = true
+      throw error
+    }
+  }
+  let operationFailed = false
+  let primaryError: unknown
+  try {
+    return await operation(trackedStop)
+  } catch (error) {
+    operationFailed = true
+    primaryError = error
+    throw error
+  } finally {
+    let cleanupFailed = false
+    let cleanupError: unknown
+    try {
+      const server = currentServer()
+      if (server !== undefined) await trackedStop(server)
+    } catch (error) {
+      // A throwing lookup also means we cannot prove that no child is live.
+      shutdownFailed = true
+      cleanupFailed = true
+      cleanupError = error
+    }
+    if (shutdownFailed || keepRequested) {
+      console.log(`lanyard e2e: kept ${workspace}${shutdownFailed ? ' (shutdown failed)' : ''}`)
+    } else {
+      try {
+        operations.remove(workspace)
+      } catch (error) {
+        cleanupFailed = true
+        cleanupError = error
+      }
+    }
+    if (cleanupFailed) {
+      if (operationFailed) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          'lanyard e2e: primary operation and cleanup both failed',
+          { cause: primaryError },
+        )
+      }
+      throw cleanupError
+    }
+  }
+}
+
 export async function withDshDeployment<T>(
   body: (deployment: Deployment) => Promise<T>,
   options: DeploymentOptions = {},
@@ -589,7 +663,7 @@ export async function withDshDeployment<T>(
   const workspace = mkdtempSync(join(tmpdir(), 'lanyard-e2e-'))
   const home = join(workspace, 'home')
   let server: DshProcess | undefined
-  try {
+  return await withDshWorkspace(workspace, async trackedStop => {
     // Fail before packing or installing anything if a caller targets a real profile.
     const env = isolatedDshEnvironment(home, options.env)
     console.log(`lanyard e2e: workspace ${workspace}`)
@@ -663,7 +737,7 @@ export async function withDshDeployment<T>(
       }
       // Both restart and final teardown must wait for the actual process
       // exit; otherwise a live DSH can retain ports or read deleted files.
-      await stopDshProcess(previous)
+      await trackedStop(previous)
       console.log('lanyard e2e: restarting dsh in the same workspace and on the same ports')
       server = boot()
       return await awaitReadiness(server)
@@ -673,14 +747,7 @@ export async function withDshDeployment<T>(
       dsh, env, cwd: workspace, port, localPort, pairingLink, fingerprint, localUrl, packageName: name, ca,
       bundles: profile.dsh?.profile?.bundles ?? [], restart,
     })
-  } finally {
-    // Do not unlink an in-use profile or TLS private key while the child is
-    // still shutting down. A failed stop deliberately leaves the workspace
-    // intact for diagnosis rather than deleting a live process's state.
-    if (server !== undefined) await stopDshProcess(server)
-    if (process.env.DSH_E2E_KEEP === undefined) rmSync(workspace, { recursive: true, force: true })
-    else console.log(`lanyard e2e: kept ${workspace}`)
-  }
+  }, () => server)
 }
 
 /** Records assertions and reports them the way both suites print. */

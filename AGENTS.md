@@ -52,6 +52,7 @@ Useful environment variables:
 
 - `DSH_E2E_VERSION` — a dist-tag or exact version. Defaults to `latest`; empty is treated as unset.
 - `DSH_E2E_KEEP=1` — keep the throwaway workspace for inspection.
+- A failed DSH stop during either `restart()` or final teardown must keep the disposable workspace, even if a second stop finds the child already exited. Preserve the original readiness/body failure when shutdown also rejects (report both errors, primary first); never delete an in-use `DSH_HOME` after a failed stop. `tests/deployment-cleanup.spec.ts` exercises these two failure orders and successful cleanup without launching DSH.
 
 On the 0.2.2+ phone-sized UI, the **Add workspace** sidebar button may be outside the viewport until the user opens the actual **Open sidebar** drawer toggle. The E2E must take that visible touch path before selecting a workspace; do not use forced clicks or programmatic DOM dispatch to paper over mobile navigation failures. This is a real user-flow check, not evidence from an actual phone.
 
