@@ -118,18 +118,45 @@ jobs:
         with:
           version: 10
       - name: Resolve matching manifest and lockfile
+        id: resolution
         if: steps.drift.outputs.status == '1'
+        shell: bash
         run: |
+          set -o pipefail
           node scripts/sync-dsh.ts
-          pnpm install --lockfile-only --no-frozen-lockfile --strict-peer-dependencies
+          pnpm install --lockfile-only --no-frozen-lockfile --strict-peer-dependencies 2>&1 | tee dsh-dependency-resolution.log
+      # Never distribute a changed manifest with an unvalidated/stale lockfile
+      # as an installable candidate, even when pnpm failed *after* writing it.
       - name: Upload unpublished dependency-update candidate
-        if: steps.drift.outputs.status == '1'
+        if: steps.drift.outputs.status == '1' && steps.resolution.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dsh-dependency-update-${{ github.sha }}
           path: |
             package.json
             pnpm-lock.yaml
+          if-no-files-found: error
+          retention-days: 3
+      # A strict-peer failure is actionable evidence, not a usable package
+      # candidate. Retain the resolution log separately without bundling the
+      # mismatched manifest and lockfile as though they were installable.
+      - name: Write rejected dependency-resolution guidance
+        if: always() && steps.drift.outputs.status == '1' && steps.resolution.outcome == 'failure'
+        run: |
+          {
+            echo 'Strict peer dependency resolution failed; no usable update candidate exists.'
+            echo 'The manifest may have changed, but the lockfile was NOT validated.'
+            echo 'Do not install or publish the unresolved manifest/lockfile pair.'
+            echo 'Inspect dsh-dependency-resolution.log for the exact conflicts.'
+          } > dsh-dependency-rejected.txt
+      - name: Upload rejected dependency-resolution diagnostics
+        if: always() && steps.drift.outputs.status == '1' && steps.resolution.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dsh-dependency-rejected-${{ github.sha }}
+          path: |
+            dsh-dependency-rejected.txt
+            dsh-dependency-resolution.log
           if-no-files-found: error
           retention-days: 3
       # A generated candidate is not a fix: the repository remains stale until
