@@ -576,6 +576,12 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
       // A HEAD client has no body to read. Do not hold its response open until
       // a resource finishes cancelling an unused (possibly stalled) stream.
       res.end()
+      if (req.method === 'HEAD') {
+        // end() marks the response complete, so the socket close hook no
+        // longer aborts its Fetch request. Signal that its producer can stop
+        // even if cancelling the unused stream never settles.
+        abort.abort()
+      }
       if (req.method === 'HEAD' && answer.body !== null) {
         void answer.body.cancel().catch(() => {
           // The response has already completed: a resource cancellation error

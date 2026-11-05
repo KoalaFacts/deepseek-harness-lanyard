@@ -202,14 +202,18 @@ describe('GatedWebServer', () => {
     let releaseCancellation: () => void = () => {}
     const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve })
     let cancelCalled = false
+    let resourceSignal: AbortSignal | undefined
     server.register({
       kind: 'exact', path: '/head-resource',
-      resource: async () => new Response(new ReadableStream<Uint8Array>({
-        cancel() {
-          cancelCalled = true
-          return cancellation
-        },
-      }), { status: 200, headers: { 'content-type': 'text/plain' } }),
+      resource: async (request: Request) => {
+        resourceSignal = request.signal
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelCalled = true
+            return cancellation
+          },
+        }), { status: 200, headers: { 'content-type': 'text/plain' } })
+      },
     })
 
     const finished = new Promise<{ status: number; body: string }>((resolve, reject) => {
@@ -241,6 +245,9 @@ describe('GatedWebServer', () => {
       releaseCancellation()
     }
     expect(arrived).toEqual({ status: 200, body: '' })
+    // A stalled cancellation must not leave the producer's request alive.
+    // The old response-close hook deliberately skips already-ended sockets.
+    expect(resourceSignal?.aborted).toBe(true)
     expect(cancelCalled).toBe(true)
     await finished
   })
