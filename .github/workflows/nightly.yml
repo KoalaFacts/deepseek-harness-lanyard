@@ -122,9 +122,42 @@ jobs:
         if: steps.drift.outputs.status == '1'
         shell: bash
         run: |
-          set -o pipefail
-          node scripts/sync-dsh.ts
-          pnpm install --lockfile-only --no-frozen-lockfile --strict-peer-dependencies 2>&1 | tee dsh-dependency-resolution.log
+          set -euo pipefail
+          {
+            node scripts/sync-dsh.ts
+            # DSH 0.2.2-rc.1 moved its vendored Cordis/Schemastery peers as well.
+            # Resolve these in the disposable candidate only: never mutate the
+            # checked-in manifest without its matching, strict-peer lockfile.
+            node --input-type=module -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              import { execFileSync } from "node:child_process";
+              const path = "package.json";
+              const manifest = JSON.parse(readFileSync(path, "utf8"));
+              const release = manifest.devDependencies["@deepseek-ai/dsh"];
+              if (release !== "0.2.2-rc.1") {
+                throw new Error("No reviewed framework-peer migration for DSH " + release);
+              }
+              const updates = [
+                ["@deepseek-ai/cordis", "4.1.0"],
+                ["@deepseek-ai/schemastery", "3.19.0"],
+                ["@deepseek-ai/cordis-plugin-group", "1.1.0"],
+              ];
+              for (const [name, version] of updates) {
+                const published = execFileSync("npm", ["view", name + "@" + version, "version"], { encoding: "utf8" }).trim();
+                if (published !== version) throw new Error("Unverified framework version: " + name + "@" + version);
+              }
+              manifest.devDependencies["@deepseek-ai/cordis"] = "^4.1.0";
+              manifest.devDependencies["@deepseek-ai/schemastery"] = "^3.19.0";
+              const wsPath = "pnpm-workspace.yaml";
+              const ws = readFileSync(wsPath, "utf8");
+              const groupPin = /(@deepseek-ai\\/cordis-plugin-group\\x27:\\s*)1\\.0\\.5(?=\\s|$)/;
+              if (!groupPin.test(ws)) throw new Error("Unexpected group override; inspect before changing");
+              writeFileSync(wsPath, ws.replace(groupPin, (_match, prefix) => prefix + "1.1.0"));
+              writeFileSync(path, JSON.stringify(manifest, null, 2) + "\\n");
+              console.log("Candidate-only framework migration: Cordis 4.1.0, Schemastery 3.19.0, group 1.1.0");
+            '
+            pnpm install --lockfile-only --no-frozen-lockfile --strict-peer-dependencies
+          } 2>&1 | tee dsh-dependency-resolution.log
       # Never distribute a changed manifest with an unvalidated/stale lockfile
       # as an installable candidate, even when pnpm failed *after* writing it.
       - name: Upload unpublished dependency-update candidate
@@ -135,6 +168,7 @@ jobs:
           path: |
             package.json
             pnpm-lock.yaml
+            pnpm-workspace.yaml
           if-no-files-found: error
           retention-days: 3
       # A strict-peer failure is actionable evidence, not a usable package
