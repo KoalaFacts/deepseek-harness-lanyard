@@ -50,7 +50,8 @@ function req(url: string, remoteAddress: string, headers: Record<string, string>
 async function gatedHandler(config: Partial<GateConfig>, route: { path: string; kind?: WebRoute['kind'] }):
 Promise<WebRoute['handler']> {
   const captured: WebRoute[] = []
-  const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((entry: WebRoute) => {
+  const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((entry) => {
+    if (!('handler' in entry)) throw new Error('expected a Node HTTP route, not a Fetch resource')
     captured.push(entry)
     return () => {}
   })

@@ -658,7 +658,9 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
   async function gatedHandler(path: string, kind: WebRoute['kind'] = 'prefix', context = withSession()):
   Promise<WebRoute['handler']> {
     const captured: WebRoute[] = []
-    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((route: WebRoute) => {
+    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((route) => {
+      // Newer DSH also registers Fetch resources; this seam must capture the Node handler.
+      if (!('handler' in route)) throw new Error('expected a Node HTTP route, not a Fetch resource')
       captured.push(route)
       return () => {}
     })
@@ -1092,7 +1094,11 @@ describe('the fallback seat', () => {
   async function gatedFallback(config: Partial<Config> = {}): Promise<WebRoute['handler']> {
     const captured: WebRoute['handler'][] = []
     const spy = vi.spyOn(WebServer.prototype, 'registerFallback')
-      .mockImplementation((handler: WebRoute['handler']) => { captured.push(handler); return () => {} })
+      .mockImplementation((fallback) => {
+        if (typeof fallback !== 'function') throw new Error('expected a Node HTTP fallback handler')
+        captured.push(fallback)
+        return () => {}
+      })
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, ...config }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -1193,7 +1199,11 @@ describe('percent-encoded paths on a public route', () => {
     ]) {
       const captured: WebRoute[] = []
       const spy = vi.spyOn(WebServer.prototype, 'register')
-        .mockImplementation((route: WebRoute) => { captured.push(route); return () => {} })
+        .mockImplementation((route) => {
+          if (!('handler' in route)) throw new Error('expected a Node HTTP route, not a Fetch resource')
+          captured.push(route)
+          return () => {}
+        })
       ctx = withSession()
       await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/bundles'] }).await()
       const server = ctx.get('webServer') as GatedWebServer
