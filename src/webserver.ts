@@ -597,6 +597,13 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
     // Never buffer browser bundles or streaming resources into RAM. Pipeline
     // forwards backpressure, closes the response, and cancels on disconnection.
     await pipeline(Readable.fromWeb(answer.body as unknown as NodeReadableStream), res, { signal: abort.signal })
+  } catch (error) {
+    // The inherited carrier turns a rejected Fetch resource into HTTP 400.
+    // End that resource's request even if no response/body ever existed: an
+    // ordinary response.close after upstream's 400 sees writableEnded=true
+    // and cannot otherwise signal its abandoned producer to stop.
+    abort.abort()
+    throw error
   } finally {
     res.off('close', onClose)
   }

@@ -191,6 +191,29 @@ describe('GatedWebServer', () => {
     expect(await completed).toBe('streamed')
   })
 
+  it('aborts a failed HTTP Fetch resource after upstream handles its error', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+
+    let producerSignal: AbortSignal | undefined
+    server.register({
+      kind: 'exact', path: '/failing-resource',
+      resource: async (request: Request) => {
+        producerSignal = request.signal
+        throw new Error('simulated upstream Fetch resource failure')
+      },
+    })
+
+    // The inherited HTTP carrier still owns error status. A rejected resource
+    // must not leave an un-aborted producer after the 400 is delivered.
+    expect((await get('127.0.0.1', server.networkPort, '/failing-resource', {}, ca)).status).toBe(400)
+    expect(producerSignal?.aborted).toBe(true)
+  })
+
   it('completes a Fetch resource HEAD response before a stalled body cancellation finishes', async () => {
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
