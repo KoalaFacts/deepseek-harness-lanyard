@@ -77,6 +77,17 @@ async function oneUpstreamAuthCookie(context: BrowserContext) {
   return requireUpstreamAuthCookie(await context.cookies())
 }
 
+/** Apply the full session policy at the native tab-return checkpoint, then compare identity. */
+function nativeSessionRetained(before: BrowserCookie[], after: BrowserCookie[]): boolean {
+  try {
+    const original = requireUpstreamAuthCookie(before)
+    const returned = requireUpstreamAuthCookie(after)
+    return returned.name === original.name && returned.value === original.value
+  } catch {
+    return false
+  }
+}
+
 /**
  * Wait for a subprocess/transport result or a bounded timeout. Cancel the
  * losing timer on success, otherwise each completed race keeps Node alive for
@@ -862,19 +873,13 @@ try {
           nativeCookiesBefore.length === 1 && nativeCookieBefore !== undefined
           && nativeCookieBefore.secure && nativeCookieBefore.httpOnly
           && nativeCookieBefore.sameSite === 'Strict', true)
-        // Negative control: a session downgraded to SameSite=Lax must fail the
-        // SAME guard used in the recovery flow, even with a correct bearer.
+        // Negative control exercises the exact tab-return predicate below,
+        // not a separate guard that the checkpoint could accidentally bypass.
         // Change a copy, never the real HttpOnly cookie in this paired profile.
-        let laxCookieRejected = false
-        try {
-          requireUpstreamAuthCookie(nativeCookiesBefore.map(cookie => ({
+        check('native tab-return checkpoint rejects a SameSite=Lax session',
+          nativeSessionRetained(nativeCookiesBefore, nativeCookiesBefore.map(cookie => ({
             ...cookie, sameSite: 'Lax' as const,
-          })))
-        } catch (error) {
-          laxCookieRejected = error instanceof Error && error.message.includes('SameSite=Strict')
-        }
-        check('phone recovery rejects a downgraded SameSite=Lax session',
-          laxCookieRejected, true)
+          }))), false)
 
         // This default-context browser is attached with noDefaults:true; the
         // blank-page control proved that a real tab switch triggers visibility.
@@ -905,13 +910,8 @@ try {
         check('foregrounded native DSH tab still completes a real Host RPC',
           await recheckRealSessionList(nativePage, nativeListed, 'lanyard-native-foreground'), true)
         const nativeCookiesAfter = await nativeAuthCookies()
-        const nativeCookieAfter = nativeCookiesAfter[0]
-        check('native DSH backgrounding retains exactly its Secure HttpOnly session',
-          nativeCookiesBefore.length === 1 && nativeCookiesAfter.length === 1
-          && nativeCookieAfter !== undefined && nativeCookieBefore !== undefined
-          && nativeCookieAfter.name === nativeCookieBefore.name
-          && nativeCookieAfter.secure && nativeCookieAfter.httpOnly
-          && nativeCookieAfter.value === nativeCookieBefore.value, true)
+        check('native DSH backgrounding retains its exact Secure HttpOnly SameSite=Strict session',
+          nativeSessionRetained(nativeCookiesBefore, nativeCookiesAfter), true)
         check('native tab still refuses the paired phone configuration API',
           pageRefused(await apiAnswer(nativePage, '/api/settings/describe')), true)
         check('native DSH tab returns at the token-free saved TLS origin',
