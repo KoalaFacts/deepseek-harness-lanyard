@@ -24,6 +24,9 @@ import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
+import { generate } from 'selfsigned'
+import { scopedBrowserCertificateArg } from './scoped-browser-tls.ts'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { hasNoPluginEntries, hasPluginListEntries } from './tool-result-assertions.ts'
@@ -112,11 +115,11 @@ async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promi
  * hidden -> visible on the CI browser; here that context visits the REAL DSH.
  *
  * Own one disposable Chrome process/profile per call. CDP is localhost-only;
- * --no-sandbox and certificate trust bypass apply ONLY to the CI test fixture,
- * just as in the existing browser and native visibility tests. No production
- * settings, networking or certificates are touched.
+ * CI's native launch still uses --no-sandbox; certificate exceptions are now
+ * restricted to the verified DSH certificate's SPKI rather than every TLS peer.
+ * This is NOT protected-browser or physical-phone acceptance.
  */
-async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
+async function withNativePhoneTab(tlsSpkiArg: string, run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-dsh-native-tab-'))
   const owned = spawn(process.env.LANYARD_CHROMIUM ?? chromium.executablePath(), [
     '--no-sandbox',
@@ -125,7 +128,7 @@ async function withNativePhoneTab(run: (page: Page, context: BrowserContext) => 
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--no-proxy-server',
-    '--ignore-certificate-errors', 'about:blank',
+    tlsSpkiArg, 'about:blank',
   ], { stdio: ['ignore', 'ignore', 'pipe'] })
   let launchError: Error | undefined
   let spawned = false
@@ -465,11 +468,40 @@ async function startModelFixture(): Promise<{
   }
 }
 
+
+/**
+ * A separate HTTPS peer must remain untrusted when Chromium accepts the DSH
+ * test certificate. This fixture carries no session and binds loopback only.
+ */
+async function withUnrelatedTlsCertificate(run: (url: string) => Promise<void>): Promise<void> {
+  const other = await generate([{ name: 'commonName', value: 'unrelated-test' }], {
+    keySize: 2048, algorithm: 'sha256',
+    extensions: [{ name: 'subjectAltName', altNames: [{ type: 7, ip: '127.0.0.1' }] }],
+  })
+  const server = createHttpsServer({ cert: other.cert, key: other.private }, (_req, res) => { res.end('not DSH') })
+  await new Promise<void>((resolve, reject) => {
+    const failed = (error: Error): void => { reject(error) }
+    server.once('error', failed)
+    server.listen(0, '127.0.0.1', () => { server.off('error', failed); resolve() })
+  })
+  try {
+    const addr = server.address()
+    if (!addr || typeof addr === 'string') throw new Error('unrelated TLS fixture has no local port')
+    await run(`https://127.0.0.1:${String(addr.port)}/`)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+}
+
 const modelFixture = await startModelFixture()
 try {
-  await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, restart }) => {
+  await withDshDeployment(async ({ cwd, port, pairingLink, fingerprint, ca, restart }) => {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
+  // Match the deployed PEM against the printed fingerprint and its bound IP.
+  // Only this certificate public key may receive a browser test exception.
+  const tlsSpkiArg = scopedBrowserCertificateArg(ca, fingerprint, lan)
   // The certificate is self-signed by design; a real device accepts it once.
   const browser = await chromium.launch({
     // Real tab visibility transitions require the headed browser. Linux CI
@@ -478,21 +510,27 @@ try {
     // The deployment under test is on this machine's own LAN address. An
     // ambient HTTP(S)_PROXY — normal in a container — would send the
     // navigation through it and the connection is reset.
-    args: ['--no-proxy-server'],
+    args: ['--no-proxy-server', tlsSpkiArg],
     ...executablePath === undefined ? {} : { executablePath },
   })
   try {
+    // A different self-signed identity must remain untrusted; otherwise a
+    // global bypass could hide a broken certificate or hostile network peer.
+    await withUnrelatedTlsCertificate(async unrelatedOrigin => {
+      const negative = await browser.newContext()
+      try {
+        const page = await negative.newPage()
+        let navigationError: unknown
+        try { await page.goto(unrelatedOrigin, { waitUntil: 'domcontentloaded' }) }
+        catch (error) { navigationError = error }
+        check('a different self-signed TLS identity is rejected by Chromium',
+          String(navigationError).includes('ERR_CERT_AUTHORITY_INVALID'), true)
+      } finally { await negative.close() }
+    })
+
     // ---- a device that has never paired ----
-    // `ignoreHTTPSErrors` stays here, unlike in the node probes, for two
-    // reasons. Playwright exposes no per-context way to trust a specific CA —
-    // the alternatives are the same flag under another name or installing the
-    // certificate into the machine's trust store. And it is what the flow being
-    // tested actually looks like: the README tells a person the certificate
-    // warning is normal and to accept it once, so a browser that accepts an
-    // untrusted certificate is the behaviour under test, not a shortcut around
-    // it. The certificate itself is validated in the node e2e, which trusts the
-    // deployment's own PEM and nothing else.
-    const cold = await browser.newContext({ ignoreHTTPSErrors: true })
+    // Only DSH's current certificate key has a scoped test exception.
+    const cold = await browser.newContext()
     const coldPage = await cold.newPage()
     const coldLanding = await coldPage.goto(origin, { waitUntil: 'domcontentloaded' })
     check('an unpaired browser meets upstream\'s refusal, not the GUI', coldLanding?.status(), 401)
@@ -500,7 +538,7 @@ try {
     await cold.close()
 
     // ---- opening the pairing link once ----
-    const paired = await browser.newContext({ ignoreHTTPSErrors: true })
+    const paired = await browser.newContext()
     const page = await paired.newPage()
     const refusedOnLoad = new Set<string>()
     const checks: Promise<void>[] = []
@@ -549,7 +587,6 @@ try {
     // Keep the desktop pairing checks above: mobile CSS and touch events must not
     // make the login/stream flow fail on a smaller screen.
     const phone = await browser.newContext({
-      ignoreHTTPSErrors: true,
       viewport: { width: 390, height: 844 },
       deviceScaleFactor: 3,
       isMobile: true,
@@ -768,7 +805,7 @@ try {
       // Pair a separate native default-context mobile tab with this SAME live
       // Host and prove the lifecycle there; do not fake visibility or count the
       // empty-page diagnostic as a product test.
-      await withNativePhoneTab(async (nativePage, nativeContext) => {
+      await withNativePhoneTab(tlsSpkiArg, async (nativePage, nativeContext) => {
         const sessionReply = nativePage.waitForResponse(
           response => new URL(response.url()).pathname === '/api/session/list')
         const nativeLanding = await nativePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
@@ -1785,7 +1822,7 @@ try {
       priorToolResults(), completedResultsBeforeRestart)
 
     // ---- neither the old launch token nor a forged one can pair ----
-    const hostile = await browser.newContext({ ignoreHTTPSErrors: true })
+    const hostile = await browser.newContext()
     const hostilePage = await hostile.newPage()
     const expired = await hostilePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
     check('the previous process\'s pairing link is invalid after restart', expired?.status(), 401)

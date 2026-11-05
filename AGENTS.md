@@ -83,6 +83,10 @@ The gate works because **every consumer contributes through one of `WebServer`'s
 
 Admission itself is upstream's decision: a network peer passes a seat only if `ctx.connection.requestRejection(req)` admits it — the check `dsh-client-connection` publishes for route owners to apply to their own routes. A loopback peer is exempt from this gate, not from upstream, which still authenticates every route it owns.
 
+## Browser test certificate scope
+
+The real-DSH Chromium suite permits a self-signed exception only for the generated certificate's SHA-256 SPKI, after checking its PEM against the printed pairing fingerprint and bound LAN IPv4. An unrelated self-signed HTTPS peer must still be refused; do not restore `ignoreHTTPSErrors: true` or process-wide `--ignore-certificate-errors`. This is a test-only certificate exception, **not** an imported CA, sandboxed-browser proof, or real iOS/Android acceptance. Native Chromium still uses `--no-sandbox` on CI and must be addressed independently before protected-browser acceptance.
+
 ## Load-bearing invariants
 
 Break any of these and the plugin fails **open** — serving the LAN with no gate — while tests may still look green. Each has a test that fails when mutated; keep it that way.
