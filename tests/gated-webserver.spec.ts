@@ -119,6 +119,37 @@ function req(url: string, remoteAddress: string, headers: Record<string, string>
 }
 
 describe('GatedWebServer', () => {
+  it('reports a disposed configured route as unclaimed without forgetting other live seats', async () => {
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, loopbackOnlyPaths: ['/lan-pin'],
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(value => { warnings.push(String(value)) })
+    const pinUnclaimed = (): boolean => {
+      warnings.length = 0
+      const report = Reflect.get(server, 'reportUnclaimedPaths') as () => void
+      Reflect.apply(report, server, [])
+      return warnings.some(message => message.includes('no route claimed "/lan-pin"'))
+    }
+    expect(pinUnclaimed()).toBe(true)
+    const handler = (_request: IncomingMessage, res: ServerResponse): void => { res.end('ok') }
+    const exact = server.register({ kind: 'exact', path: '/lan-pin', handler })
+    const prefix = server.register({ kind: 'prefix', path: '/lan-pin', handler })
+    const upgrade = server.registerUpgrade({ path: '/lan-pin', handler: () => {} })
+    expect(pinUnclaimed()).toBe(false)
+    // An attempted duplicate registration throws without creating a phantom claim.
+    expect(() => server.register({ kind: 'exact', path: '/lan-pin', handler }))
+      .toThrow(/duplicate exact route/)
+    exact()
+    expect(pinUnclaimed()).toBe(false)
+    prefix()
+    expect(pinUnclaimed()).toBe(false)
+    upgrade()
+    expect(pinUnclaimed()).toBe(true)
+  })
+
   it('serves TLS and hands a loopback peer to an unmodified consumer\'s routes', async () => {
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()

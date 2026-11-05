@@ -651,7 +651,7 @@ export class GatedWebServer extends WebServer {
   private readonly apiPathPrefix: string
   private readonly authority: EndpointAuthority
   /** Route paths some row actually claimed, for the drift warning below. */
-  private readonly claimedPaths = new Set<string>()
+  private readonly claimedPaths = new Map<string, number>()
   /** Exact/prefix registration order for preserving in-process Fetch reads. */
   private readonly namedRoutes = new Map<string, RegisteredRoute>()
   private fallbackResource: FetchResource | undefined
@@ -758,6 +758,24 @@ export class GatedWebServer extends WebServer {
         return this.fallbackResource === undefined ? fallback() : readFetchResource(this.fallbackResource, request, peer)
       },
     })
+  }
+
+  /**
+   * Track *live* route owners, rather than names that were ever registered.
+   * A path may be claimed by HTTP exact/prefix routes and an upgrade seat at
+   * once. A boot-time disposer or rejected duplicate must not mask an unclaimed
+   * configuration pin when the Loader settles.
+   */
+  private claimPath(path: string): () => void {
+    this.claimedPaths.set(path, (this.claimedPaths.get(path) ?? 0) + 1)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      const count = this.claimedPaths.get(path)
+      if (count === undefined || count === 1) this.claimedPaths.delete(path)
+      else this.claimedPaths.set(path, count - 1)
+    }
   }
 
   /**
@@ -993,7 +1011,6 @@ export class GatedWebServer extends WebServer {
   override register(route: WebRoute | FetchRoute): () => void {
     const resource = 'resource' in route ? route.resource : undefined
     const handler = 'handler' in route ? route.handler : undefined
-    this.claimedPaths.add(route.path)
     const dispose = super.register({
       kind: route.kind, path: route.path,
       handler: async (req, res) => {
@@ -1007,9 +1024,13 @@ export class GatedWebServer extends WebServer {
         else await handler?.(req, res)
       },
     })
+    const unclaim = this.claimPath(route.path)
     const key = `${route.kind}:${route.path}`
     this.namedRoutes.set(key, { kind: route.kind, path: route.path, ...resource === undefined ? {} : { resource } })
-    return () => { this.namedRoutes.delete(key); dispose() }
+    return () => {
+      this.namedRoutes.delete(key)
+      try { dispose() } finally { unclaim() }
+    }
   }
 
   /**
@@ -1020,8 +1041,7 @@ export class GatedWebServer extends WebServer {
    */
   override registerUpgrade(route: WebUpgradeRoute): () => void {
     const inner = route.handler
-    this.claimedPaths.add(route.path)
-    return super.registerUpgrade({
+    const dispose = super.registerUpgrade({
       ...route,
       handler: (req, socket, head) => {
         if (!this.permits(req, this.posture(route.path))) {
@@ -1036,6 +1056,8 @@ export class GatedWebServer extends WebServer {
         return inner(req, socket, head)
       },
     })
+    const unclaim = this.claimPath(route.path)
+    return () => { try { dispose() } finally { unclaim() } }
   }
 
   /**

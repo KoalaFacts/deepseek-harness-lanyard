@@ -152,6 +152,7 @@ What stays at the machine is the GUI's configuration plane, and the network neve
 - **Streams are admitted as a whole.** They share one WebSocket, which this can admit or refuse but not look inside, so a paired phone could open a stream in a namespace it is otherwise refused — today only read-only account status, and the experimental voice bundle's stream where that is installed. The same socket carries the notifications every browser gets, configuration activity included (that a setting or a credential changed, a plugin install's log), though never the values themselves. The GUI makes every change as an HTTP call, where each one is classified, but nothing in the protocol requires that.
 - **Coupled to the carrier it subclasses and the sign-in it relies on.** A future dsh could break it — loudly, by design, never by quietly serving plaintext or letting an unauthenticated device in.
 
+- **A `no route claimed` warning when DSH finishes loading** means a configured route or API prefix has no live owner. Registrations disposed during boot no longer hide that warning. Check upstream compatibility before relying on LAN access; this diagnostic does not itself close the listener.
 - **A warning that DSH Loader readiness could not be checked** means the optional route-claim drift diagnostic was unavailable during service replacement. The TLS listener, session checks and route pins still operate; restart dsh and verify compatibility before relying on a newly upgraded harness version. Upstream exception text is deliberately not logged.
 
 ## Configuration
