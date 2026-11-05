@@ -604,16 +604,27 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
 
 /** An in-process resource read already carries the caller's authorized Peer. */
 async function readFetchResource(resource: FetchResource, request: Request, peer: unknown): Promise<Response> {
-  const answer = await (Reflect.apply(resource, undefined, [request, peer]) as Promise<Response>)
-  if (request.method !== 'HEAD') return answer
-  // Like the socket-backed HEAD path, the in-process reader must return its
-  // headers before an unused stream's cancellation settles (or rejects).
-  if (answer.body !== null) {
-    void answer.body.cancel().catch(() => {
-      // Cancellation is best-effort after the bodyless HEAD result is ready.
-    })
+  if (request.method !== 'HEAD') {
+    return Reflect.apply(resource, undefined, [request, peer]) as Promise<Response>
   }
-  return new Response(null, { status: answer.status, statusText: answer.statusText, headers: answer.headers })
+  // A caller owns the original Request signal. Use a forwarded HEAD Request
+  // so we can stop its resource producer after returning the bodyless result,
+  // without aborting the caller's Request or waiting on a stalled cancel().
+  const stop = new AbortController()
+  const forwarded = new Request(request, { signal: AbortSignal.any([request.signal, stop.signal]) })
+  try {
+    const answer = await (Reflect.apply(resource, undefined, [forwarded, peer]) as Promise<Response>)
+    if (answer.body !== null) {
+      void answer.body.cancel().catch(() => {
+        // Cancellation is best-effort after the bodyless HEAD result is ready.
+      })
+    }
+    return new Response(null, { status: answer.status, statusText: answer.statusText, headers: answer.headers })
+  } finally {
+    // A stalled or rejected cancellation must not leave the producer running.
+    // Also release it if the resource itself rejects before returning headers.
+    stop.abort()
+  }
 }
 
 export class GatedWebServer extends WebServer {

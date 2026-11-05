@@ -272,21 +272,24 @@ describe('GatedWebServer', () => {
       }).await()
       const server = ctx.get('webServer') as GatedWebServer
       let cancelCalled = false
+      let resourceSignal: AbortSignal | undefined
       server.register({
         kind: 'exact', path: '/inprocess-head-resource',
-        resource: async () => new Response(new ReadableStream<Uint8Array>({
-          cancel() {
-            cancelCalled = true
-            return cancellation
-          },
-        }), { status: 200, headers: { 'x-lanyard-source': 'fetch' } }),
+        resource: async (request: Request) => {
+          resourceSignal = request.signal
+          return new Response(new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelCalled = true
+              return cancellation
+            },
+          }), { status: 200, headers: { 'x-lanyard-source': 'fetch' } })
+        },
       })
 
       const read: unknown = Reflect.get(server, 'readResource')
       if (typeof read !== 'function') throw new Error('in-process Fetch reader was not installed')
-      const pending = Reflect.apply(read, server, [
-        new Request('http://x/inprocess-head-resource', { method: 'HEAD' }), {},
-      ]) as Promise<Response>
+      const callerRequest = new Request('http://x/inprocess-head-resource', { method: 'HEAD' })
+      const pending = Reflect.apply(read, server, [callerRequest, {}]) as Promise<Response>
       const result = await Promise.race([
         pending,
         new Promise<undefined>(resolve => { deadline = setTimeout(() => { resolve(undefined) }, 1_500) }),
@@ -295,6 +298,10 @@ describe('GatedWebServer', () => {
       expect(result?.headers.get('x-lanyard-source')).toBe('fetch')
       expect(result?.body).toBeNull()
       expect(cancelCalled).toBe(true)
+      // Cancellation alone can remain pending. The resource must see abort,
+      // without aborting the original Request owned by its caller.
+      expect(resourceSignal?.aborted).toBe(true)
+      expect(callerRequest.signal.aborted).toBe(false)
     } finally {
       if (deadline !== undefined) clearTimeout(deadline)
       // Also release the buggy, awaited path so a failed assertion cannot
