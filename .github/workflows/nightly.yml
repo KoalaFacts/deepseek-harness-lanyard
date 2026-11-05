@@ -213,7 +213,10 @@ jobs:
     # a manual run has someone watching it.
     name: report
     needs: [e2e, contract, drift]
-    if: failure() && github.event_name == 'schedule'
+    # A dependency-version drift is not an E2E failure. Preserve the red drift
+    # check and its install candidate, but do not open/comment on the E2E issue
+    # unless a real latest/next E2E or route-contract job actually failed.
+    if: ${{ failure() && github.event_name == 'schedule' && (needs.e2e.result == 'failure' || needs.contract.result == 'failure') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
