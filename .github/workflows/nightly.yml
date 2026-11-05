@@ -95,13 +95,52 @@ jobs:
     # says when the devDependencies lag the release `dsh@latest` ships.
     name: devDependencies track dsh@latest
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - run: node scripts/sync-dsh.ts --check
+      - name: Detect drift without misclassifying registry outages
+        id: drift
+        shell: bash
+        run: |
+          set +e
+          node scripts/sync-dsh.ts --check
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      # On actual version drift, produce the exact manifest/lockfile pair in
+      # an isolated runner. The user's local environment may lack registry
+      # access; this is a reviewable candidate, NOT an automatic update.
+      - name: Set up pnpm for dependency-update candidate
+        if: steps.drift.outputs.status == '1'
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+      - name: Resolve matching manifest and lockfile
+        if: steps.drift.outputs.status == '1'
+        run: |
+          node scripts/sync-dsh.ts
+          pnpm install --lockfile-only --strict-peer-dependencies
+      - name: Upload unpublished dependency-update candidate
+        if: steps.drift.outputs.status == '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dsh-dependency-update-${{ github.sha }}
+          path: |
+            package.json
+            pnpm-lock.yaml
+          if-no-files-found: error
+          retention-days: 3
+      # A generated candidate is not a fix: the repository remains stale until
+      # it has been reviewed, installed, tested and committed to this PR.
+      - name: Preserve the original drift or registry-check status
+        if: always()
+        env:
+          LANYARD_SYNC_STATUS: ${{ steps.drift.outputs.status }}
+        run: |
+          if [ -z "$LANYARD_SYNC_STATUS" ]; then exit 1; fi
+          exit "$LANYARD_SYNC_STATUS"
 
   report:
     # A scheduled run that fails silently is decorative. Only for the schedule:
