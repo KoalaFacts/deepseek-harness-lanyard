@@ -611,7 +611,13 @@ async function readFetchResource(resource: FetchResource, request: Request, peer
   // so we can stop its resource producer after returning the bodyless result,
   // without aborting the caller's Request or waiting on a stalled cancel().
   const stop = new AbortController()
-  const forwarded = new Request(request, { signal: AbortSignal.any([request.signal, stop.signal]) })
+  // Node's Request(input, { signal }) resets the caller's referrer metadata.
+  // Keep all HEAD Request fields intact while giving the producer our own stop signal.
+  const forwarded = new Request(request, {
+    signal: AbortSignal.any([request.signal, stop.signal]),
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+  })
   try {
     const answer = await (Reflect.apply(resource, undefined, [forwarded, peer]) as Promise<Response>)
     if (answer.body !== null) {

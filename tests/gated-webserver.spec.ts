@@ -273,10 +273,14 @@ describe('GatedWebServer', () => {
       const server = ctx.get('webServer') as GatedWebServer
       let cancelCalled = false
       let resourceSignal: AbortSignal | undefined
+      let resourceReferrer: string | undefined
+      let resourceReferrerPolicy: string | undefined
       server.register({
         kind: 'exact', path: '/inprocess-head-resource',
         resource: async (request: Request) => {
           resourceSignal = request.signal
+          resourceReferrer = request.referrer
+          resourceReferrerPolicy = request.referrerPolicy
           return new Response(new ReadableStream<Uint8Array>({
             cancel() {
               cancelCalled = true
@@ -288,7 +292,11 @@ describe('GatedWebServer', () => {
 
       const read: unknown = Reflect.get(server, 'readResource')
       if (typeof read !== 'function') throw new Error('in-process Fetch reader was not installed')
-      const callerRequest = new Request('http://x/inprocess-head-resource', { method: 'HEAD' })
+      const callerRequest = new Request('http://x/inprocess-head-resource', {
+        method: 'HEAD',
+        referrer: 'https://caller.example/page',
+        referrerPolicy: 'no-referrer',
+      })
       const pending = Reflect.apply(read, server, [callerRequest, {}]) as Promise<Response>
       const result = await Promise.race([
         pending,
@@ -298,6 +306,10 @@ describe('GatedWebServer', () => {
       expect(result?.headers.get('x-lanyard-source')).toBe('fetch')
       expect(result?.body).toBeNull()
       expect(cancelCalled).toBe(true)
+      // Replacing only the signal must not silently reset Request referrer
+      // metadata (Node otherwise changes explicit values to about:client/'').
+      expect(resourceReferrer).toBe(callerRequest.referrer)
+      expect(resourceReferrerPolicy).toBe(callerRequest.referrerPolicy)
       // Cancellation alone can remain pending. The resource must see abort,
       // without aborting the original Request owned by its caller.
       expect(resourceSignal?.aborted).toBe(true)
