@@ -117,7 +117,7 @@ jobs:
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
-      - name: Resolve matching manifest and lockfile
+      - name: Resolve and validate matching manifest and lockfile
         id: resolution
         if: steps.drift.outputs.status == '1'
         shell: bash
@@ -157,6 +157,11 @@ jobs:
               console.log("Candidate-only framework migration: Cordis 4.1.0, Schemastery 3.19.0, group 1.1.0");
             '
             pnpm install --lockfile-only --no-frozen-lockfile --strict-peer-dependencies
+            # The solver alone does not prove a clean frozen install or that
+            # Lanyard compiles and passes its source/package regression suite
+            # against the new DSH graph. Only upload a validated candidate.
+            pnpm install --frozen-lockfile --strict-peer-dependencies
+            npm run check
           } 2>&1 | tee dsh-dependency-resolution.log
       # Never distribute a changed manifest with an unvalidated/stale lockfile
       # as an installable candidate, even when pnpm failed *after* writing it.
