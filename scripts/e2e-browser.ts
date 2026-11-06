@@ -28,6 +28,7 @@ import { createServer as createHttpsServer } from 'node:https'
 import { generate } from 'selfsigned'
 import { scopedBrowserCertificateArg } from './scoped-browser-tls.ts'
 import { browserSandboxPolicy } from './browser-sandbox.ts'
+import { assertActualChromiumSandbox } from './browser-sandbox-attestation.ts'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { hasNoPluginEntries, hasPluginListEntries } from './tool-result-assertions.ts'
@@ -172,6 +173,7 @@ async function withNativePhoneTab(tlsSpkiArg: string, run: (page: Page, context:
     const context = nativeBrowser.contexts()[0]
     const page = context?.pages()[0]
     if (!context || !page) throw new Error('native Chrome default context has no initial tab')
+    if (sandboxLaunch.chromiumSandbox) await assertActualChromiumSandbox(context)
     await page.setViewportSize({ width: 390, height: 844 })
     // CDP device emulation changes layout/touch; it does NOT override focus or
     // document.visibilityState. Keep its session alive until the test finishes.
@@ -519,6 +521,13 @@ try {
     ...executablePath === undefined ? {} : { executablePath },
   })
   try {
+    // The required-mode CI must observe actual sandbox mechanisms, not only
+    // chromiumSandbox: true. Keep this separate from TLS/SPKI trust checking.
+    if (sandboxLaunch.chromiumSandbox) {
+      const sandboxContext = await browser.newContext()
+      try { await assertActualChromiumSandbox(sandboxContext) }
+      finally { await sandboxContext.close() }
+    }
     // A different self-signed identity must remain untrusted; otherwise a
     // global bypass could hide a broken certificate or hostile network peer.
     await withUnrelatedTlsCertificate(async unrelatedOrigin => {

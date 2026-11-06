@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { browserSandboxPolicy } from './browser-sandbox.ts'
+import { assertActualChromiumSandbox } from './browser-sandbox-attestation.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 
 assert(process.argv[2], 'supply the repository containing installed pinned Playwright')
@@ -78,6 +79,7 @@ async function probe(noDefaults) {
     assert(context, 'the owned default context must exist')
     const original = context.pages()[0]
     assert(original, 'the native initial page must exist')
+    if (sandboxLaunch.chromiumSandbox) await assertActualChromiumSandbox(context)
     await original.setContent('<textarea aria-label="draft"></textarea>')
     await original.getByLabel('draft').fill('synthetic unsent draft')
     await original.evaluate(() => {
