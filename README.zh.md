@@ -26,7 +26,7 @@ dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 
 ### npm 仍只有占位包时，安装本地打包版本
 
-如果 `npm view @koalafacts/deepseek-harness-lanyard version` 仍然只显示 `0.0.0`，可以使用**从本仓库源码生成的本地安装包**，不要安装那个不能工作的占位版本。以下命令在**运行 dsh 的电脑**上执行，而不是在手机上执行。需要事先安装好 `dsh` CLI、Node.js 22.19+（22.x 系列）或 24+，以及 pnpm 10。
+如果 `npm view @koalafacts/deepseek-harness-lanyard version` 仍然只显示 `0.0.0`，可以使用**从本仓库源码生成的本地安装包**，不要安装那个不能工作的占位版本。以下命令在**运行 dsh 的电脑**上执行，而不是在手机上执行。需要事先安装好 `dsh` CLI 和 pnpm 10。**当前已发布的 DSH `0.2.2-rc.1`（`latest`/`next`）要求 Node.js 24.9.0 或更高。** Lanyard 的 `engines.node` 仍允许与旧版 DSH 配套的 Node 22.19+；但这一范围不能覆盖当前 DSH CLI 自身的 Node 版本要求。
 
 ```sh
 git clone https://github.com/KoalaFacts/deepseek-harness-lanyard.git

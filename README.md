@@ -26,7 +26,7 @@ Before installing, check `npm view @koalafacts/deepseek-harness-lanyard version`
 
 ### Install a local tarball while npm only has the placeholder
 
-If `npm view @koalafacts/deepseek-harness-lanyard version` still says `0.0.0`, install a **locally packed copy of this source** instead of that non-working registry placeholder. Run these commands on the **computer running dsh**, not the phone. You need an already installed `dsh` CLI, Node.js 22.19+ on the 22.x line or 24+, and pnpm 10.
+If `npm view @koalafacts/deepseek-harness-lanyard version` still says `0.0.0`, install a **locally packed copy of this source** instead of that non-working registry placeholder. Run these commands on the **computer running dsh**, not the phone. You need an already installed `dsh` CLI and pnpm 10. **The current published DSH `0.2.2-rc.1` (`latest`/`next`) requires Node.js 24.9.0 or newer.** Lanyard's broader `engines.node` range still permits Node 22.19+ with older DSH hosts that support it; it does not override the current host CLI's Node requirement.
 
 ```sh
 git clone https://github.com/KoalaFacts/deepseek-harness-lanyard.git
