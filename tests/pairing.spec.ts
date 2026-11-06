@@ -13,6 +13,7 @@ import * as Pairing from '../src/pairing.ts'
 const LAUNCH_TOKEN = 'nWXNEOWudT5Vfz4m2-h1bY2lU-pBvOB2oHCufgtaH2E'
 /** The SHA-256 identity a phone must compare before opening the token link. */
 const CERT_FINGERPRINT = '7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3'
+const TOKEN_FREE_PREFLIGHT = "lanyard: FIRST visit https://192.168.1.5:3443/ on the phone without a token and verify the FULL SHA-256 fingerprint above; for another network, check that link's token-free HTTPS root first. If verification or trust is unavailable, do NOT scan or open a pairing link"
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
@@ -614,6 +615,7 @@ describe('the pairing row', () => {
     expect(printed).toEqual([
       'lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token',
       `lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`,
+      TOKEN_FREE_PREFLIGHT,
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
     ])
   })
@@ -669,7 +671,9 @@ describe('the pairing row', () => {
     })
     expect(printed[0]).toContain('do not open the (LAN: …) link on the dsh web line')
     expect(printed[1]).toBe(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
-    expect(printed[2]).toBe(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+    expect(printed[2]).toBe(TOKEN_FREE_PREFLIGHT)
+    expect(printed[2]).not.toContain(LAUNCH_TOKEN)
+    expect(printed[3]).toBe(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
   })
 
   it('pairs over the likeliest address, and offers a link for each other one a phone could share', async () => {
@@ -679,7 +683,9 @@ describe('the pairing row', () => {
     })
     // Never present a token-bearing primary or alternative before the identity check.
     expect(printed[1]).toBe(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
-    expect(printed.slice(2, 4)).toEqual([
+    expect(printed[2]).toBe(TOKEN_FREE_PREFLIGHT)
+    expect(printed[2]).not.toContain(LAUNCH_TOKEN)
+    expect(printed.slice(3, 5)).toEqual([
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
       `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
     ])

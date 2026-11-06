@@ -515,6 +515,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     // Put the certificate identity before every token-bearing link; the user
     // must compare it on the phone before accepting the self-signed TLS peer.
     console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
+    // A QR code is a bearer credential. A phone must inspect the listener's
+    // certificate through a separate, token-free visit before it sends that
+    // credential. Include the actual address; other interfaces need the same
+    // preflight at their own HTTPS root, not at an unreachable primary IP.
+    console.log(`lanyard: FIRST visit https://${lanAddress}:${String(reachable)}/ on the phone without a token and verify the FULL SHA-256 fingerprint above; for another network, check that link's token-free HTTPS root first. If verification or trust is unavailable, do NOT scan or open a pairing link`)
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.

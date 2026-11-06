@@ -4,7 +4,7 @@
 
 用手机打开 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 Web 界面。
 
-`dsh` 照常在电脑上跑，手机扫一下二维码，界面就在那儿了：走自己家的网络，全程 TLS 加密。网络里的其他设备过不了 dsh 的登录这一关；电脑本机的浏览器标签页，地址也和原来一模一样。
+`dsh` 照常在电脑上运行，明确指定可信局域网地址，**先在手机上核验 HTTPS 证书，确认可信后再扫配对二维码**，就能通过自己家的网络使用界面，全程 TLS 加密。网络里的其他设备过不了 dsh 的登录这一关；电脑本机的浏览器标签页，地址也和原来一模一样。
 
 这个插件只干这一件事。它不是网关，不是反向代理，也不能让你从外网连回自己的机器。
 
@@ -85,6 +85,7 @@ Lanyard 用同目录的排他锁目录（`cert.pem.lanyard-lock` 和 `key.pem.la
 ```
 lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token
 lanyard: the phone should show certificate SHA-256 7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3 — if it ever shows another, do not continue
+lanyard: FIRST visit https://192.168.1.5:3443/ on the phone without a token and verify the FULL SHA-256 fingerprint above; for another network, check that link's token-free HTTPS root first. If verification or trust is unavailable, do NOT scan or open a pairing link
 lanyard: pair a device by opening https://192.168.1.5:3443/?token=<launch token> once
 lanyard: or scan this with the phone
 ```

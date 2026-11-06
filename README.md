@@ -4,7 +4,7 @@ English | [简体中文](README.zh.md)
 
 Open the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web GUI on your phone.
 
-Run `dsh` on your machine as usual, scan one code with the phone, and the GUI is there — on your own network, over TLS. Nothing else on the network gets past dsh's sign-in, and the machine's own browser tab keeps the address it always had.
+Run `dsh` on your machine, explicitly enable your trusted-LAN address, and **verify the phone's HTTPS certificate before scanning the pairing QR code**. Then the GUI is there — on your own network, over TLS. Nothing else on the network gets past dsh's sign-in, and the machine's own browser tab keeps the address it always had.
 
 That is all this does. It is not a gateway, not a reverse proxy, and not a way to reach your machine from outside your own network.
 
@@ -85,6 +85,7 @@ This machine keeps its usual `http://127.0.0.1:3080`, and devices on the network
 ```
 lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token
 lanyard: the phone should show certificate SHA-256 7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3 — if it ever shows another, do not continue
+lanyard: FIRST visit https://192.168.1.5:3443/ on the phone without a token and verify the FULL SHA-256 fingerprint above; for another network, check that link's token-free HTTPS root first. If verification or trust is unavailable, do NOT scan or open a pairing link
 lanyard: pair a device by opening https://192.168.1.5:3443/?token=<launch token> once
 lanyard: or scan this with the phone
 ```
