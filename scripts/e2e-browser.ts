@@ -20,8 +20,8 @@
  * so the suite runs there without downloading a second browser.
  */
 
-import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -118,13 +118,38 @@ async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promi
  * hidden -> visible on the CI browser; here that context visits the REAL DSH.
  *
  * Own one disposable Chrome process/profile per call. CDP is localhost-only;
- * CI's native launch defaults to --no-sandbox. With an explicit sandbox
- * requirement, both browser launches must demand sandboxing or fail. Test-only
- * certificate exceptions still use the verified DSH certificate's SPKI.
- * This alone is NOT protected-browser or physical-phone acceptance.
+ * CI's native launch defaults to --no-sandbox with a narrowly scoped SPKI
+ * exception. Required sandbox mode instead imports the verified live DSH PEM
+ * into a disposable NSS trust database, and uses NO certificate-error bypass.
+ * The managed Chromium suite retains the separately scoped SPKI exception.
+ * This is real native-browser trust acceptance, not a physical phone test.
  */
-async function withNativePhoneTab(tlsSpkiArg: string, run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
+async function withNativePhoneTab(tlsSpkiArg: string, deployedPem: string, run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-dsh-native-tab-'))
+  // Never import the certificate into a runner's or developer's normal trust
+  // store. Chrome inherits only this throwaway HOME, removed after it exits.
+  let browserEnv: NodeJS.ProcessEnv | undefined
+  try {
+    if (sandboxLaunch.chromiumSandbox) {
+      const nss = join(profile, '.pki', 'nssdb')
+      const deployed = join(profile, 'verified-dsh.pem')
+      mkdirSync(nss, { recursive: true, mode: 0o700 })
+      writeFileSync(deployed, deployedPem, { mode: 0o600 })
+      execFileSync('certutil', ['-N', '--empty-password', '-d', `sql:${nss}`], { timeout: 10_000, stdio: 'ignore' })
+      execFileSync('certutil', [
+        '-A', '-d', `sql:${nss}`, '-n', 'lanyard-dsh-test-only', '-t', 'C,,', '-i', deployed,
+      ], { timeout: 10_000, stdio: 'ignore' })
+      browserEnv = {
+        ...process.env, HOME: profile,
+        XDG_CONFIG_HOME: join(profile, '.config'),
+        XDG_CACHE_HOME: join(profile, '.cache'),
+      }
+      console.log('lanyard e2e: native Chromium uses isolated NSS DSH certificate trust, without a certificate exception')
+    }
+  } catch (error) {
+    await rm(profile, { recursive: true, force: true })
+    throw new Error('native DSH browser certificate trust setup failed (certutil/NSS required)', { cause: error })
+  }
   const owned = spawn(process.env.LANYARD_CHROMIUM ?? chromium.executablePath(), [
     ...sandboxLaunch.nativeArgs,
     `--user-data-dir=${profile}`,
@@ -132,8 +157,8 @@ async function withNativePhoneTab(tlsSpkiArg: string, run: (page: Page, context:
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--no-proxy-server',
-    tlsSpkiArg, 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    ...sandboxLaunch.chromiumSandbox ? [] : [tlsSpkiArg], 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'pipe'], ...browserEnv === undefined ? {} : { env: browserEnv } })
   let launchError: Error | undefined
   let spawned = false
   owned.once('spawn', () => { spawned = true })
@@ -819,7 +844,7 @@ try {
       // Pair a separate native default-context mobile tab with this SAME live
       // Host and prove the lifecycle there; do not fake visibility or count the
       // empty-page diagnostic as a product test.
-      await withNativePhoneTab(tlsSpkiArg, async (nativePage, nativeContext) => {
+      await withNativePhoneTab(tlsSpkiArg, ca, async (nativePage, nativeContext) => {
         const sessionReply = nativePage.waitForResponse(
           response => new URL(response.url()).pathname === '/api/session/list')
         const nativeLanding = await nativePage.goto(pairingLink, { waitUntil: 'domcontentloaded' })
