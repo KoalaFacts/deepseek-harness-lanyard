@@ -80,7 +80,7 @@ interface WebOptions {
 export function webCommand(): Command {
   return new Command()
     .name('dsh --profile web')
-    .description('Serve the DeepSeek Harness browser UI (lanyard: use --host with your LAN IPv4 to pair a phone over TLS).')
+    .description('Serve the DeepSeek Harness browser UI (lanyard: bind your LAN IPv4 and verify phone TLS identity before pairing).')
     .helpOption('-h, --help', 'show this help')
     .option('--host <host>', 'bind host; use this computer\'s assigned LAN IPv4 on the 0.2.1 line (legacy 0.2.0 also accepts 0.0.0.0)')
     .option('--no-open', 'do not open the Web UI in the default browser')
@@ -94,10 +94,16 @@ export function webCommand(): Command {
     .addHelpText('after', `
 Examples:
   dsh --profile web                          serve this machine only, on the composed port
-  dsh --profile web --host 192.168.1.5       serve this LAN interface over TLS; scan the QR code with a phone
+  dsh --profile web --host 192.168.1.5       serve this LAN interface over TLS; verify the certificate fingerprint before scanning the QR code
   dsh --profile web --host 192.168.1.5 --network-port 8443
                                              serve this LAN interface on another TLS port
   dsh --profile web --no-open                serve without opening a browser
+
+Phone pairing:
+  Open the printed token-free HTTPS address on the phone first.
+  Verify the complete SHA-256 certificate fingerprint before opening
+  any token-bearing link or scanning the QR code.
+  If you cannot verify and trust the certificate, do not pair.
 `)
 }
 

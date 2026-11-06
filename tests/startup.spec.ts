@@ -164,6 +164,10 @@ describe('the lanyard web command line', () => {
     expect(help).toContain('legacy 0.2.0 also accepts 0.0.0.0')
     expect(help).toContain('dsh --profile web --host 192.168.1.5')
     expect(help).toContain('dsh --profile web --host 192.168.1.5 --network-port 8443')
+    // The CLI must not invite bearer-token QR use before TLS peer verification.
+    expect(help).toContain('Open the printed token-free HTTPS address on the phone first.')
+    expect(help).toContain('Verify the complete SHA-256 certificate fingerprint before opening any token-bearing link or scanning the QR code.')
+    expect(help).toContain('If you cannot verify and trust the certificate, do not pair.')
     // The default the help names is the one the carrier applies.
     expect(help).toContain(`(default ${String(DEFAULT_NETWORK_PORT)})`)
   })
