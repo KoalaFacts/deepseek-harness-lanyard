@@ -147,6 +147,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - id: chromium
         run: npx playwright install --with-deps chromium
+      # Required-mode native E2E imports only the checked DSH self-signed PEM
+      # into a disposable NSS database, not the runner's normal trust store.
+      - name: Install NSS certificate database tools for native trust acceptance
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
       - name: Diagnose native tab visibility without business state
         run: xvfb-run -a node scripts/probe-native-visibility.mjs .
       - name: Full browser product gate
