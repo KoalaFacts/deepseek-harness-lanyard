@@ -45,7 +45,11 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Release verification must repeat CI's protected-browser trust gate.
+    # Ubuntu 24.04's AppArmor policy can block Chromium's user namespace.
+    runs-on: ubuntu-22.04
+    env:
+      LANYARD_CHROMIUM_SANDBOX: required
     # The legs run serially here where ci.yml runs them as parallel jobs, so the
     # budget has to exceed the sum of what CI allows rather than sit under it.
     timeout-minutes: 45
@@ -174,6 +178,10 @@ jobs:
       - run: npm run check
       - run: npm run test:e2e
       - run: npx playwright install --with-deps chromium
+      # Required mode trusts only the validated DSH certificate in temporary
+      # browser NSS databases, never via certificate-error exceptions.
+      - name: Install NSS tools for protected Chromium certificate trust
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
       - run: xvfb-run -a npm run test:e2e:browser
 
       # `publish` installs nothing, so the build it uploads is the one this gate

@@ -21,6 +21,8 @@ interface WorkflowStep {
 }
 
 interface WorkflowJob {
+  'runs-on'?: string
+  env?: Record<string, string>
   if?: string
   needs?: string
   environment?: string
@@ -41,6 +43,25 @@ const git = (cwd: string, ...args: string[]): string => execFileSync('git', args
 }).trim()
 
 describe('publish-npm commit identity', () => {
+  it('requires protected Chromium and scoped NSS trust before publication', () => {
+    // The published tag is verified again, not only the old PR merge SHA.
+    // A green developer-default browser run with certificate exceptions is
+    // not equivalent to CI's sandboxed, exception-free phone TLS acceptance.
+    expect(jobs.verify['runs-on']).toBe('ubuntu-22.04')
+    expect(jobs.verify.env?.LANYARD_CHROMIUM_SANDBOX).toBe('required')
+    const nssIndex = jobs.verify.steps.findIndex(step =>
+      step.run?.includes('apt-get install -y libnss3-tools'))
+    const browserIndex = jobs.verify.steps.findIndex(step =>
+      step.run?.includes('npm run test:e2e:browser'))
+    expect(nssIndex).toBeGreaterThan(-1)
+    expect(browserIndex).toBeGreaterThan(nssIndex)
+    expect(jobs.verify.steps[browserIndex]?.run).toContain('xvfb-run -a')
+    // Only verify runs unpinned DSH/Chromium; the OIDC publish job remains
+    // separate and must never inherit a dependency-install/browser step.
+    expect(jobs.publish.steps.some(step =>
+      step.run?.includes('npm run test:e2e:browser') || step.run?.includes('libnss3-tools'))).toBe(false)
+  })
+
   it('pins real publication to the verified SHA and keeps dry runs out of production', () => {
     const pin = jobs.verify.steps.find(step => step.id === 'pin')
     expect(pin?.run).toContain('tag_sha=$TAG_SHA')
