@@ -1,4 +1,6 @@
 // Standalone diagnostic; NOT a product E2E and NOT run on the blocked local browser.
+// Match the real browser E2E sandbox mode: required must not silently run this
+// preflight with --no-sandbox while claiming that the runner is protected.
 // Usage in an already-authorized protected browser runner:
 //   xvfb-run -a node scripts/probe-native-visibility.mjs /path/to/repository
 import assert from 'node:assert/strict'
@@ -7,10 +9,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
+import { browserSandboxPolicy } from './browser-sandbox.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 
 assert(process.argv[2], 'supply the repository containing installed pinned Playwright')
 const { chromium } = createRequire(resolve(process.argv[2], 'package.json'))('playwright')
+const sandboxLaunch = browserSandboxPolicy(process.env.LANYARD_CHROMIUM_SANDBOX)
 
 // Cancel a winning race's unused timeout; otherwise this diagnostic can keep
 // the Node process alive after Chromium is gone.
@@ -27,13 +31,11 @@ async function settleWithin(work, ms, fallback) {
 
 async function probe(noDefaults) {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-visibility-'))
-  // This isolated, blank-page diagnostic needs the same test-runner sandbox
-  // exemption used by Playwright's managed Chromium on GitHub-hosted Linux,
-  // where unprivileged namespaces are unavailable. It has no DSH, secrets,
-  // LAN listener, certificates or external navigation; runtime TLS/auth/pins
-  // and the separate real-DSH browser gate are not affected.
+  // Default CI preserves the current no-sandbox fixture; explicit required
+  // mode instead removes that exemption and must fail on unsupported hosts.
+  // This is only a blank-page diagnostic, not protected DSH acceptance.
   const child = spawn(chromium.executablePath(), [
-    '--no-sandbox',
+    ...sandboxLaunch.nativeArgs,
     `--user-data-dir=${profile}`, '--remote-debugging-port=0',
     '--remote-debugging-address=127.0.0.1', '--no-first-run',
     '--no-default-browser-check', '--disable-background-networking', 'about:blank',
