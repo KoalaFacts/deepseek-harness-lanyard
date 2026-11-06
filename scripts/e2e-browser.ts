@@ -111,6 +111,29 @@ async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promi
 }
 
 /**
+ * Configure a disposable HOME-scoped NSS trust database for Chromium.
+ * The PEM was already matched against the actual DSH pairing fingerprint and
+ * LAN IP by scopedBrowserCertificateArg. Never modify ordinary user trust.
+ * Both the managed and native required-sandbox browsers must fail closed if
+ * the verified server certificate cannot be imported.
+ */
+function isolatedChromiumTrust(profile: string, deployedPem: string): NodeJS.ProcessEnv {
+  const nss = join(profile, '.pki', 'nssdb')
+  const deployed = join(profile, 'verified-dsh.pem')
+  mkdirSync(nss, { recursive: true, mode: 0o700 })
+  writeFileSync(deployed, deployedPem, { mode: 0o600 })
+  execFileSync('certutil', ['-N', '--empty-password', '-d', `sql:${nss}`], { timeout: 10_000, stdio: 'ignore' })
+  execFileSync('certutil', [
+    '-A', '-d', `sql:${nss}`, '-n', 'lanyard-dsh-test-only', '-t', 'P,,', '-i', deployed,
+  ], { timeout: 10_000, stdio: 'ignore' })
+  return {
+    ...process.env, HOME: profile,
+    XDG_CONFIG_HOME: join(profile, '.config'),
+    XDG_CACHE_HOME: join(profile, '.cache'),
+  }
+}
+
+/**
  * Real background/foreground tab lifecycle needs a native Chromium default
  * context. Playwright-managed contexts force tabs to report focus even when
  * their CDP focus-emulation setting is later disabled. The separate blank-page
@@ -118,11 +141,10 @@ async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promi
  * hidden -> visible on the CI browser; here that context visits the REAL DSH.
  *
  * Own one disposable Chrome process/profile per call. CDP is localhost-only;
- * CI's native launch defaults to --no-sandbox with a narrowly scoped SPKI
+ * A developer's default launch uses --no-sandbox with a narrowly scoped SPKI
  * exception. Required sandbox mode instead imports the verified live DSH PEM
- * into a disposable NSS trust database, and uses NO certificate-error bypass.
- * The managed Chromium suite retains the separately scoped SPKI exception.
- * This is real native-browser trust acceptance, not a physical phone test.
+ * into an isolated NSS database for BOTH browser processes, without any
+ * certificate-error bypass. This is not a physical phone test.
  */
 async function withNativePhoneTab(tlsSpkiArg: string, deployedPem: string, run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-dsh-native-tab-'))
@@ -131,19 +153,7 @@ async function withNativePhoneTab(tlsSpkiArg: string, deployedPem: string, run: 
   let browserEnv: NodeJS.ProcessEnv | undefined
   try {
     if (sandboxLaunch.chromiumSandbox) {
-      const nss = join(profile, '.pki', 'nssdb')
-      const deployed = join(profile, 'verified-dsh.pem')
-      mkdirSync(nss, { recursive: true, mode: 0o700 })
-      writeFileSync(deployed, deployedPem, { mode: 0o600 })
-      execFileSync('certutil', ['-N', '--empty-password', '-d', `sql:${nss}`], { timeout: 10_000, stdio: 'ignore' })
-      execFileSync('certutil', [
-        '-A', '-d', `sql:${nss}`, '-n', 'lanyard-dsh-test-only', '-t', 'P,,', '-i', deployed,
-      ], { timeout: 10_000, stdio: 'ignore' })
-      browserEnv = {
-        ...process.env, HOME: profile,
-        XDG_CONFIG_HOME: join(profile, '.config'),
-        XDG_CACHE_HOME: join(profile, '.cache'),
-      }
+      browserEnv = isolatedChromiumTrust(profile, deployedPem)
       console.log('lanyard e2e: native Chromium uses isolated NSS DSH certificate trust, without a certificate exception')
     }
   } catch (error) {
@@ -530,24 +540,39 @@ try {
   const origin = `https://${lan}:${String(port)}`
   const executablePath = process.env.LANYARD_CHROMIUM
   // Match the deployed PEM against the printed fingerprint and its bound IP.
-  // Only this certificate public key may receive a browser test exception.
+  // Default-mode browsers may use its scoped SPKI exception. Required mode
+  // must instead trust the checked PEM in a disposable, separate NSS database.
   const tlsSpkiArg = scopedBrowserCertificateArg(ca, fingerprint, lan)
-  // The certificate is self-signed by design; a real device accepts it once.
-  const browser = await chromium.launch({
-    // Real tab visibility transitions require the headed browser. Linux CI
-    // supplies a virtual display; do not simulate document.visibilityState.
-    headless: false,
-    // Playwright defaults to disabling Chromium's sandbox unless requested.
-    chromiumSandbox: sandboxLaunch.chromiumSandbox,
-    // The deployment under test is on this machine's own LAN address. An
-    // ambient HTTP(S)_PROXY — normal in a container — would send the
-    // navigation through it and the connection is reset.
-    args: ['--no-proxy-server', tlsSpkiArg],
-    ...executablePath === undefined ? {} : { executablePath },
-  })
+  // In required-sandbox mode the managed browser must use verified, isolated
+  // certificate trust too, not a scoped TLS error exception. The separate HOME
+  // is discarded even when the Chromium launch itself fails.
+  let managedTrustHome: string | undefined
+  let browser: Browser
+  try {
+    if (sandboxLaunch.chromiumSandbox) {
+      managedTrustHome = await mkdtemp(join(tmpdir(), 'lanyard-dsh-managed-trust-'))
+    }
+    const managedEnv = managedTrustHome === undefined
+      ? undefined
+      : isolatedChromiumTrust(managedTrustHome, ca)
+    browser = await chromium.launch({
+      // Real tab visibility transitions require the headed browser. Linux CI
+      // supplies a virtual display; do not simulate document.visibilityState.
+      headless: false,
+      chromiumSandbox: sandboxLaunch.chromiumSandbox,
+      // Never send the local LAN URL through an ambient HTTP(S)_PROXY.
+      args: ['--no-proxy-server', ...(managedEnv ? [] : [tlsSpkiArg])],
+      ...(managedEnv ? { env: managedEnv } : {}),
+      ...(executablePath === undefined ? {} : { executablePath }),
+    })
+    if (managedEnv) console.log('lanyard e2e: managed Chromium uses isolated NSS DSH certificate trust, without a certificate exception')
+  } catch (error) {
+    if (managedTrustHome) await rm(managedTrustHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    throw error
+  }
   try {
     // The required-mode CI must observe actual sandbox mechanisms, not only
-    // chromiumSandbox: true. Keep this separate from TLS/SPKI trust checking.
+    // chromiumSandbox: true. Keep this separate from TLS/NSS trust checking.
     if (sandboxLaunch.chromiumSandbox) {
       const sandboxContext = await browser.newContext()
       try { await assertActualChromiumSandbox(sandboxContext) }
@@ -568,7 +593,8 @@ try {
     })
 
     // ---- a device that has never paired ----
-    // Only DSH's current certificate key has a scoped test exception.
+    // In default mode only DSH's current key has an exception; in required
+    // mode the isolated NSS store trusts the verified DSH certificate.
     const cold = await browser.newContext()
     const coldPage = await cold.newPage()
     const coldLanding = await coldPage.goto(origin, { waitUntil: 'domcontentloaded' })
@@ -1907,7 +1933,12 @@ try {
       pageRefused(hostileRpcs.history), true)
     await hostile.close()
   } finally {
-    await browser.close()
+    try { await browser.close() }
+    finally {
+      if (managedTrustHome) {
+        await rm(managedTrustHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+      }
+    }
   }
   }, {
     // Per-process CLI overlay: the shipped plugin and LAN admission rules are
