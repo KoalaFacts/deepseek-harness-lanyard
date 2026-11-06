@@ -137,7 +137,7 @@ async function withNativePhoneTab(tlsSpkiArg: string, deployedPem: string, run: 
       writeFileSync(deployed, deployedPem, { mode: 0o600 })
       execFileSync('certutil', ['-N', '--empty-password', '-d', `sql:${nss}`], { timeout: 10_000, stdio: 'ignore' })
       execFileSync('certutil', [
-        '-A', '-d', `sql:${nss}`, '-n', 'lanyard-dsh-test-only', '-t', 'C,,', '-i', deployed,
+        '-A', '-d', `sql:${nss}`, '-n', 'lanyard-dsh-test-only', '-t', 'P,,', '-i', deployed,
       ], { timeout: 10_000, stdio: 'ignore' })
       browserEnv = {
         ...process.env, HOME: profile,
