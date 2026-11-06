@@ -41,6 +41,7 @@ describe('pairingLink', () => {
     ['userinfo', (base: string) => base.replace('://', '://user@') + `?token=${LAUNCH_TOKEN}`],
     ['different path', (base: string) => base + `redirect/?token=${LAUNCH_TOKEN}`],
     ['fragment', (base: string) => base + `?token=${LAUNCH_TOKEN}#redirect`],
+    ['empty fragment', (base: string) => base + `?token=${LAUNCH_TOKEN}#`],
     ['extra query', (base: string) => base + `?token=${LAUNCH_TOKEN}&next=https://example.invalid`],
     ['duplicate token', (base: string) => base + `?token=${LAUNCH_TOKEN}&token=other`],
     ['empty token', (base: string) => base + '?token='],

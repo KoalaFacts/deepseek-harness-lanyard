@@ -136,9 +136,11 @@ export function pairingLink(
   // also excludes redirects, fragments and control characters in printed logs.
   try {
     const parsed = new URL(link)
+    // URL.hash is empty even for a trailing bare '#'. Refuse the delimiter
+    // itself, so an upstream contract drift never prints a fragment-bearing link.
     if (parsed.href !== link || parsed.origin !== new URL(baseUrl).origin
       || parsed.pathname !== '/' || parsed.username !== '' || parsed.password !== ''
-      || parsed.hash !== '' || parsed.searchParams.size !== 1
+      || link.includes('#') || parsed.searchParams.size !== 1
       || !parsed.searchParams.get('token')) return undefined
   } catch {
     return undefined
