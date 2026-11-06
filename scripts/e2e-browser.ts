@@ -27,6 +27,7 @@ import { createServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
 import { generate } from 'selfsigned'
 import { scopedBrowserCertificateArg } from './scoped-browser-tls.ts'
+import { browserSandboxPolicy } from './browser-sandbox.ts'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { hasNoPluginEntries, hasPluginListEntries } from './tool-result-assertions.ts'
@@ -35,6 +36,7 @@ import type { Browser, BrowserContext, BrowserType, Page, Response } from 'playw
 import { recorder, requireLan, withDshDeployment } from './dsh-harness.ts'
 import { REFUSAL_BODY } from '../src/webserver.ts'
 
+const sandboxLaunch = browserSandboxPolicy(process.env.LANYARD_CHROMIUM_SANDBOX)
 const lan = requireLan()
 const { check, report } = recorder()
 
@@ -115,14 +117,15 @@ async function settleWithin<T>(work: Promise<T>, ms: number, fallback: T): Promi
  * hidden -> visible on the CI browser; here that context visits the REAL DSH.
  *
  * Own one disposable Chrome process/profile per call. CDP is localhost-only;
- * CI's native launch still uses --no-sandbox; certificate exceptions are now
- * restricted to the verified DSH certificate's SPKI rather than every TLS peer.
- * This is NOT protected-browser or physical-phone acceptance.
+ * CI's native launch defaults to --no-sandbox. With an explicit sandbox
+ * requirement, both browser launches must demand sandboxing or fail. Test-only
+ * certificate exceptions still use the verified DSH certificate's SPKI.
+ * This alone is NOT protected-browser or physical-phone acceptance.
  */
 async function withNativePhoneTab(tlsSpkiArg: string, run: (page: Page, context: BrowserContext) => Promise<void>): Promise<void> {
   const profile = await mkdtemp(join(tmpdir(), 'lanyard-dsh-native-tab-'))
   const owned = spawn(process.env.LANYARD_CHROMIUM ?? chromium.executablePath(), [
-    '--no-sandbox',
+    ...sandboxLaunch.nativeArgs,
     `--user-data-dir=${profile}`,
     '--remote-debugging-port=0',
     '--remote-debugging-address=127.0.0.1',
@@ -507,6 +510,8 @@ try {
     // Real tab visibility transitions require the headed browser. Linux CI
     // supplies a virtual display; do not simulate document.visibilityState.
     headless: false,
+    // Playwright defaults to disabling Chromium's sandbox unless requested.
+    chromiumSandbox: sandboxLaunch.chromiumSandbox,
     // The deployment under test is on this machine's own LAN address. An
     // ambient HTTP(S)_PROXY — normal in a container — would send the
     // navigation through it and the connection is reset.
