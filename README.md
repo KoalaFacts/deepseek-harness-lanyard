@@ -62,7 +62,7 @@ If you cannot build the source locally, open a **successful `main` run** of the 
 
 These artifacts exist **only for main pushes**, expire after seven days, and are **not an npm release, a signed provenance statement, or proof of a physical phone test**. A checksum packaged in the same ZIP detects accidental changes but does not independently authenticate its origin; confirm the workflow and commit on GitHub. Installing still leaves networking off until you explicitly start dsh with `--host <your assigned LAN IPv4>`.
 
-Or, where the web sidebar has a **Plugins** page, install it there by the same name; it is listed as *Lanyard — phone access*.
+Only after npm publishes a working Lanyard release (not the `0.0.0` placeholder) can you install it by package name from the web sidebar's **Plugins** page, where it is listed as *Lanyard — phone access*. Until then, use the local tarball or a verified `main` CI candidate above; do **not** install the placeholder through the Plugins page.
 
 Installing changes nothing on its own: dsh goes on serving this machine only. Serving your network is a choice you make each time you start it:
 
