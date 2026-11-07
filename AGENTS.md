@@ -314,6 +314,8 @@ Leaving `dry_run` ticked (the default) runs the entire gate and stops short: no 
 
 The two gates are deliberately asymmetric. **release** runs `check` only: what it produces ships nothing on its own, and publish-npm re-gates the same tree before anything reaches the registry, so running the e2e legs in both would be forty-five minutes proving the same thing twice in the documented flow. It is not skipped entirely because the Release it creates is effectively immutable, and announcing a version built from a tree that does not typecheck is not a thing to undo.
 
+**Older-tag safety floor:** `publish-npm` runs the browser script from the selected **tag**, not from current `main`. Setting `LANYARD_CHROMIUM_SANDBOX=required` in the workflow does not make an old tagged script honour Chromium sandboxing or temporary NSS certificate trust. The unprivileged verify job therefore refuses a tag whose browser script predates the required-mode sandbox/Chromium-owned attestation and scoped NSS trust implementation (or retains blanket `ignoreHTTPSErrors: true`), *before* dependency install or any credential-bearing publication. This source preflight only excludes unsupported old tags: the real protected browser run remains the acceptance test. Cut a new reviewed release commit instead of reusing or retagging an older unsafe tag.
+
 **publish-npm** runs all four layers, because it is the one that ships. A tag is an intent to release, not evidence the tree still works, and since nothing pins `dsh`, a tag cut last week can fail against today's upstream — the failure only time can introduce, and the reason this gate is not the redundant one. A SKIPPED e2e blocks the publish rather than passing.
 
 ### One-time setup, which the workflows cannot do for themselves

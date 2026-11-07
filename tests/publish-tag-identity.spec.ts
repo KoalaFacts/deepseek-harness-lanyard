@@ -4,7 +4,7 @@
  * both an extra commit on main and a tag force-move are deliberately realistic.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,6 +43,50 @@ const git = (cwd: string, ...args: string[]): string => execFileSync('git', args
 }).trim()
 
 describe('publish-npm commit identity', () => {
+  it('refuses old tagged browser scripts before the real DSH gate or any publishing credential', () => {
+    const guardIndex = jobs.verify.steps.findIndex(step =>
+      step.name === 'Refuse tag scripts predating protected Chromium acceptance')
+    const tagCheckoutIndex = jobs.verify.steps.findIndex(step =>
+      step.uses?.startsWith('actions/checkout@') && step.with?.ref?.includes('refs/tags/'))
+    const installIndex = jobs.verify.steps.findIndex(step => step.run?.includes('pnpm install --frozen-lockfile'))
+    expect(tagCheckoutIndex).toBeGreaterThan(-1)
+    expect(guardIndex).toBeGreaterThan(tagCheckoutIndex)
+    expect(guardIndex).toBeLessThan(installIndex)
+    const guard = jobs.verify.steps[guardIndex]?.run
+    expect(guard).toBeTruthy()
+
+    const current = readFileSync(fileURLToPath(new URL('../scripts/e2e-browser.ts', import.meta.url)), 'utf8')
+    const markers = [
+      'browserSandboxPolicy(process.env.LANYARD_CHROMIUM_SANDBOX)',
+      'chromiumSandbox: sandboxLaunch.chromiumSandbox',
+      'assertActualChromiumSandbox(',
+      'isolatedChromiumTrust(',
+    ]
+    const root = mkdtempSync(join(tmpdir(), 'lanyard-release-browser-floor-'))
+    try {
+      mkdirSync(join(root, 'scripts'))
+      const path = join(root, 'scripts', 'e2e-browser.ts')
+      const runGuard = () => spawnSync('bash', ['-c', guard!], {
+        cwd: root, encoding: 'utf8',
+      })
+      // A tag with the currently tested browser script can reach the actual
+      // sandbox/NSS test; this source preflight alone does not assert success.
+      writeFileSync(path, current)
+      expect(runGuard().status).toBe(0)
+      // Pre-attestation tags and damaged acceptance scripts fail before install.
+      writeFileSync(path, 'const context = await browser.newContext({ ignoreHTTPSErrors: true })\n')
+      expect(runGuard().status).not.toBe(0)
+      for (const marker of markers) {
+        expect(current).toContain(marker)
+        writeFileSync(path, current.split(marker).join('BROKEN_PROTECTED_BROWSER_CONTRACT'))
+        expect(runGuard().status).not.toBe(0)
+      }
+      writeFileSync(path, `${current}\n// ignoreHTTPSErrors: true\n`)
+      expect(runGuard().status).not.toBe(0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
   it('requires protected Chromium and scoped NSS trust before publication', () => {
     // The published tag is verified again, not only the old PR merge SHA.
     // A green developer-default browser run with certificate exceptions is
