@@ -565,7 +565,19 @@ async function serveFetchResource(req: IncomingMessage, res: ServerResponse, res
   const onClose = (): void => { if (!res.writableEnded) abort.abort() }
   res.on('close', onClose)
   try {
-    const answer = await resource(new Request(new URL(req.url ?? '/', 'http://x'), {
+    // A Fetch resource may resolve relative links against request.url. The
+    // previous synthetic http://x origin did not describe either listener and
+    // could make a TLS response generate an unusable HTTP absolute URL.
+    // Use the actual socket's local address/port, never the untrusted Host
+    // header or an absolute-form request target supplied by the client.
+    const localAddress = req.socket.localAddress ?? '127.0.0.1'
+    const socketHost = isIP(localAddress) === 6 ? `[${localAddress}]` : localAddress
+    const socketPort = req.socket.localPort
+    const origin = new URL(`${overTls(req) ? 'https' : 'http'}://${socketHost}${socketPort === undefined ? '' : `:${socketPort}`}/`)
+    const target = new URL(req.url ?? '/', 'http://x')
+    origin.pathname = target.pathname
+    origin.search = target.search
+    const answer = await resource(new Request(origin, {
       method: req.method, headers, signal: abort.signal,
     }))
     const outgoing: OutgoingHttpHeaders = Object.fromEntries(answer.headers)

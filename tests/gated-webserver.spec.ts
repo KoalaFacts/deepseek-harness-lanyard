@@ -222,6 +222,32 @@ describe('GatedWebServer', () => {
     expect(await completed).toBe('streamed')
   })
 
+  it('forwards the real socket origin to Fetch resources on HTTPS and local HTTP', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const observed: string[] = []
+    server.register({
+      kind: 'exact', path: '/resource-origin',
+      resource: async request => {
+        observed.push(request.url)
+        return new Response('ok')
+      },
+    })
+    const path = '/resource-origin?view=mobile'
+    // A client can invent Host, but that does not change the actual TLS
+    // listener's origin delivered to a Fetch resource.
+    expect((await get('127.0.0.1', server.networkPort, path, { host: 'attacker.invalid' }, ca)).status).toBe(200)
+    expect(await plainGet('127.0.0.1', server.port, path)).toBe(200)
+    expect(observed).toEqual([
+      `https://127.0.0.1:${server.networkPort}${path}`,
+      `http://127.0.0.1:${server.port}${path}`,
+    ])
+  })
+
   it('aborts a failed HTTP Fetch resource after upstream handles its error', async () => {
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
