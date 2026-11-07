@@ -73,6 +73,7 @@ describe('the lanyard web command line', () => {
     'https://dsh.example/文档/📱/',
     'https://dsh.example/العربية/',
     'https://dsh.example/caf%C3%A9/',
+    'https://dsh.example/a%C2%ADb/',
     'https://dsh.example/👩‍💻/',
     'https://dsh.example//',
     'http://localhost:3080/',
@@ -106,6 +107,7 @@ describe('the lanyard web command line', () => {
     ['line separator', '\u2028'],
     ['ideographic space', '\u3000'],
     ['byte-order mark', '\uFEFF'],
+    ['soft hyphen', '\u00AD'],
     ['zero-width space', '\u200B'],
     ['word joiner', '\u2060'],
     ['Arabic letter mark', '\u061C'],
@@ -114,7 +116,7 @@ describe('the lanyard web command line', () => {
     ['right-to-left override', '\u202E'],
     ['left-to-right isolate', '\u2066'],
     ['pop directional isolate', '\u2069'],
-  ])('refuses raw Unicode whitespace, invisible separators or bidi controls in --public-url (%s)', (_label, whitespace) => {
+  ])('refuses raw Unicode whitespace, invisible formatting or bidi controls in --public-url (%s)', (_label, whitespace) => {
     expect(String(parse(['--public-url', `https://dsh.example/café/a${whitespace}b/`])))
       .toContain('--public-url must be an absolute HTTP(S) root')
   })
