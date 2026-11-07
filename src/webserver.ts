@@ -970,8 +970,15 @@ export class GatedWebServer extends WebServer {
       // (or let an unparsable target use the public fallback exemption).
       return false
     }
-    if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
     const decoded = decodedPathname(raw)
+    // A known loopback-only path stays private even if an upstream routing
+    // change sends it to a different named seat or the public SPA fallback.
+    // Compare the decoded spelling too: a future route owner may interpret
+    // percent-encoded separators before dispatching a desktop-only action.
+    if (this.loopbackOnlyPaths.some(path => raw === path || decoded === path)) {
+      return isLoopbackAddress(req.socket.remoteAddress)
+    }
+    if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
     // A pathname whose escapes do not decode, or whose opened name cannot be
     // pinned down, cannot be checked against the exclusions, so it never
     // rides the public exemption.

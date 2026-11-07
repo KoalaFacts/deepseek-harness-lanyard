@@ -18,6 +18,14 @@ const namedCase = 'never grants anonymous writes to an explicitly public named r
 const apiNamedCase = 'keeps API sessions and pins despite an explicitly public registrar'
 const apiFallbackCase = 'never grants anonymous fallback access to API endpoints after a routing change'
 const driftCase = 'keeps the shipped API pin when a configured prefix drifts'
+const pinnedFallbackCase = 'keeps loopback-only route pins even when a public fallback takes the request'
+const pinnedFallbackGuard = `    // A known loopback-only path stays private even if an upstream routing
+    // change sends it to a different named seat or the public SPA fallback.
+    // Compare the decoded spelling too: a future route owner may interpret
+    // percent-encoded separators before dispatching a desktop-only action.
+    if (this.loopbackOnlyPaths.some(path => raw === path || decoded === path)) {
+      return isLoopbackAddress(req.socket.remoteAddress)
+    }`
 const driftEndpointGuard = 'endpointOf(reading, DEFAULT_API_PATH_PREFIX)'
 const apiSeatGuard = "    if (routePath === this.apiPathPrefix || routePath.startsWith(`${this.apiPathPrefix}/`)) return 'gated'"
 const apiRequestGuard = " && !isApiRequest"
@@ -59,6 +67,7 @@ try {
   if (original.split(apiSeatGuard).length !== 2) throw new Error('API route posture guard anchor missing or ambiguous')
   if (original.split(apiRequestGuard).length !== 2) throw new Error('API request exception guard anchor missing or ambiguous')
   if (original.split(driftEndpointGuard).length !== 2) throw new Error('known API path fallback anchor missing or ambiguous')
+  if (original.split(pinnedFallbackGuard).length !== 2) throw new Error('loopback-only fallback pin anchor missing or ambiguous')
   run('baseline', false)
   // The shared permits() guard also protects the fallback. Remove both layers
   // in this mutant, or it still refuses anonymous writes for the correct reason.
@@ -78,6 +87,10 @@ try {
   run('api-fallback-baseline', false, apiFallbackCase)
   writeFileSync(sourcePath, original.replace(apiRequestGuard, ''))
   try { run('api-fallback-mutant', true, apiFallbackCase) }
+  finally { writeFileSync(sourcePath, original) }
+  run('pinned-fallback-baseline', false, pinnedFallbackCase)
+  writeFileSync(sourcePath, original.replace(pinnedFallbackGuard, ''))
+  try { run('pinned-fallback-mutant', true, pinnedFallbackCase) }
   finally { writeFileSync(sourcePath, original) }
   run('api-drift-baseline', false, driftCase, 'tests/policy-config.spec.ts')
   // Removing only the known-prefix endpoint pin must let a paired browser

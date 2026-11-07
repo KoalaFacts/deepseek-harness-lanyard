@@ -1156,6 +1156,25 @@ describe('the fallback seat', () => {
     expect(staticAsset.status).toBe(200)
   })
 
+  it('keeps loopback-only route pins even when a public fallback takes the request', async () => {
+    const handler = await gatedFallback()
+    // If upstream moves a desktop or dev route to the SPA fallback, neither
+    // an anonymous phone nor an authenticated phone may invoke that path.
+    for (const path of ['/plugins/events', '/open-in-app/open', '/open-in-app%2Fopen']) {
+      for (const headers of [{}, { cookie: SESSION }]) {
+        const denied = response()
+        await handler(req(path, '192.168.1.5', headers), denied)
+        expect([path, denied.status, denied.body]).toEqual([path, 403, REFUSAL_BODY])
+      }
+      const local = response()
+      await handler(req(path, '127.0.0.1'), local)
+      expect([path, local.status, local.body]).toEqual([path, 200, 'DIST'])
+    }
+    const ordinary = response()
+    await handler(req('/assets/index.js', '192.168.1.5'), ordinary)
+    expect([ordinary.status, ordinary.body]).toEqual([200, 'DIST'])
+  })
+
   it('requires a session for unsafe methods at the public fallback', async () => {
     const handler = await gatedFallback()
     // Pairing only needs anonymous GET; assets also allow HEAD.
