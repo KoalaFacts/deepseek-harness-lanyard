@@ -144,7 +144,7 @@ What stays at the machine is the GUI's configuration plane, and the network neve
 - **dsh's session is checked in front of every route**, not only the ones dsh guards itself, so a route whose owner forgets to check reaches no one on the network. If upstream's session checker, its property accessor, or the Cordis connection service lookup unexpectedly throws, the network request receives the same fixed refusal instead of a handler error or a secret-bearing diagnostic. The extra gate still exempts local loopback requests; none of these failures count as a successful network sign-in.
 - **The session cookie only travels inside TLS.** dsh does not mark it `Secure`; this does, on the network listener, so a phone that later opens a plain `http://` address on this machine does not send it in the clear.
 - **TLS is terminated in-process**, which preserves the real client address. A forwarding proxy in that seat would make every request look local, and lift both the session check and the configuration pin.
-- **The GUI's own static files are not behind the session.** Pairing arrives on the same route that serves them, before the phone has a session; they carry no secret, and source maps stay excluded. dsh signs in the page itself, and everything the loaded page does needs the session.
+- **The GUI's own static files can be read without a session.** Anonymous `GET` and `HEAD` on the fallback seat allow pairing and static assets; other HTTP methods still require dsh's session, even on that seat. The files carry no secret, and source maps stay excluded. dsh signs in the page itself, and everything the loaded page does needs the session.
 
 ## Limitations
 

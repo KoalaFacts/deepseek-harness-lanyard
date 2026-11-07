@@ -1072,7 +1072,11 @@ export class GatedWebServer extends WebServer {
     const resource = typeof fallback === 'function' ? undefined : fallback.resource
     const handler = typeof fallback === 'function' ? fallback : undefined
     const dispose = super.registerFallback(async (req, res) => {
-      if (!this.permits(req, this.fallbackAdmission)) {
+      // Anonymous pairing and static assets only require GET and HEAD.
+      // A new fallback write handler must not inherit that exemption.
+      const posture = this.fallbackAdmission === 'public'
+        && req.method !== 'GET' && req.method !== 'HEAD' ? 'gated' : this.fallbackAdmission
+      if (!this.permits(req, posture)) {
         res.writeHead(403)
         res.end(REFUSAL_BODY)
         return

@@ -114,8 +114,8 @@ function response(): ServerResponse & Written {
 }
 
 /** A request whose socket peer the kernel would have filled in. */
-function req(url: string, remoteAddress: string, headers: Record<string, string> = {}): IncomingMessage {
-  return { url, headers, socket: { remoteAddress } } as unknown as IncomingMessage
+function req(url: string, remoteAddress: string, headers: Record<string, string> = {}, method = 'GET'): IncomingMessage {
+  return { url, method, headers, socket: { remoteAddress } } as unknown as IncomingMessage
 }
 
 describe('GatedWebServer', () => {
@@ -1136,6 +1136,25 @@ describe('the fallback seat', () => {
       await handler(req(path, '192.168.1.5'), anonymous)
       expect([path, anonymous.status, anonymous.body]).toEqual([path, 200, 'DIST'])
     }
+  })
+
+  it('requires a session for unsafe methods at the public fallback', async () => {
+    const handler = await gatedFallback()
+    // Pairing only needs anonymous GET; assets also allow HEAD.
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const anonymous = response()
+      await handler(req('/?token=launch-token', '192.168.1.5', {}, method), anonymous)
+      expect([method, anonymous.status, anonymous.body]).toEqual([method, 403, REFUSAL_BODY])
+      const paired = response()
+      await handler(req('/assets/index.js', '192.168.1.5', { cookie: SESSION }, method), paired)
+      expect([method, paired.status]).toEqual([method, 200])
+    }
+    const head = response()
+    await handler(req('/assets/index.js', '192.168.1.5', {}, 'HEAD'), head)
+    expect(head.status).toBe(200)
+    const local = response()
+    await handler(req('/assets/index.js', '127.0.0.1', {}, 'POST'), local)
+    expect(local.status).toBe(200)
   })
 
   it('never lets a source map ride the public exemption, however it is spelled', async () => {

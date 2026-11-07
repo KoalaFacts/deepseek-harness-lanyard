@@ -172,7 +172,7 @@ The certificate is self-signed, so a phone's first warning is trust-on-first-use
 
 Every route path the gate keys on belongs to a *client* package — `API_PATH` (`dsh-client-connection`), `EVENTS_ENDPOINT` (`dsh-client-hmr`), the open route (`dsh-host-open-in-app`). None is this plugin's to hardcode, and `apiPathPrefix` and `loopbackOnlyPaths` fail **open** on drift. They are schema-defaulted `Config` fields, and `GatedWebServer` warns once the tree settles about any configured path no row claimed.
 
-No named route is public by default. `/plugins` used to be, because the browser had to load client bundles before it held a credential; upstream's exchange sets the session cookie on the redirect that precedes the first page load, so that reason is gone. The fallback seat stays public because the exchange itself arrives there, and upstream authenticates the index on that seat by itself.
+No named route is public by default. `/plugins` used to be, because the browser had to load client bundles before it held a credential; upstream's exchange sets the session cookie on the redirect that precedes the first page load, so that reason is gone. The fallback seat stays public for **GET/HEAD only** because the exchange itself arrives there, and upstream authenticates the index on that seat by itself. Non-GET/HEAD requests on the catch-all seat must still pass upstream session verification: a future fallback writer must not silently inherit an anonymous exemption. Explicitly configured named `publicPaths` are separate. Keep the fallback-method regression and source mutation that removes its method check.
 
 ## Classifying the Remote surface
 

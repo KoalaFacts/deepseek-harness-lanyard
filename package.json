@@ -83,6 +83,7 @@
     "test": "vitest run",
     "test:mutation:tls": "node scripts/mutate-tls-recovery.ts",
     "test:mutation:request-target": "node scripts/mutate-request-target.ts",
+    "test:mutation:public-fallback": "node scripts/mutate-public-fallback.ts",
     "test:mutation:bind-host": "node scripts/mutate-bind-host.ts",
     "test:mutation:connection-lookup": "node scripts/mutate-connection-lookup.ts",
     "test:mutation:pairing-readiness": "node scripts/mutate-pairing-readiness.ts",
