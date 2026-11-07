@@ -45,7 +45,11 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Release verification must repeat CI's protected-browser trust gate.
+    # Ubuntu 24.04's AppArmor policy can block Chromium's user namespace.
+    runs-on: ubuntu-22.04
+    env:
+      LANYARD_CHROMIUM_SANDBOX: required
     # The legs run serially here where ci.yml runs them as parallel jobs, so the
     # budget has to exceed the sum of what CI allows rather than sit under it.
     timeout-minutes: 45
@@ -109,12 +113,35 @@ jobs:
           echo "v$VERSION is $TAG_SHA, which is on main"
           echo "tag_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
 
+      # The workflow file comes from main, but checkout above selects the tag.
+      # Older tag versions of e2e-browser.ts can silently ignore the required
+      # sandbox setting and pass with broad certificate-error exceptions.
+      # A version without the protected test implementation is not publishable;
+      # the real browser run below (not these source markers) is the attestation.
+      - name: Refuse tag scripts predating protected Chromium acceptance
+        run: |
+          set -euo pipefail
+          browser=scripts/e2e-browser.ts
+          for marker in \
+            'browserSandboxPolicy(process.env.LANYARD_CHROMIUM_SANDBOX)' \
+            'chromiumSandbox: sandboxLaunch.chromiumSandbox' \
+            'assertActualChromiumSandbox(' \
+            'isolatedChromiumTrust('; do
+            if ! grep -Fq -- "$marker" "$browser"; then
+              echo "::error::the selected tag lacks protected Chromium browser acceptance ($marker); release a newer reviewed version instead"
+              exit 1
+            fi
+          done
+          if grep -Fq -- 'ignoreHTTPSErrors: true' "$browser"; then
+            echo '::error::the selected tag uses a blanket browser TLS exception; it cannot be published with the protected acceptance gate'
+            exit 1
+          fi
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -174,7 +201,11 @@ jobs:
       - run: npm run check
       - run: npm run test:e2e
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e:browser
+      # Required mode trusts only the validated DSH certificate in temporary
+      # browser NSS databases, never via certificate-error exceptions.
+      - name: Install NSS tools for protected Chromium certificate trust
+        run: sudo apt-get update && sudo apt-get install -y libnss3-tools
+      - run: xvfb-run -a npm run test:e2e:browser
 
       # `publish` installs nothing, so the build it uploads is the one this gate
       # approved rather than a second build of the same source.
@@ -185,7 +216,22 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # A rehearsal must never enter the production environment or obtain an
+      # OIDC token. This checks the already-built package and chosen dist-tag;
+      # only a separately authorized real publish can verify registry auth.
+      - name: Rehearse npm package publication without credentials
+        if: inputs.dry_run == true
+        env:
+          DIST_TAG: ${{ steps.resolve.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          npm publish --tag "$DIST_TAG" --ignore-scripts --dry-run
+          echo "dry run only — no production environment or OIDC credentials were used"
+
   publish:
+    # A dry run uses only the unprivileged verify job above. In particular it
+    # must not request approval for `production` or receive id-token: write.
+    if: inputs.dry_run == false
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -227,16 +273,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # The npm bundled with Node 22 predates trusted publishing, which landed
-      # in 11.5.1; without this the publish fails on authentication with an
-      # error that does not mention the version at all. Pinned to the 11 line
-      # rather than `@latest`, which would be the one unreviewed thing running
-      # beside the credential.
-      - name: Install an npm that speaks trusted publishing
+      # npm 11.5.1 first supported OIDC trusted publishing; 11.21.0 added
+      # trusted-publisher dist-tag support, required for prerelease --tag next.
+      # This job can mint an OIDC token, so do not resolve a floating npm range
+      # or silently run a new npm CLI release alongside that credential.
+      - name: Install a reviewed npm CLI for trusted publishing
         run: |
           set -euo pipefail
-          npm install -g npm@^11.5.1
-          npm --version
+          npm install -g --ignore-scripts npm@11.21.1
+          test "$(npm --version)" = "11.21.1"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -272,11 +317,3 @@ jobs:
           DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
         run: npm publish --provenance --tag "$DIST_TAG" --ignore-scripts
 
-      - name: Report what a dry run would have done
-        if: inputs.dry_run != false
-        env:
-          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
-        run: |
-          set -euo pipefail
-          npm publish --provenance --tag "$DIST_TAG" --ignore-scripts --dry-run
-          echo "dry run only — nothing was published"

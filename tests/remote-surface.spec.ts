@@ -140,12 +140,35 @@ describe('the installed Remote surface', () => {
         .filter(namespace => surface.has(namespace))
         .map(namespace => [namespace, [...(surface.get(namespace) as Set<string>)].sort()]),
     )
-    // next folds terminal output, input and resize into the duplex attach
+    // 0.2.1 folds terminal output, input and resize into the duplex attach
     // stream. It grants the same terminal capability already reviewed here.
-    // Accept complete, known surfaces, never a per-method union that could
-    // hide an unreviewed mixture or a newly added endpoint.
-    const next = { ...REVIEWED, terminal: ['attach', 'close', 'create', 'environment', 'list', 'rename', 'retain', 'shells'] }
-    expect([REVIEWED, next]).toContainEqual(reachable)
+    const v021 = { ...REVIEWED, terminal: ['attach', 'close', 'create', 'environment', 'list', 'rename', 'retain', 'shells'] }
+    // 0.2.2's six new session methods are passive reads or subscriptions:
+    // events reads history, the three observe* methods stream changes, state
+    // reads status, and wait observes quiescence with a bounded output window.
+    // Existing follow/page/control already expose this session information.
+    //
+    // The schedule API also changed: create/edit manage Host-wide tasks, run
+    // delivers one now, and deleteInactive permanently removes *all* ended
+    // tasks and their history. This is deliberate owner-level authority, not
+    // a read-only endpoint. Prior schedule/update/delete and the paired
+    // terminal already gave the signed-in operator task-management power.
+    // Keep the existing TLS/session admission and namespace pins unchanged.
+    //
+    // Accept only complete reviewed release surfaces, never a union: a future
+    // method addition, removal or mixed-version graph must stay a red test.
+    const v022 = {
+      ...v021,
+      schedule: ['catalog', 'create', 'deleteInactive', 'deliveryLimits', 'edit', 'history', 'list', 'run', 'view'],
+      session: [
+        'attachment', 'canOpenWorkspacePath', 'cancel', 'control', 'create', 'events',
+        'follow', 'fork', 'initializeDefaultModel', 'list', 'modelCatalog',
+        'observeEvent', 'observeProjections', 'observeState', 'openWorkspacePath',
+        'page', 'projections', 'prompt', 'rename', 'search', 'selectModel', 'state',
+        'updateQueue', 'wait', 'workspacePathApplications',
+      ],
+    }
+    expect([REVIEWED, v021, v022]).toContainEqual(reachable)
   })
 })
 

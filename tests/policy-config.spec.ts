@@ -41,16 +41,17 @@ function response(): ServerResponse & { status: number } {
   } as unknown as ServerResponse & { status: number }
 }
 
-/** A request whose socket peer the kernel would have filled in. */
+/** A GET request whose method and socket peer node:http would fill in. */
 function req(url: string, remoteAddress: string, headers: Record<string, string> = {}): IncomingMessage {
-  return { url, headers, socket: { remoteAddress } } as unknown as IncomingMessage
+  return { method: 'GET', url, headers, socket: { remoteAddress } } as unknown as IncomingMessage
 }
 
 /** Mount a gate with one policy and capture the handler it wrapped around one route. */
 async function gatedHandler(config: Partial<GateConfig>, route: { path: string; kind?: WebRoute['kind'] }):
 Promise<WebRoute['handler']> {
   const captured: WebRoute[] = []
-  const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((entry: WebRoute) => {
+  const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((entry) => {
+    if (!('handler' in entry)) throw new Error('expected a Node HTTP route, not a Fetch resource')
     captured.push(entry)
     return () => {}
   })
@@ -85,6 +86,22 @@ describe('the api prefix is configuration, not a constant', () => {
     expect(await pairedStatus(handler, '/api/settings/update')).toBe(403)
     expect(await pairedStatus(handler, '/api/session/list')).toBe(200)
   })
+  it('keeps the shipped API pin when a configured prefix drifts', async () => {
+    // Misconfiguring the new path must not expose the existing /api namespace,
+    // even if the registrar was explicitly (and mistakenly) made public.
+    const handler = await gatedHandler(
+      { apiPathPrefix: '/rpc', publicPaths: ['/api'] }, { path: '/api' },
+    )
+    expect(await pairedStatus(handler, '/api/settings/update')).toBe(403)
+    expect(await pairedStatus(handler, '/api/session/list')).toBe(200)
+    const anonymous = response()
+    await handler(req('/api/session/list', LAN), anonymous)
+    expect(anonymous.status).toBe(403)
+    const local = response()
+    await handler(req('/api/settings/update', '127.0.0.1'), local)
+    expect(local.status).toBe(200)
+  })
+
 })
 
 describe('endpoint authority is per deployment, and denies by default', () => {

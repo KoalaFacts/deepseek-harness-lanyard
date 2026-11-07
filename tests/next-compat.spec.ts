@@ -159,7 +159,9 @@ describe('the next web contract', () => {
   it.each([undefined, { lanAddresses: ['10.0.0.2', '192.168.1.99'] }])('advertises only its concrete TLS interface with absent or stale webRuntime: %j', async runtime => {
     const ctx = new Context()
     ctx.provide('connection', { authenticatedUrl: (url: string) => `${url}?token=test` })
-    ctx.provide('webServer', { host: '192.168.1.20', scheme: 'https', port: 3080, networkPort: 3443 })
+    // A real TLS carrier publishes its complete certificate identity before
+    // any pairing link; test a stale/missing webRuntime, not a missing TLS identity.
+    ctx.provide('webServer', { host: '192.168.1.20', scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: '7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3' })
     if (runtime !== undefined) ctx.provide('webRuntime', runtime)
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     const interfaces = vi.spyOn(Pairing.internals, 'networkInterfaces').mockReturnValue({})

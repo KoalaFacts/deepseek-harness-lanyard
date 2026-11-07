@@ -1,8 +1,10 @@
 /** TLS material: generated once on a network bind, absent on a loopback one. */
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { createPrivateKey, X509Certificate } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createHash, createPrivateKey, X509Certificate } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { generate } from 'selfsigned'
@@ -10,7 +12,11 @@ import * as Tls from '../src/tls.ts'
 import { LANYARD_TLS_SERVICE, certificateCovers, generateMaterial, lanIpv4Addresses, type LanyardTlsValues } from '../src/tls.ts'
 
 let ctx: Context | undefined
-afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined })
+async function disposeCurrentContext(): Promise<void> {
+  await ctx?.fiber.dispose()
+  ctx = undefined
+}
+afterEach(disposeCurrentContext)
 
 /** Mount the row and read back what it provided. */
 async function provide(config: { enabled: boolean; dir: string; host?: string }): Promise<LanyardTlsValues> {
@@ -57,6 +63,51 @@ describe('the tls row', () => {
     // identity to any other account on a shared host.
     expect(statSync(dir).mode & 0o777).toBe(0o700)
     expect(statSync(join(dir, 'key.pem')).mode & 0o777).toBe(0o600)
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses an existing world-traversable managed TLS directory until permissions are repaired', async () => {
+    const dir = unusedDir()
+    await provide({ enabled: true, dir })
+    const certPath = join(dir, 'cert.pem'), keyPath = join(dir, 'key.pem')
+    const original = [readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]
+    await ctx?.fiber.dispose()
+    ctx = undefined
+    chmodSync(dir, 0o755)
+    try {
+      await expect(provide({ enabled: true, dir })).rejects.toMatchObject({
+        message: expect.stringContaining('could not generate TLS material'),
+        cause: { message: expect.stringMatching(/directory permissions must be owner-only/) },
+      })
+      expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
+    } finally {
+      chmodSync(dir, 0o700)
+      await disposeCurrentContext()
+    }
+    await provide({ enabled: true, dir })
+    expect(readFileSync(certPath, 'utf8')).toBe(original[0])
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses an existing group-readable managed private key until permissions are repaired', async () => {
+    const dir = unusedDir()
+    await provide({ enabled: true, dir })
+    const certPath = join(dir, 'cert.pem'), keyPath = join(dir, 'key.pem')
+    const original = [readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]
+    await ctx?.fiber.dispose()
+    ctx = undefined
+    chmodSync(keyPath, 0o640)
+    try {
+      await expect(provide({ enabled: true, dir })).rejects.toMatchObject({
+        message: expect.stringContaining('could not generate TLS material'),
+        cause: { message: expect.stringMatching(/private key permissions must be owner-only/) },
+      })
+      expect([readFileSync(certPath, 'utf8'), readFileSync(keyPath, 'utf8')]).toEqual(original)
+      expect(statSync(keyPath).mode & 0o777).toBe(0o640)
+    } finally {
+      chmodSync(keyPath, 0o600)
+      await disposeCurrentContext()
+    }
+    await provide({ enabled: true, dir })
+    expect(readFileSync(keyPath, 'utf8')).toBe(original[1])
   })
 
   it('reuses existing material, so a paired device\'s accepted exception survives a restart', async () => {
@@ -195,6 +246,40 @@ describe('generateMaterial', () => {
       .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
   })
 
+  it.skipIf(process.platform === 'win32')('cleans a partially written TLS temp after a disk-limit error and allows a retry', async () => {
+    // A real POSIX file-size limit lets writeFileSync create part of the key
+    // temp before throwing EFBIG; a mocked pre-open error would miss this bug.
+    const { certPath, keyPath } = paths()
+    const childSource = [
+      "import { generateMaterial } from './src/tls.ts'",
+      'try {',
+      "  await generateMaterial(process.argv[1], process.argv[2], ['192.168.1.5'])",
+      "  console.error('unexpected successful TLS generation with a 1 KiB file limit')",
+      '  process.exitCode = 2',
+      '} catch (error) {',
+      "  if (error?.code === 'EFBIG') console.log('EXPECTED_EFBIG')",
+      '  else { console.error(error); process.exitCode = 3 }',
+      '}',
+    ].join('\n')
+    // Run a checked-in shell program instead of constructing a bash -c command.
+    // Child source and PEM paths remain separate argv entries, forwarded using
+    // the fixture's quoted "$@"; no path becomes shell source code.
+    const limited = spawnSync('bash', [
+      fileURLToPath(new URL('./fixtures/file-size-limit.sh', import.meta.url)),
+      process.execPath, '--input-type=module', '-e', childSource, certPath, keyPath,
+    ], { cwd: process.cwd(), encoding: 'utf8', timeout: 90_000 })
+    expect(limited.error).toBeUndefined()
+    expect(limited.status, limited.stderr).toBe(0)
+    expect(limited.stdout).toContain('EXPECTED_EFBIG')
+    // The shell exec preserves the node PID used in temporary file names.
+    expect(existsSync(`${keyPath}.${String(limited.pid)}.tmp`)).toBe(false)
+    expect(existsSync(keyPath)).toBe(false)
+    expect(existsSync(certPath)).toBe(false)
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    expect(new X509Certificate(readFileSync(certPath))
+      .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+  })
+
   it('reuses material that still names the current addresses', async () => {
     const { certPath, keyPath } = paths()
     await generateMaterial(certPath, keyPath, ['192.168.1.5'])
@@ -244,6 +329,120 @@ describe('generateMaterial', () => {
       .rejects.toThrow(/existing TLS certificate and private key are incomplete.*left unchanged/i)
     expect(readFileSync(survivorPath, 'utf8')).toBe(survivor)
     expect(existsSync(missingPath)).toBe(false)
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses to overwrite dangling saved TLS material paths', async () => {
+    for (const dangling of ['cert.pem', 'key.pem'] as const) {
+      const { certPath, keyPath } = paths()
+      const entry = dangling === 'cert.pem' ? certPath : keyPath
+      const other = dangling === 'cert.pem' ? keyPath : certPath
+      const target = 'missing-' + dangling
+      symlinkSync(target, entry)
+      // existsSync follows the target and incorrectly sees "no saved file".
+      expect(existsSync(entry)).toBe(false)
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5']))
+        .rejects.toThrow(/existing TLS certificate and private key are incomplete.*left unchanged/i)
+      expect(lstatSync(entry).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(entry)).toBe(target)
+      expect(existsSync(other)).toBe(false)
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses valid linked managed TLS material before renewal can sever its pointer', async () => {
+    for (const linked of ['cert.pem', 'key.pem'] as const) {
+      const { certPath, keyPath } = paths()
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      const entry = linked === 'cert.pem' ? certPath : keyPath
+      const other = linked === 'cert.pem' ? keyPath : certPath
+      const target = join(join(entry, '..'), 'saved-' + linked)
+      const initial = [readFileSync(entry, 'utf8'), readFileSync(other, 'utf8')]
+      renameSync(entry, target)
+      symlinkSync('saved-' + linked, entry)
+
+      // A rename on renewal replaces the link, not the target. Refuse even a
+      // currently matching identity instead of silently breaking its pointer.
+      await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+        .rejects.toThrow(/managed TLS certificate and private key must be regular files.*left unchanged/i)
+      expect(lstatSync(entry).isSymbolicLink()).toBe(true)
+      expect(readlinkSync(entry)).toBe('saved-' + linked)
+      expect(readFileSync(target, 'utf8')).toBe(initial[0])
+      expect(readFileSync(other, 'utf8')).toBe(initial[1])
+
+      // Operator recovery: restore the same matching bytes as regular files.
+      rmSync(entry)
+      renameSync(target, entry)
+      await generateMaterial(certPath, keyPath, ['10.0.0.7'])
+      expect(lstatSync(entry).isSymbolicLink()).toBe(false)
+      expect(new X509Certificate(readFileSync(certPath))
+        .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+      expect(certificateCovers(certPath, ['10.0.0.7'])).toBe(true)
+    }
+  })
+
+  it('refuses non-regular saved TLS entries before reuse and preserves the matching survivor', async () => {
+    // A directory is a deterministic non-symlink regression. A named pipe is
+    // worse: readFileSync() can block forever if no writer connects, so avoid
+    // hanging the test runner to demonstrate the same missing isFile guard.
+    for (const replaced of ['cert.pem', 'key.pem'] as const) {
+      const { certPath, keyPath } = paths()
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      const entry = replaced === 'cert.pem' ? certPath : keyPath
+      const survivor = replaced === 'cert.pem' ? keyPath : certPath
+      const savedEntry = readFileSync(entry, 'utf8')
+      const savedSurvivor = readFileSync(survivor, 'utf8')
+      rmSync(entry)
+      mkdirSync(entry)
+      try {
+        await expect(generateMaterial(certPath, keyPath, ['10.0.0.7']))
+          .rejects.toThrow(/managed TLS certificate and private key must be regular files.*left unchanged/i)
+        expect(lstatSync(entry).isDirectory()).toBe(true)
+        expect(readFileSync(survivor, 'utf8')).toBe(savedSurvivor)
+      } finally {
+        rmSync(entry, { recursive: true, force: true })
+        writeFileSync(entry, savedEntry, { mode: 0o600 })
+      }
+      // Operator recovery: restore the same regular file and retry with no
+      // unexpected identity rotation on the original LAN address.
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      expect(readFileSync(entry, 'utf8')).toBe(savedEntry)
+      expect(readFileSync(survivor, 'utf8')).toBe(savedSurvivor)
+    }
+  })
+
+  it.each(['cert.pem', 'key.pem'] as const)('refuses oversized but parseable managed %s before identity reuse', async (oversized) => {
+    const { certPath, keyPath } = paths()
+    try {
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      const originalCert = readFileSync(certPath, 'utf8')
+      const originalKey = readFileSync(keyPath, 'utf8')
+      const path = oversized === 'cert.pem' ? certPath : keyPath
+      // An invalid oversized fixture already fails the old parser, while
+      // Node/OpenSSL accepts a PEM followed by >1 MiB of blank lines.
+      const padded = (oversized === 'cert.pem' ? originalCert : originalKey) + '\n'.repeat(1024 * 1024 + 1)
+      if (oversized === 'cert.pem') {
+        expect(new X509Certificate(padded).checkPrivateKey(createPrivateKey(originalKey))).toBe(true)
+      } else {
+        expect(new X509Certificate(originalCert).checkPrivateKey(createPrivateKey(padded))).toBe(true)
+      }
+      writeFileSync(path, padded)
+      const digest = (file: string): string => createHash('sha256').update(readFileSync(file)).digest('hex')
+      const before = [digest(certPath), digest(keyPath)]
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5']))
+        .rejects.toThrow(/existing TLS certificate or private key exceeds the 1 MiB PEM size limit.*left unchanged.*matching pair/i)
+      // The top-level startup error must name the limit even if the host hides
+      // nested causes; otherwise this looks like an unrelated key mismatch.
+      await expect(provide({ enabled: true, dir: dirname(certPath), host: '192.168.1.5' }))
+        .rejects.toThrow(/lanyard-tls: existing TLS certificate or private key exceeds the 1 MiB PEM size limit/i)
+      expect([digest(certPath), digest(keyPath)]).toEqual(before)
+      expect(statSync(path).size).toBe(Buffer.byteLength(padded))
+      // Restore a normal-sized matching pair without rotating the identity.
+      writeFileSync(path, oversized === 'cert.pem' ? originalCert : originalKey)
+      await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+      expect(readFileSync(certPath, 'utf8')).toBe(originalCert)
+      expect(readFileSync(keyPath, 'utf8')).toBe(originalKey)
+    } finally {
+      rmSync(dirname(certPath), { recursive: true, force: true })
+    }
   })
 
   it('refuses a mismatched saved key even when the certificate no longer names the LAN address', async () => {
@@ -304,6 +503,43 @@ describe('generateMaterial', () => {
     expect(certificateCovers(certPath, ['192.168.1.5'])).toBe(true)
     expect(Date.parse(renewed.validFrom)).toBeLessThanOrEqual(Date.now())
     expect(Date.parse(renewed.validTo)).toBeGreaterThan(Date.now())
+  })
+
+  it('keeps the old certificate and key matched after an expired certificate renewal cannot publish', async () => {
+    const { certPath, keyPath } = paths()
+    const now = Date.now(), day = 86_400_000
+    const old = await generate([{ name: 'commonName', value: 'dsh' }], {
+      notBeforeDate: new Date(now - 4 * day),
+      notAfterDate: new Date(now - 2 * day),
+      keySize: 2048,
+      algorithm: 'sha256',
+      extensions: [{
+        name: 'subjectAltName',
+        altNames: [{ type: 2, value: 'localhost' }, { type: 7, ip: '192.168.1.5' }],
+      }],
+    })
+    writeFileSync(certPath, old.cert)
+    writeFileSync(keyPath, old.private)
+    // New key is installed first. A pre-existing certificate temp forces the
+    // cert write to fail, previously leaving a permanently mismatched pair.
+    const blockedTemp = `${certPath}.${String(process.pid)}.tmp`
+    writeFileSync(blockedTemp, 'do not overwrite an interrupted temp')
+    try {
+      await expect(generateMaterial(certPath, keyPath, ['192.168.1.5'])).rejects.toThrow()
+      expect(readFileSync(certPath, 'utf8')).toBe(old.cert)
+      expect(new X509Certificate(readFileSync(certPath))
+        .checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+      expect(readFileSync(keyPath, 'utf8')).toBe(old.private)
+      expect(readFileSync(blockedTemp, 'utf8')).toBe('do not overwrite an interrupted temp')
+    } finally {
+      rmSync(blockedTemp, { force: true })
+    }
+    // A later restart can renew both files instead of refusing the saved pair.
+    await generateMaterial(certPath, keyPath, ['192.168.1.5'])
+    const renewed = new X509Certificate(readFileSync(certPath))
+    expect(renewed.checkPrivateKey(createPrivateKey(readFileSync(keyPath)))).toBe(true)
+    expect(Date.parse(renewed.validTo)).toBeGreaterThan(Date.now())
+    expect(readFileSync(keyPath, 'utf8')).not.toBe(old.private)
   })
 
   it('replaces material once the machine is reachable somewhere it does not name', async () => {
