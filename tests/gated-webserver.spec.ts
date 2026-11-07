@@ -240,7 +240,21 @@ describe('GatedWebServer', () => {
     const path = '/resource-origin?view=mobile'
     // A client can invent Host, but that does not change the actual TLS
     // listener's origin delivered to a Fetch resource.
-    expect((await get('127.0.0.1', server.networkPort, path, { host: 'attacker.invalid' }, ca)).status).toBe(200)
+    // Node derives TLS SNI from the Host override unless it is set
+    // explicitly. Keep full certificate validation using localhost in the
+    // test certificate's SAN while deliberately spoofing only HTTP Host.
+    const httpsStatus = await new Promise<number>((resolve, reject) => {
+      const client = httpsRequest({
+        host: '127.0.0.1', servername: 'localhost', port: server.networkPort, path, ca,
+        headers: { host: 'attacker.invalid' },
+      }, response => {
+        response.resume()
+        response.on('end', () => { resolve(response.statusCode ?? 0) })
+      })
+      client.on('error', reject)
+      client.end()
+    })
+    expect(httpsStatus).toBe(200)
     expect(await plainGet('127.0.0.1', server.port, path)).toBe(200)
     expect(observed).toEqual([
       `https://127.0.0.1:${server.networkPort}${path}`,
