@@ -51,7 +51,9 @@ try {
   if (original.split(guarded).length !== 2) throw new Error('public fallback guard anchor missing or ambiguous')
   if (original.split(namedGuard).length !== 2) throw new Error('named public route guard anchor missing or ambiguous')
   run('baseline', false)
-  writeFileSync(sourcePath, original.replace(guarded, unsafe))
+  // The shared permits() guard also protects the fallback. Remove both layers
+  // in this mutant, or it still refuses anonymous writes for the correct reason.
+  writeFileSync(sourcePath, original.replace(guarded, unsafe).replace(namedGuard, unsafeNamed))
   try { run('mutant', true) }
   finally { writeFileSync(sourcePath, original) }
   run('named-baseline', false, namedCase)
