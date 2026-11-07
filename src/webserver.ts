@@ -972,7 +972,9 @@ export class GatedWebServer extends WebServer {
     const opened = decoded === undefined ? undefined : openedName(decoded)
     const excluded = opened === undefined
       || this.publicPathExcludedSuffixes.some(suffix => opened.endsWith(suffix.toLowerCase()))
-    if (admission === 'public' && !excluded) return true
+    // Explicitly public named routes may later gain write handlers upstream.
+    // Exempt only static/pairing reads; unsafe methods still need a DSH session.
+    if (admission === 'public' && !excluded && (req.method === 'GET' || req.method === 'HEAD')) return true
     // Looked up per request: Connection mounts after this carrier, since it
     // registers its own routes here, and may be replaced while the carrier
     // lives. Whatever the lookup finds, a network peer it cannot vouch for is

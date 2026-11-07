@@ -1211,6 +1211,42 @@ describe('the fallback seat', () => {
 // A percent-encoded suffix slipped the exclusion on a public route too: the
 // handlers behind the gate decode the pathname before resolving a file.
 describe('percent-encoded paths on a public route', () => {
+  it('never grants anonymous writes to an explicitly public named route', async () => {
+    // If an upstream bundle owner adds a write method, publicPaths must not
+    // turn it into an anonymous LAN mutation.
+    const captured: WebRoute[] = []
+    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation(route => {
+      if (!('handler' in route)) throw new Error('expected a Node HTTP route')
+      captured.push(route)
+      return () => {}
+    })
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/bundles'] }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    server.register({ kind: 'prefix', path: '/bundles', handler: (_q, res) => {
+      res.writeHead(200); res.end('BUNDLE')
+    } })
+    spy.mockRestore()
+    const handler = captured.at(-1)?.handler
+    if (handler === undefined) throw new Error('the named public route was not registered')
+    for (const method of ['GET', 'HEAD']) {
+      const anonymous = response()
+      await handler(req('/bundles/client.js', '192.168.1.5', {}, method), anonymous)
+      expect([method, anonymous.status]).toEqual([method, 200])
+    }
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const anonymous = response()
+      await handler(req('/bundles/client.js', '192.168.1.5', {}, method), anonymous)
+      expect([method, anonymous.status, anonymous.body]).toEqual([method, 403, REFUSAL_BODY])
+      const paired = response()
+      await handler(req('/bundles/client.js', '192.168.1.5', { cookie: SESSION }, method), paired)
+      expect([method, paired.status]).toEqual([method, 200])
+    }
+    const local = response()
+    await handler(req('/bundles/client.js', '127.0.0.1', {}, 'POST'), local)
+    expect(local.status).toBe(200)
+  })
+
   it('excludes a source map however it is spelled', async () => {
     for (const path of [
       '/bundles/ui-theme/client.js.map', '/bundles/ui-theme/client.js.ma%70', '/bundles/ui-theme/client.js.map/',
