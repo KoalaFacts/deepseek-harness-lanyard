@@ -15,6 +15,10 @@ const guarded = `      const posture = this.fallbackAdmission === 'public'
 const unsafe = `      const posture = this.fallbackAdmission`
 const caseName = 'requires a session for unsafe methods at the public fallback'
 const namedCase = 'never grants anonymous writes to an explicitly public named route'
+const apiNamedCase = 'keeps API sessions and pins despite an explicitly public registrar'
+const apiFallbackCase = 'never grants anonymous fallback access to API endpoints after a routing change'
+const apiSeatGuard = "    if (routePath === this.apiPathPrefix || routePath.startsWith(`${this.apiPathPrefix}/`)) return 'gated'"
+const apiRequestGuard = " && !isApiRequest"
 const namedGuard = "    if (admission === 'public' && !excluded && (req.method === 'GET' || req.method === 'HEAD')) return true"
 const unsafeNamed = "    if (admission === 'public' && !excluded) return true"
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
@@ -50,6 +54,8 @@ function run(label: string, expectFailure: boolean, selectedCase = caseName): vo
 try {
   if (original.split(guarded).length !== 2) throw new Error('public fallback guard anchor missing or ambiguous')
   if (original.split(namedGuard).length !== 2) throw new Error('named public route guard anchor missing or ambiguous')
+  if (original.split(apiSeatGuard).length !== 2) throw new Error('API route posture guard anchor missing or ambiguous')
+  if (original.split(apiRequestGuard).length !== 2) throw new Error('API request exception guard anchor missing or ambiguous')
   run('baseline', false)
   // The shared permits() guard also protects the fallback. Remove both layers
   // in this mutant, or it still refuses anonymous writes for the correct reason.
@@ -60,9 +66,19 @@ try {
   writeFileSync(sourcePath, original.replace(namedGuard, unsafeNamed))
   try { run('named-mutant', true, namedCase) }
   finally { writeFileSync(sourcePath, original) }
+  run('api-named-baseline', false, apiNamedCase)
+  // Both the route posture and the request guard independently defend /api.
+  // Remove both only in this negative control to demonstrate the regression.
+  writeFileSync(sourcePath, original.replace(apiSeatGuard, '').replace(apiRequestGuard, ''))
+  try { run('api-named-mutant', true, apiNamedCase) }
+  finally { writeFileSync(sourcePath, original) }
+  run('api-fallback-baseline', false, apiFallbackCase)
+  writeFileSync(sourcePath, original.replace(apiRequestGuard, ''))
+  try { run('api-fallback-mutant', true, apiFallbackCase) }
+  finally { writeFileSync(sourcePath, original) }
 } finally {
   writeFileSync(sourcePath, original)
   rmSync(reportsDir, { recursive: true, force: true })
 }
 if (readFileSync(sourcePath, 'utf8') !== original) throw new Error('public fallback source restoration failed')
-process.stdout.write('Anonymous fallback and named-route write-method mutations killed; source restored.\n')
+process.stdout.write('Anonymous write-method and API public-exemption mutations killed; source restored.\n')

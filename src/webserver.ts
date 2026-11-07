@@ -944,6 +944,8 @@ export class GatedWebServer extends WebServer {
    */
   private posture(routePath: string): Admission {
     if (this.loopbackOnlyPaths.includes(routePath)) return 'loopback-only'
+    // A public asset override must not make upstream's API registrar anonymous.
+    if (routePath === this.apiPathPrefix || routePath.startsWith(`${this.apiPathPrefix}/`)) return 'gated'
     if (this.publicPaths.includes(routePath)) return 'public'
     return 'gated'
   }
@@ -972,9 +974,14 @@ export class GatedWebServer extends WebServer {
     const opened = decoded === undefined ? undefined : openedName(decoded)
     const excluded = opened === undefined
       || this.publicPathExcludedSuffixes.some(suffix => opened.endsWith(suffix.toLowerCase()))
-    // Explicitly public named routes may later gain write handlers upstream.
-    // Exempt only static/pairing reads; unsafe methods still need a DSH session.
-    if (admission === 'public' && !excluded && (req.method === 'GET' || req.method === 'HEAD')) return true
+    // A public fallback may be handed an API request when upstream changes its
+    // routing. Neither it nor an explicitly public named seat may bypass API
+    // sessions or loopback-only method pins, including percent-encoded paths.
+    const apiPrefix = `${this.apiPathPrefix}/`
+    const isApiRequest = raw === this.apiPathPrefix || raw.startsWith(apiPrefix)
+      || (decoded !== undefined && (decoded === this.apiPathPrefix || decoded.startsWith(apiPrefix)))
+    // Exempt only static/pairing reads; unsafe methods and API requests need a session.
+    if (admission === 'public' && !excluded && !isApiRequest && (req.method === 'GET' || req.method === 'HEAD')) return true
     // Looked up per request: Connection mounts after this carrier, since it
     // registers its own routes here, and may be replaced while the carrier
     // lives. Whatever the lookup finds, a network peer it cannot vouch for is

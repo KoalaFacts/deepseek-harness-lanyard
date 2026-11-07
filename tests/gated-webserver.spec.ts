@@ -1138,6 +1138,24 @@ describe('the fallback seat', () => {
     }
   })
 
+  it('never grants anonymous fallback access to API endpoints after a routing change', async () => {
+    const handler = await gatedFallback()
+    for (const path of ['/api/session/list', '/api/settings/update', '/api%2Fsettings/update']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+    }
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect(paired.status).toBe(200)
+    const pinned = response()
+    await handler(req('/api/settings/update', '192.168.1.5', { cookie: SESSION }), pinned)
+    expect([pinned.status, pinned.body]).toEqual([403, REFUSAL_BODY])
+    const staticAsset = response()
+    await handler(req('/assets/index.js', '192.168.1.5'), staticAsset)
+    expect(staticAsset.status).toBe(200)
+  })
+
   it('requires a session for unsafe methods at the public fallback', async () => {
     const handler = await gatedFallback()
     // Pairing only needs anonymous GET; assets also allow HEAD.
@@ -1211,6 +1229,40 @@ describe('the fallback seat', () => {
 // A percent-encoded suffix slipped the exclusion on a public route too: the
 // handlers behind the gate decode the pathname before resolving a file.
 describe('percent-encoded paths on a public route', () => {
+  it('keeps API sessions and pins despite an explicitly public registrar', async () => {
+    const captured: WebRoute[] = []
+    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation(route => {
+      if (!('handler' in route)) throw new Error('expected a Node HTTP route')
+      captured.push(route)
+      return () => {}
+    })
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/api'] }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => {
+      res.writeHead(200); res.end('API')
+    } })
+    spy.mockRestore()
+    const handler = captured.at(-1)?.handler
+    if (handler === undefined) throw new Error('the API route was not registered')
+    // The normalized dot path is not classified as /api by WHATWG URL, but
+    // the upstream named /api seat may still receive its raw request target.
+    for (const path of ['/api/session/list', '/api/settings/update', '/api/../assets/index.js']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+    }
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect(paired.status).toBe(200)
+    const pinned = response()
+    await handler(req('/api/settings/update', '192.168.1.5', { cookie: SESSION }), pinned)
+    expect([pinned.status, pinned.body]).toEqual([403, REFUSAL_BODY])
+    const local = response()
+    await handler(req('/api/settings/update', '127.0.0.1'), local)
+    expect(local.status).toBe(200)
+  })
+
   it('never grants anonymous writes to an explicitly public named route', async () => {
     // If an upstream bundle owner adds a write method, publicPaths must not
     // turn it into an anonymous LAN mutation.
