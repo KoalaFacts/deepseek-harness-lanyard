@@ -41,9 +41,9 @@ function response(): ServerResponse & { status: number } {
   } as unknown as ServerResponse & { status: number }
 }
 
-/** A request whose socket peer the kernel would have filled in. */
+/** A GET request whose method and socket peer node:http would fill in. */
 function req(url: string, remoteAddress: string, headers: Record<string, string> = {}): IncomingMessage {
-  return { url, headers, socket: { remoteAddress } } as unknown as IncomingMessage
+  return { method: 'GET', url, headers, socket: { remoteAddress } } as unknown as IncomingMessage
 }
 
 /** Mount a gate with one policy and capture the handler it wrapped around one route. */
