@@ -19,7 +19,7 @@ const apiNamedCase = 'keeps API sessions and pins despite an explicitly public r
 const apiFallbackCase = 'never grants anonymous fallback access to API endpoints after a routing change'
 const apiSeatGuard = "    if (routePath === this.apiPathPrefix || routePath.startsWith(`${this.apiPathPrefix}/`)) return 'gated'"
 const apiRequestGuard = " && !isApiRequest"
-const namedGuard = "    if (admission === 'public' && !excluded && (req.method === 'GET' || req.method === 'HEAD')) return true"
+const namedGuard = "    if (admission === 'public' && !excluded && !isApiRequest && (req.method === 'GET' || req.method === 'HEAD')) return true"
 const unsafeNamed = "    if (admission === 'public' && !excluded) return true"
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const reportsDir = mkdtempSync(join(tmpdir(), 'lanyard-public-fallback-mutant-'))
