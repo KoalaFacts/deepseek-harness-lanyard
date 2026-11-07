@@ -20,11 +20,17 @@ Upstream DSH prereleases may register the GUI and browser bundles as Fetch resou
 
 ## Install
 
+**First check what npm actually publishes:**
+
+```sh
+npm view @koalafacts/deepseek-harness-lanyard version
+```
+
+The `0.0.0` npm package is only a placeholder, **not a working plugin**; a newer version in this source repository does not mean it has been published. **Do not install the placeholder by package name.** Use the local tarball instructions below while the registry still reports `0.0.0`. Only after npm reports a real working release, install by package name:
+
 ```sh
 dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 ```
-
-Before installing, check `npm view @koalafacts/deepseek-harness-lanyard version`. The `0.0.0` npm package is only a placeholder, **not a working plugin**; a newer version in this source repository does not mean it has been published. Install by the command above only once the registry reports a real release.
 
 ### Install a local tarball while npm only has the placeholder
 

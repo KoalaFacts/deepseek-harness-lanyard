@@ -18,11 +18,17 @@
 
 ## 安装
 
+**先查询 npm 实际发布的版本：**
+
+```sh
+npm view @koalafacts/deepseek-harness-lanyard version
+```
+
+npm 上的 `0.0.0` 只是占位包，**并不能正常使用**；源码仓库中写着较高版本，不等于那个版本已经发布。**不要按包名安装占位包。** 如果 npm 仍报告 `0.0.0`，请按照下文的本地 tarball 步骤安装。只有 npm 仓库出现真正可用的发布版本，才能按包名安装：
+
 ```sh
 dsh plugin --profile web add @koalafacts/deepseek-harness-lanyard
 ```
-
-安装前请先运行 `npm view @koalafacts/deepseek-harness-lanyard version` 核对 npm 仓库里的实际版本。npm 上的 `0.0.0` 只是占位包，**并不能正常使用**；源码仓库中写着较高版本，不等于那个版本已经发布。只有 npm 仓库出现真正的发布版本，才能使用上面的安装命令。
 
 ### npm 仍只有占位包时，安装本地打包版本
 
