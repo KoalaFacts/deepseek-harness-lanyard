@@ -946,6 +946,10 @@ export class GatedWebServer extends WebServer {
     if (this.loopbackOnlyPaths.includes(routePath)) return 'loopback-only'
     // A public asset override must not make upstream's API registrar anonymous.
     if (routePath === this.apiPathPrefix || routePath.startsWith(`${this.apiPathPrefix}/`)) return 'gated'
+    // A stale customized prefix must not strip the known shipped /api loopback pins.
+    // This only protects the known /api route, not an arbitrary future upstream rename.
+    if (this.apiPathPrefix !== DEFAULT_API_PATH_PREFIX
+      && (routePath === DEFAULT_API_PATH_PREFIX || routePath.startsWith(`${DEFAULT_API_PATH_PREFIX}/`))) return 'gated'
     if (this.publicPaths.includes(routePath)) return 'public'
     return 'gated'
   }
@@ -980,8 +984,14 @@ export class GatedWebServer extends WebServer {
     const apiPrefix = `${this.apiPathPrefix}/`
     const isApiRequest = raw === this.apiPathPrefix || raw.startsWith(apiPrefix)
       || (decoded !== undefined && (decoded === this.apiPathPrefix || decoded.startsWith(apiPrefix)))
+    // An accidentally stale apiPathPrefix must not make the *shipped* /api
+    // routes anonymous when an operator also configured their seat as public.
+    const isKnownApiRequest = this.apiPathPrefix !== DEFAULT_API_PATH_PREFIX
+      && (raw === DEFAULT_API_PATH_PREFIX || raw.startsWith(`${DEFAULT_API_PATH_PREFIX}/`)
+        || (decoded !== undefined && (decoded === DEFAULT_API_PATH_PREFIX
+          || decoded.startsWith(`${DEFAULT_API_PATH_PREFIX}/`))))
     // Exempt only static/pairing reads; unsafe methods and API requests need a session.
-    if (admission === 'public' && !excluded && !isApiRequest && (req.method === 'GET' || req.method === 'HEAD')) return true
+    if (admission === 'public' && !excluded && !isApiRequest && !isKnownApiRequest && (req.method === 'GET' || req.method === 'HEAD')) return true
     // Looked up per request: Connection mounts after this carrier, since it
     // registers its own routes here, and may be replaced while the carrier
     // lives. Whatever the lookup finds, a network peer it cannot vouch for is
@@ -1003,7 +1013,9 @@ export class GatedWebServer extends WebServer {
     // would otherwise turn `%2F` into a way to spell a pinned method unpinned.
     const readings = decoded === undefined || decoded === raw ? [raw] : [raw, decoded]
     const named = readings
-      .map(reading => endpointOf(reading, this.apiPathPrefix))
+      .map(reading => endpointOf(reading, this.apiPathPrefix)
+        ?? (this.apiPathPrefix === DEFAULT_API_PATH_PREFIX
+          ? undefined : endpointOf(reading, DEFAULT_API_PATH_PREFIX)))
       .filter(endpoint => endpoint !== undefined)
     if (named.length === 0) return true
     // A session authenticates a device; the configuration plane additionally

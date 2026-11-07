@@ -86,6 +86,22 @@ describe('the api prefix is configuration, not a constant', () => {
     expect(await pairedStatus(handler, '/api/settings/update')).toBe(403)
     expect(await pairedStatus(handler, '/api/session/list')).toBe(200)
   })
+  it('keeps the shipped API pin when a configured prefix drifts', async () => {
+    // Misconfiguring the new path must not expose the existing /api namespace,
+    // even if the registrar was explicitly (and mistakenly) made public.
+    const handler = await gatedHandler(
+      { apiPathPrefix: '/rpc', publicPaths: ['/api'] }, { path: '/api' },
+    )
+    expect(await pairedStatus(handler, '/api/settings/update')).toBe(403)
+    expect(await pairedStatus(handler, '/api/session/list')).toBe(200)
+    const anonymous = response()
+    await handler(req('/api/session/list', LAN), anonymous)
+    expect(anonymous.status).toBe(403)
+    const local = response()
+    await handler(req('/api/settings/update', '127.0.0.1'), local)
+    expect(local.status).toBe(200)
+  })
+
 })
 
 describe('endpoint authority is per deployment, and denies by default', () => {
