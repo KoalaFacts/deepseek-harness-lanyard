@@ -65,14 +65,28 @@ export function verifyInstalledExportMap(
 }
 
 /**
- * The DSH CLI's exact version does not pin its transitive web dependencies.
- * Compare the key browser and HTTP carrier versions across both independent
- * clean installs before promoting the source-verified artifact.
+ * The exact DSH CLI version does not pin its transitive dependencies. Cover
+ * every DSH package whose contract this plugin replaces or consumes: browser,
+ * HTTP carrier, session authority, CLI flags and process lifetime.
  */
-function installedDshCoreVersions(workspace: string): { cli: string; webApp: string; webServer: string } {
+export interface DshCoreVersions {
+  cli: string
+  webApp: string
+  webServer: string
+  connection: string
+  cmdline: string
+  subprocess: string
+}
+
+export function installedDshCoreVersions(workspace: string): DshCoreVersions {
   const cliPath = createRequire(join(workspace, 'package.json')).resolve('@deepseek-ai/dsh/package.json')
-  const webAppPath = createRequire(cliPath).resolve('@deepseek-ai/dsh-web-app/package.json')
-  const webServerPath = createRequire(webAppPath).resolve('@deepseek-ai/dsh-host-webserver/package.json')
+  const fromCli = createRequire(cliPath)
+  const webAppPath = fromCli.resolve('@deepseek-ai/dsh-web-app/package.json')
+  const fromWebApp = createRequire(webAppPath)
+  const webServerPath = fromWebApp.resolve('@deepseek-ai/dsh-host-webserver/package.json')
+  const connectionPath = fromWebApp.resolve('@deepseek-ai/dsh-client-connection/package.json')
+  const cmdlinePath = fromCli.resolve('@deepseek-ai/dsh-cmdline/package.json')
+  const subprocessPath = fromWebApp.resolve('@deepseek-ai/dsh-subprocess/package.json')
   const version = (path: string): string => {
     const value = (JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown }).version
     assert.ok(typeof value === 'string'
@@ -80,7 +94,19 @@ function installedDshCoreVersions(workspace: string): { cli: string; webApp: str
     'installed DSH core package has no valid version: ' + path)
     return value
   }
-  return { cli: version(cliPath), webApp: version(webAppPath), webServer: version(webServerPath) }
+  return {
+    cli: version(cliPath),
+    webApp: version(webAppPath),
+    webServer: version(webServerPath),
+    connection: version(connectionPath),
+    cmdline: version(cmdlinePath),
+    subprocess: version(subprocessPath),
+  }
+}
+
+/** Refuse to promote an archive tested against two different DSH graphs. */
+export function verifyDshCoreVersionParity(expected: DshCoreVersions, actual: DshCoreVersions): void {
+  assert.deepEqual(actual, expected, 'DSH core versions drifted between clean consumer installs')
 }
 
 async function installCandidate(tarball: string): Promise<void> {
@@ -140,8 +166,7 @@ async function installCandidate(tarball: string): Promise<void> {
     // *same* SHA-verified tarball, with a live TLS listener and upstream login.
     const { withDshDeployment, probe, rpcCall, refused, sessionCookie, sessionCookieSecure, succeeded } = await import('./dsh-harness.ts')
     await withDshDeployment(async ({ bundles, packageName, pairingLink, port, ca, cwd }) => {
-      assert.deepEqual(installedDshCoreVersions(cwd), expectedDshCore,
-        'DSH CLI/Web UI/HTTP carrier versions drifted between clean consumer installs')
+      verifyDshCoreVersionParity(expectedDshCore, installedDshCoreVersions(cwd))
       assert.equal(packageName, source.name)
       assert.ok(bundles.includes(source.name), 'candidate bundle did not join the real DSH profile')
       const url = new URL(pairingLink)

@@ -1,12 +1,12 @@
 /** The downloaded candidate must be tied to this main commit and immutable. */
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, unlinkSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import { verifyInstallCandidate, verifyInstalledExportMap, verifyInstalledModule } from '../scripts/verify-install-candidate.ts'
+import { installedDshCoreVersions, verifyDshCoreVersionParity, verifyInstallCandidate, verifyInstalledExportMap, verifyInstalledModule } from '../scripts/verify-install-candidate.ts'
 
 const sha = 'a'.repeat(40)
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -66,6 +66,35 @@ describe('downloaded main install candidate identity', () => {
       }
     })
   })
+})
+
+it('pins the six installed DSH security and lifecycle packages across the two consumer stages', () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'lanyard-dsh-version-fixture-'))
+  const version = '0.2.2-rc.1'
+  const packageNames = ['dsh', 'dsh-web-app', 'dsh-host-webserver',
+    'dsh-client-connection', 'dsh-cmdline', 'dsh-subprocess']
+  try {
+    for (const name of packageNames) {
+      const directory = join(workspace, 'node_modules', '@deepseek-ai', name)
+      mkdirSync(directory, { recursive: true })
+      writeFileSync(join(directory, 'package.json'),
+        JSON.stringify({ name: '@deepseek-ai/' + name, version }))
+    }
+    const installed = installedDshCoreVersions(workspace)
+    expect(installed).toEqual({
+      cli: version, webApp: version, webServer: version,
+      connection: version, cmdline: version, subprocess: version,
+    })
+    expect(() => verifyDshCoreVersionParity(installed, { ...installed })).not.toThrow()
+    // Removing any of the new security/lifecycle comparisons must make this
+    // test fail, even if CLI, Web UI and HTTP carrier remain identical.
+    for (const field of ['connection', 'cmdline', 'subprocess'] as const) {
+      expect(() => verifyDshCoreVersionParity(installed, { ...installed, [field]: '0.2.2-rc.2' }))
+        .toThrow(/DSH core versions drifted/)
+    }
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
 })
 
 it('executes the installed ESM exports, rejecting empty and syntactically broken modules', async () => {
