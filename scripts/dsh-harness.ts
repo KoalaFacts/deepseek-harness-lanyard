@@ -580,6 +580,8 @@ export interface DeploymentOptions {
   env?: Readonly<Record<string, string>>
   /** Already-verified install candidate; otherwise pack this checkout. */
   tarball?: string
+  /** Pin the CLI used by a clean candidate consumer to the version it first resolved. */
+  cliSpec?: string
 }
 
 /**
@@ -680,9 +682,10 @@ export async function withDshDeployment<T>(
       console.log('lanyard e2e: installing the externally verified candidate tarball (not repacking)')
     }
 
-    console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${CLI_SPEC}`)
+    const cliSpec = options.cliSpec ?? CLI_SPEC
+    console.log(`lanyard e2e: installing the published CLI @deepseek-ai/dsh@${cliSpec}`)
     writeFileSync(join(workspace, 'package.json'), '{"name":"lanyard-e2e","private":true}\n')
-    installCli(workspace, CLI_SPEC)
+    installCli(workspace, cliSpec)
     // The requested dist-tag can move independently of the transitive graph.
     // Log what this isolated consumer actually resolved, not merely @next.
     const cliManifestPath = createRequire(join(workspace, 'package.json')).resolve(`${CLI_PACKAGE}/package.json`)

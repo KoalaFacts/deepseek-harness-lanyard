@@ -72,6 +72,14 @@ async function installCandidate(tarball: string): Promise<void> {
     run('pnpm', ['add', '@deepseek-ai/dsh@latest'], workspace)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
     assert.ok(existsSync(dsh), 'published CLI installed no dsh binary')
+    // Keep the real-DSH TLS smoke on this exact resolved CLI, not a second
+    // moving @latest lookup that could change during the same CI job.
+    const cliManifestPath = createRequire(join(workspace, 'package.json')).resolve('@deepseek-ai/dsh/package.json')
+    const cliManifest = JSON.parse(readFileSync(cliManifestPath, 'utf8')) as { version?: unknown }
+    assert.ok(typeof cliManifest.version === 'string'
+      && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliManifest.version), 'installed DSH CLI has no valid version')
+    const installedCliVersion = cliManifest.version
+    console.log('lanyard candidate: resolved DSH CLI ' + installedCliVersion + '; pinning the real-DSH consumer to the same release')
     const home = join(workspace, 'dsh-home')
     console.log('lanyard candidate: adding the DOWNLOADED tarball with dsh plugin --profile web add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], workspace, { ...process.env, DSH_HOME: home })
@@ -114,7 +122,10 @@ async function installCandidate(tarball: string): Promise<void> {
     // supported load path instead: a fresh real DSH composition loading the
     // *same* SHA-verified tarball, with a live TLS listener and upstream login.
     const { withDshDeployment, probe, rpcCall, refused, sessionCookie, sessionCookieSecure, succeeded } = await import('./dsh-harness.ts')
-    await withDshDeployment(async ({ bundles, packageName, pairingLink, port, ca }) => {
+    await withDshDeployment(async ({ bundles, packageName, pairingLink, port, ca, cwd }) => {
+      const liveManifestPath = createRequire(join(cwd, 'package.json')).resolve('@deepseek-ai/dsh/package.json')
+      const liveManifest = JSON.parse(readFileSync(liveManifestPath, 'utf8')) as { version: string }
+      assert.equal(liveManifest.version, installedCliVersion, 'live DSH CLI changed between the two clean consumer installs')
       assert.equal(packageName, source.name)
       assert.ok(bundles.includes(source.name), 'candidate bundle did not join the real DSH profile')
       const url = new URL(pairingLink)
@@ -133,7 +144,7 @@ async function installCandidate(tarball: string): Promise<void> {
       const authenticated = await probe(url.hostname, port, '/api/session/list',
         { ...request, headers: { ...request.headers, cookie } }, ca)
       assert.equal(succeeded(authenticated), true, 'paired candidate could not execute the authenticated session RPC')
-    }, { tarball })
+    }, { tarball, cliSpec: installedCliVersion })
     console.log('lanyard candidate: PASS; verified ' + source.name + '@' + source.version
       + ' installed with seven exports, booted in real DSH, denied anonymous LAN traffic and completed TLS pairing')
   } finally {
