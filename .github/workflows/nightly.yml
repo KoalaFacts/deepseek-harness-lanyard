@@ -209,6 +209,11 @@ jobs:
           exit "$LANYARD_SYNC_STATUS"
 
   report:
+    # Serialize writes to the one compatibility-failure issue across overlapping
+    # scheduled runs; keep the run-ID guard below for out-of-order completions.
+    concurrency:
+      group: lanyard-nightly-failure-report-${{ github.repository }}
+      cancel-in-progress: false
     # A scheduled run that fails silently is decorative. Only for the schedule:
     # a manual run has someone watching it.
     name: report
