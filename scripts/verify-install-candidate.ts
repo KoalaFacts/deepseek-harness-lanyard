@@ -64,6 +64,25 @@ export function verifyInstalledExportMap(
   assert.deepEqual(installed, reviewed, 'installed export targets differ from reviewed source')
 }
 
+/**
+ * The DSH CLI's exact version does not pin its transitive web dependencies.
+ * Compare the key browser and HTTP carrier versions across both independent
+ * clean installs before promoting the source-verified artifact.
+ */
+function installedDshCoreVersions(workspace: string): { cli: string; webApp: string; webServer: string } {
+  const cliPath = createRequire(join(workspace, 'package.json')).resolve('@deepseek-ai/dsh/package.json')
+  const webAppPath = createRequire(cliPath).resolve('@deepseek-ai/dsh-web-app/package.json')
+  const webServerPath = createRequire(webAppPath).resolve('@deepseek-ai/dsh-host-webserver/package.json')
+  const version = (path: string): string => {
+    const value = (JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown }).version
+    assert.ok(typeof value === 'string'
+      && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value),
+    'installed DSH core package has no valid version: ' + path)
+    return value
+  }
+  return { cli: version(cliPath), webApp: version(webAppPath), webServer: version(webServerPath) }
+}
+
 async function installCandidate(tarball: string): Promise<void> {
   const workspace = mkdtempSync(join(tmpdir(), 'lanyard-candidate-consumer-'))
   try {
@@ -72,14 +91,12 @@ async function installCandidate(tarball: string): Promise<void> {
     run('pnpm', ['add', '@deepseek-ai/dsh@latest'], workspace)
     const dsh = join(workspace, 'node_modules', '.bin', 'dsh')
     assert.ok(existsSync(dsh), 'published CLI installed no dsh binary')
-    // Keep the real-DSH TLS smoke on this exact resolved CLI, not a second
-    // moving @latest lookup that could change during the same CI job.
-    const cliManifestPath = createRequire(join(workspace, 'package.json')).resolve('@deepseek-ai/dsh/package.json')
-    const cliManifest = JSON.parse(readFileSync(cliManifestPath, 'utf8')) as { version?: unknown }
-    assert.ok(typeof cliManifest.version === 'string'
-      && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cliManifest.version), 'installed DSH CLI has no valid version')
-    const installedCliVersion = cliManifest.version
-    console.log('lanyard candidate: resolved DSH CLI ' + installedCliVersion + '; pinning the real-DSH consumer to the same release')
+    // Also compare the resolved web runtime graph: CLI version parity alone
+    // cannot detect moving upstream caret ranges between fresh installations.
+    const expectedDshCore = installedDshCoreVersions(workspace)
+    const installedCliVersion = expectedDshCore.cli
+    console.log('lanyard candidate: resolved DSH core ' + JSON.stringify(expectedDshCore)
+      + '; pinning the live CLI and rejecting critical web runtime drift')
     const home = join(workspace, 'dsh-home')
     console.log('lanyard candidate: adding the DOWNLOADED tarball with dsh plugin --profile web add')
     run(dsh, ['plugin', '--profile', 'web', 'add', tarball], workspace, { ...process.env, DSH_HOME: home })
@@ -123,9 +140,8 @@ async function installCandidate(tarball: string): Promise<void> {
     // *same* SHA-verified tarball, with a live TLS listener and upstream login.
     const { withDshDeployment, probe, rpcCall, refused, sessionCookie, sessionCookieSecure, succeeded } = await import('./dsh-harness.ts')
     await withDshDeployment(async ({ bundles, packageName, pairingLink, port, ca, cwd }) => {
-      const liveManifestPath = createRequire(join(cwd, 'package.json')).resolve('@deepseek-ai/dsh/package.json')
-      const liveManifest = JSON.parse(readFileSync(liveManifestPath, 'utf8')) as { version: string }
-      assert.equal(liveManifest.version, installedCliVersion, 'live DSH CLI changed between the two clean consumer installs')
+      assert.deepEqual(installedDshCoreVersions(cwd), expectedDshCore,
+        'DSH CLI/Web UI/HTTP carrier versions drifted between clean consumer installs')
       assert.equal(packageName, source.name)
       assert.ok(bundles.includes(source.name), 'candidate bundle did not join the real DSH profile')
       const url = new URL(pairingLink)
