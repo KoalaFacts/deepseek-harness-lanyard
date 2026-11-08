@@ -253,6 +253,9 @@ jobs:
             if (existing === undefined) {
               await github.rest.issues.create({ ...context.repo, title, body })
             } else if (existing.body !== body) {
+              // A delayed older scheduled run must not replace a newer failure link.
+              const recordedRunId = /^The nightly run failed: [^\n]*\/actions\/runs\/(\d+)/.exec(existing.body || '')?.[1]
+              if (recordedRunId && BigInt(recordedRunId) > BigInt(context.runId)) return
               await github.rest.issues.update({
                 ...context.repo, issue_number: existing.number, body,
               })
