@@ -243,15 +243,17 @@ jobs:
               '- **a job exited 2 with SKIPPED** — the registry could not serve a complete',
               '  `dsh` graph at that moment. Nothing was tested; no action needed.',
             ].join('\n')
-            // One tracking issue, commented on rather than reopened nightly.
+            // Keep a single actionable issue with its newest failing run.
+            // Updating the body preserves a live pointer without one new
+            // notification/comment for every recurrence of the same failure.
             const open = await github.rest.issues.listForRepo({
               ...context.repo, state: 'open', per_page: 100,
             })
             const existing = open.data.find(issue => issue.title === title)
             if (existing === undefined) {
               await github.rest.issues.create({ ...context.repo, title, body })
-            } else {
-              await github.rest.issues.createComment({
+            } else if (existing.body !== body) {
+              await github.rest.issues.update({
                 ...context.repo, issue_number: existing.number, body,
               })
             }
