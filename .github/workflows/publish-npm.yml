@@ -316,4 +316,3 @@ jobs:
         env:
           DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
         run: npm publish --provenance --tag "$DIST_TAG" --ignore-scripts
-
