@@ -64,7 +64,7 @@ dsh plugin --profile web add $tarball
 
 如果暂时无法在本机从源码构建，可以打开 [CI 工作流](https://github.com/KoalaFacts/deepseek-harness-lanyard/actions/workflows/ci.yml)，选择一次 **`main` 分支全部成功的运行**。先确认 **node24-startup、check、e2e、browser、windows-keep-awake、candidate-consumer** 六项全部通过，再到 *Artifacts* 下载 **`unpublished-lanyard-<完整提交 SHA>`**。在运行 dsh 的电脑上解压 ZIP，里面有可安装的 `.tgz`、`SHA256SUMS` 和 `SOURCE_SHA`。确认 `SOURCE_SHA` 与该次成功运行的完整提交 SHA 一致；也可运行 `sha256sum -c SHA256SUMS`（macOS：`shasum -a 256 -c SHA256SUMS`）检查文件有无意外损坏。然后用 `dsh plugin --profile web add "/实际解压目录/安装包.tgz"` 安装，替换成文件的真实绝对路径。
 
-这种产物**只会在 main 推送时生成**，保存七天，**不是 npm 正式发布、独立签名的来源证明，也不是实体手机验收结果**。与安装包放在同一 ZIP 的校验和仅用于发现意外损坏，不能单独证明来源可信；必须在 GitHub 上核对工作流和提交。安装后仍需显式提供 `--host <本机实际局域网 IPv4>` 才会开放局域网服务。
+供用户安装的候选包**必须等五项前置 CI 作业和独立干净环境 DSH 消费者验收全部通过后才会上传**。在此之前可能出现一份只保存一天的内部预检包，但它不是已验收安装候选包。最终产物**只会在 main 推送时生成**，保存七天，**不是 npm 正式发布、独立签名的来源证明，也不是实体手机验收结果**。与安装包放在同一 ZIP 的校验和仅用于发现意外损坏，不能单独证明来源可信；必须在 GitHub 上核对工作流和提交。安装后仍需显式提供 `--host <本机实际局域网 IPv4>` 才会开放局域网服务。
 
 只有 npm 发布了可用的 Lanyard 正式版本（而非 `0.0.0` 占位包），才能在 Web 侧边栏的 **Plugins（插件）** 页面按包名安装；其显示名称是 *Lanyard 手机访问*。在此之前，请使用上面的本地 tarball 或已核对来源的 `main` CI 安装候选包，**不要通过插件页面安装占位包**。
 

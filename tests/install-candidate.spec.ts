@@ -111,16 +111,38 @@ it('rejects swapped-but-loadable module and locale export targets in a clean con
 
 it('the main candidate consumer downloads this run artifact only after all main gates', () => {
   const workflow = parse(readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8')) as {
-    jobs: { 'candidate-consumer': { needs: string[]; if: string; steps: Array<{ uses?: string; with?: { name?: string; 'persist-credentials'?: boolean }; env?: Record<string, string>; run?: string }> } }
+    jobs: {
+      check: { steps: Array<{ name?: string; uses?: string; with?: { name?: string }; if?: string }> }
+      'candidate-consumer': {
+        needs: string[]; if: string
+        steps: Array<{
+          name?: string; uses?: string; if?: string
+          with?: { name?: string; path?: string; 'persist-credentials'?: boolean; 'retention-days'?: number }
+          env?: Record<string, string>; run?: string
+        }>
+      }
+    }
   }
   const job = workflow.jobs['candidate-consumer']
   expect(job.needs).toEqual(['node24-startup', 'check', 'e2e', 'browser', 'windows-keep-awake'])
   const checkout = job.steps.find(step => step.uses?.startsWith('actions/checkout@'))
   expect(checkout?.with?.['persist-credentials']).toBe(false)
   expect(job.if).toContain("github.ref == 'refs/heads/main'")
+  const preflight = workflow.jobs.check.steps.find(step => step.name === 'Upload main preflight tarball for isolated consumer verification')
+  expect(preflight?.with?.name).toBe('preflight-lanyard-${{ github.sha }}')
+  expect(preflight?.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+  expect(workflow.jobs.check.steps.some(step => step.with?.name === 'unpublished-lanyard-${{ github.sha }}'))
+    .toBe(false)
   expect(job.steps.find(step => step.uses?.startsWith('actions/download-artifact@'))?.with?.name)
-    .toBe('unpublished-lanyard-${{ github.sha }}')
+    .toBe('preflight-lanyard-${{ github.sha }}')
   const install = job.steps.find(step => step.run?.includes('verify-install-candidate.ts'))
   expect(install?.env?.LANYARD_EXPECTED_SHA).toBe('${{ github.sha }}')
   expect(install?.env?.LANYARD_CANDIDATE_DIR).toBe('${{ runner.temp }}/lanyard-candidate')
+  const promoted = job.steps.find(step => step.name === 'Upload verified main install candidate')
+  expect(promoted?.uses).toMatch(/^actions\/upload-artifact@/)
+  expect(promoted?.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+  expect(promoted?.with?.name).toBe('unpublished-lanyard-${{ github.sha }}')
+  expect(promoted?.with?.path).toBe('${{ runner.temp }}/lanyard-candidate/')
+  expect(promoted?.with?.['retention-days']).toBe(7)
+  expect(job.steps.indexOf(promoted!)).toBeGreaterThan(job.steps.indexOf(install!))
 })
