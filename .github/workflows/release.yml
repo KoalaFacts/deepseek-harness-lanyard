@@ -226,10 +226,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # gh creates the tag from --target, so this is both at once, and the gh
-      # CLI ships on the runner so it needs no third-party action. Nothing has
-      # been published at this point, so there is no half-done state to explain:
-      # a failure here leaves the registry untouched and the tag simply absent.
+      # Explicitly push the verified tag before cutting the Release: gh's
+      # --target only applies when a tag does not exist. A conflicting tag
+      # introduced while verify waited for environment approval must not be
+      # silently reused. A failure after the push can leave a tag without a
+      # Release; recovery is manual, never an automatic delete/retag.
       - name: Tag the commit and create the GitHub Release
         if: inputs.dry_run == false
         env:
@@ -242,8 +243,22 @@ jobs:
           set -euo pipefail
           PRERELEASE=()
           if [ "$DIST_TAG" = next ]; then PRERELEASE=(--prerelease); fi
+          # --target would be ignored if someone created the tag while
+          # verify waited for production approval. A non-force push rejects
+          # any conflicting remote ref before a Release can be announced.
+          git tag "v$VERSION" "$TARGET"
+          if ! git push origin "refs/tags/v$VERSION"; then
+            echo "::error::cannot create v$VERSION at verified $TARGET; a conflicting tag may have appeared since verify"
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/tags/v$VERSION"
+          REMOTE_SHA="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          if [ "$REMOTE_SHA" != "$TARGET" ]; then
+            echo "::error::remote tag v$VERSION points to $REMOTE_SHA, not verified $TARGET"
+            exit 1
+          fi
           gh release create "v$VERSION" \
-            --target "$TARGET" \
+            --verify-tag \
             --title "v$VERSION" \
             --generate-notes \
             "${PRERELEASE[@]}"
