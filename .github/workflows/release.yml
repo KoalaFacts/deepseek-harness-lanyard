@@ -192,8 +192,21 @@ jobs:
       # which is the failure only time can introduce.
       - run: npm run check
 
+      # Rehearsals must never enter the protected production environment:
+      # even an inert step there would require deployment approval.
+      - name: Report what a dry run would have done
+        if: inputs.dry_run == true
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
+        run: |
+          echo "dry run only — no tag and no Release were created."
+          echo "a real run would tag v$VERSION and cut a Release, for publishing to the $DIST_TAG channel."
 
   tag:
+    # Skip this entire environment-bound job for dry runs; skipping a step
+    # inside it still requests production deployment approval.
+    if: inputs.dry_run == false
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -236,11 +249,3 @@ jobs:
             "${PRERELEASE[@]}"
           echo "tagged v$VERSION — publish it with the publish-npm workflow"
 
-      - name: Report what a dry run would have done
-        if: inputs.dry_run != false
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
-          DIST_TAG: ${{ needs.verify.outputs.dist_tag }}
-        run: |
-          echo "dry run only — no tag and no Release were created."
-          echo "a real run would tag v$VERSION and cut a Release, for publishing to the $DIST_TAG channel."
