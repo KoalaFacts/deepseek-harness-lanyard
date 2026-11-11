@@ -8,7 +8,7 @@
  * @module
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -87,7 +87,7 @@ export function lanIpv4Addresses(): string[] {
 export function certificateCovers(certPath: string, addresses: string[]): boolean {
   let named: string
   try {
-    named = new X509Certificate(readFileSync(certPath)).subjectAltName ?? ''
+    named = new X509Certificate(readManagedPem(certPath)).subjectAltName ?? ''
   } catch {
     return false
   }
@@ -101,6 +101,9 @@ export function certificateCovers(certPath: string, addresses: string[]): boolea
 /**
  * Write one certificate and key pair unless a usable one already exists. The
  * key is written before the certificate and each lands through a rename.
+ * For an expired/not-yet-valid identity, a reported certificate write failure
+ * rolls the key back while the old certificate remains. This is not atomic
+ * across abrupt process or power loss between the two file replacements.
  * Any pre-existing material must form a readable matching pair before SAN or
  * date checks permit renewal: an interrupted replacement must not silently
  * discard the remaining identity, even when the LAN address has changed.
@@ -149,27 +152,87 @@ export async function generateMaterial(certPath: string, keyPath: string, addres
   }
 }
 
+/**
+ * A dangling certificate/key symlink is still a saved filesystem entry.
+ * existsSync() follows its missing target and reports false, which would let
+ * first-issue generation silently replace that link and discard a previous
+ * TLS identity. Treat any existing entry as saved material; unreadable or
+ * unmatched pairs are rejected by generateLockedMaterial().
+ */
+function materialEntryExists(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false }) !== undefined
+}
+
+/**
+ * Bound saved managed PEM reads, even for valid certs/keys followed by huge
+ * whitespace. A pathname size check before readFileSync cannot protect
+ * against a non-cooperating writer changing the file during that read.
+ */
+const MAX_MANAGED_PEM_BYTES = 1024 * 1024
+
+/** Keep a bounded-input recovery error distinct from malformed or mismatched PEM. */
+class ManagedPemTooLarge extends Error {}
+
+function readManagedPem(path: string): string {
+  // Do not block on a FIFO substituted after the entry check on POSIX.
+  const fd = openSync(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK))
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error('Managed TLS PEM must be a regular file')
+    const chunks: Buffer[] = []
+    let total = 0
+    while (total <= MAX_MANAGED_PEM_BYTES) {
+      const length = Math.min(64 * 1024, MAX_MANAGED_PEM_BYTES + 1 - total)
+      const chunk = Buffer.allocUnsafe(length)
+      const bytesRead = readSync(fd, chunk, 0, length, null)
+      if (bytesRead === 0) break
+      chunks.push(chunk.subarray(0, bytesRead))
+      total += bytesRead
+    }
+    if (total > MAX_MANAGED_PEM_BYTES) throw new ManagedPemTooLarge('Managed TLS PEM exceeds the 1 MiB size limit')
+    return Buffer.concat(chunks, total).toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** The complete material transaction, called only with both writer locks held. */
 async function generateLockedMaterial(certPath: string, keyPath: string, addresses: string[]): Promise<void> {
-  const hasCertificate = existsSync(certPath)
-  const hasKey = existsSync(keyPath)
+  const hasCertificate = materialEntryExists(certPath)
+  const hasKey = materialEntryExists(keyPath)
   if (hasCertificate !== hasKey) {
     // A partial identity may be the result of an interrupted update or an
     // operator moving one file. Never destroy the survivor to "repair" it.
     throw new Error('Existing TLS certificate and private key are incomplete. Files were left unchanged; restore the missing file from a matching pair before restarting.')
   }
+  // Rename replaces a symlink rather than its target. Non-file entries are
+  // unsafe too: a FIFO can block readFileSync forever, and directories or
+  // device nodes are not certificate material. Check both entries before any
+  // synchronous PEM read, even when the LAN address has not changed.
+  if (hasCertificate && (!lstatSync(certPath).isFile() || !lstatSync(keyPath).isFile())) {
+    throw new Error('Managed TLS certificate and private key must be regular files, not symbolic links or special filesystem entries. Files were left unchanged; restore the matching pair as regular files before restarting.')
+  }
   // A LAN-address-only certificate reissue must not replace the matching
   // private key. If the certificate rename fails, the saved pair must still
   // match on the next boot rather than strand the user's phone identity.
   let retainedKeyPair: { privateKey: string; publicKey: string } | undefined
+  // Validity renewal rotates the key; a failed certificate write must not
+  // strand the old certificate next to that new private key.
+  let previousIdentity: { certificate: string; key: string } | undefined
   if (hasCertificate) {
     let cert: X509Certificate
     let savedKey: string
     try {
-      cert = new X509Certificate(readFileSync(certPath))
-      savedKey = readFileSync(keyPath, 'utf8')
+      const certificate = readManagedPem(certPath)
+      cert = new X509Certificate(certificate)
+      savedKey = readManagedPem(keyPath)
+      previousIdentity = { certificate, key: savedKey }
       if (!cert.checkPrivateKey(createPrivateKey(savedKey))) throw new Error('key mismatch')
-    } catch {
+    } catch (error) {
+      // An otherwise parseable PEM may exceed the enforced read budget. Report
+      // the recovery action rather than misdiagnose it as a mismatched pair.
+      if (error instanceof ManagedPemTooLarge) {
+        throw new ManagedPemTooLarge('Existing TLS certificate or private key exceeds the 1 MiB PEM size limit. Files were left unchanged; restore a matching pair with each file no larger than 1 MiB before restarting.')
+      }
       // Check identity before SANs: a moved LAN address must never make a
       // mismatched or unreadable saved pair eligible for automatic replacement.
       throw new Error('Existing TLS certificate and private key cannot be used together. Files were left unchanged; restore a readable matching pair before restarting.')
@@ -185,6 +248,7 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
         privateKey: savedKey,
         publicKey: cert.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       }
+      previousIdentity = undefined
     }
   }
   const notBeforeDate = new Date()
@@ -215,10 +279,25 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
       // Do not touch an existing identity or any key another writer changed.
       if (!hasCertificate && !hasKey) {
         try {
-          if (!existsSync(certPath) && readFileSync(keyPath, 'utf8') === pems.private) {
+          if (!existsSync(certPath) && readManagedPem(keyPath) === pems.private) {
             unlinkSync(keyPath)
           }
         } catch { /* Fail closed if cleanup fails; preserve the original error. */ }
+      } else if (previousIdentity !== undefined) {
+        // The old certificate is still on disk; roll back only this attempt's
+        // replacement key. A non-cooperating writer must never be overwritten.
+        try {
+          if (readManagedPem(certPath) !== previousIdentity.certificate
+            || readManagedPem(keyPath) !== pems.private) {
+            throw new Error('TLS identity changed during failed renewal; refusing unsafe rollback')
+          }
+          writeAtomic(keyPath, previousIdentity.key, 0o600)
+        } catch (restoreError) {
+          throw new Error(
+            'TLS renewal failed and the previous matching private key could not be restored; recover cert.pem and key.pem from a matching backup',
+            { cause: new AggregateError([error, restoreError], 'TLS renewal and rollback failed') },
+          )
+        }
       }
       throw error
     }
@@ -230,18 +309,43 @@ async function generateLockedMaterial(certPath: string, keyPath: string, address
 /** Write through a sibling temp file and rename, so a reader sees old-or-new, never partial. */
 function writeAtomic(path: string, content: string, mode: number): void {
   const temp = `${path}.${String(process.pid)}.tmp`
-  // 'wx' on the temp file only: a leftover temp means another process is
-  // mid-write, which is worth failing on. The rename over `path` is what makes
-  // replacing an existing certificate work at all.
-  writeFileSync(temp, content, { mode, flag: 'wx' })
+  // Exclusive creation distinguishes a previous writer's temp from this
+  // attempt's. writeFileSync may leave a partially written temp before it
+  // throws (e.g. ENOSPC/EFBIG); rename failure is not the only cleanup path.
+  const fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, mode)
+  let closed = false
   try {
+    writeFileSync(fd, content)
+    closeSync(fd)
+    closed = true
     renameSync(temp, path)
   } catch (error) {
-    // The exclusive create succeeded, so this temp belongs to this attempt.
-    // Remove it after a failed rename; otherwise retrying in this same process
-    // hits EEXIST forever. Never remove a temp that failed the 'wx' guard.
-    try { unlinkSync(temp) } catch { /* Preserve the original rename failure. */ }
+    if (!closed) {
+      try { closeSync(fd) } catch { /* Preserve the original write/close error. */ }
+    }
+    // Reaching here proves the exclusive open succeeded, so only this attempt's
+    // partial temp is removed. An existing temp fails at open and is untouched.
+    try { unlinkSync(temp) } catch { /* Preserve the original failure. */ }
     throw error
+  }
+}
+
+/**
+ * Do not serve a managed identity saved with permissions which let other local
+ * accounts read its private key or traverse its private material directory.
+ * mkdirSync({ recursive: true, mode }) does not repair an existing directory;
+ * a restored key may likewise be group/world-readable. Fail closed rather than
+ * silently changing permissions on a directory the operator may share.
+ * POSIX mode bits do not describe Windows ACLs; Windows file security remains
+ * the operator's responsibility.
+ */
+function assertOwnerOnlyManagedMaterial(dir: string, keyPath: string): void {
+  if (process.platform === 'win32') return
+  if ((statSync(dir).mode & 0o077) !== 0) {
+    throw new Error('Managed TLS directory permissions must be owner-only (chmod 700 on the material directory); existing permissions were left unchanged')
+  }
+  if (existsSync(keyPath) && (statSync(keyPath).mode & 0o077) !== 0) {
+    throw new Error('Managed TLS private key permissions must be owner-only (chmod 600 on key.pem); existing permissions were left unchanged')
   }
 }
 
@@ -262,6 +366,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Owner-only: the key's directory must not be world-traversable on a shared host.
   mkdirSync(config.dir, { recursive: true, mode: 0o700 })
   try {
+    // Check before reading a reused identity and after any write. Neither a
+    // pre-existing directory nor a restored key is automatically chmodded.
+    assertOwnerOnlyManagedMaterial(config.dir, keyPath)
     // A concrete-interface carrier cannot serve the other adapters. Requiring
     // SANs for all of them rotates a phone's accepted certificate whenever an
     // unrelated VPN or virtual adapter appears. Legacy wildcard binds still
@@ -269,8 +376,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const addresses = config.host === undefined || config.host === '0.0.0.0'
       ? lanIpv4Addresses() : [config.host]
     await generateMaterial(certPath, keyPath, addresses)
+    assertOwnerOnlyManagedMaterial(config.dir, keyPath)
   } catch (error) {
-    throw new Error(`lanyard-tls: could not generate TLS material in ${config.dir}`, { cause: error })
+    // Keep the size-limit recovery visible at the top level; a CLI may show
+    // only this error and omit nested causes during startup failure.
+    const message = error instanceof ManagedPemTooLarge
+      ? `lanyard-tls: ${error.message}`
+      : `lanyard-tls: could not generate TLS material in ${config.dir}`
+    throw new Error(message, { cause: error })
   }
   ctx.provide(LANYARD_TLS_SERVICE, { paths: { certPath, keyPath } } satisfies LanyardTlsValues)
 }

@@ -1,14 +1,15 @@
 /** The gated carrier over a real listener: admission, the privileged pin, and TLS. */
 import { connect as tlsConnect } from 'node:tls'
-import { createServer as createTcpServer } from 'node:net'
+import { connect as tcpConnect, createServer as createTcpServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { X509Certificate } from 'node:crypto'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer, { type Config as WebServerConfig, type WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -113,11 +114,42 @@ function response(): ServerResponse & Written {
 }
 
 /** A request whose socket peer the kernel would have filled in. */
-function req(url: string, remoteAddress: string, headers: Record<string, string> = {}): IncomingMessage {
-  return { url, headers, socket: { remoteAddress } } as unknown as IncomingMessage
+function req(url: string, remoteAddress: string, headers: Record<string, string> = {}, method = 'GET'): IncomingMessage {
+  return { url, method, headers, socket: { remoteAddress } } as unknown as IncomingMessage
 }
 
 describe('GatedWebServer', () => {
+  it('reports a disposed configured route as unclaimed without forgetting other live seats', async () => {
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, loopbackOnlyPaths: ['/lan-pin'],
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const warnings: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation(value => { warnings.push(String(value)) })
+    const pinUnclaimed = (): boolean => {
+      warnings.length = 0
+      const report = Reflect.get(server, 'reportUnclaimedPaths') as () => void
+      Reflect.apply(report, server, [])
+      return warnings.some(message => message.includes('no route claimed "/lan-pin"'))
+    }
+    expect(pinUnclaimed()).toBe(true)
+    const handler = (_request: IncomingMessage, res: ServerResponse): void => { res.end('ok') }
+    const exact = server.register({ kind: 'exact', path: '/lan-pin', handler })
+    const prefix = server.register({ kind: 'prefix', path: '/lan-pin', handler })
+    const upgrade = server.registerUpgrade({ path: '/lan-pin', handler: () => {} })
+    expect(pinUnclaimed()).toBe(false)
+    // An attempted duplicate registration throws without creating a phantom claim.
+    expect(() => server.register({ kind: 'exact', path: '/lan-pin', handler }))
+      .toThrow(/duplicate exact route/)
+    exact()
+    expect(pinUnclaimed()).toBe(false)
+    prefix()
+    expect(pinUnclaimed()).toBe(false)
+    upgrade()
+    expect(pinUnclaimed()).toBe(true)
+  })
+
   it('serves TLS and hands a loopback peer to an unmodified consumer\'s routes', async () => {
     const { certPath, keyPath, ca } = await certificateFiles()
     ctx = withSession()
@@ -132,12 +164,366 @@ describe('GatedWebServer', () => {
     expect((await get('127.0.0.1', server.networkPort, '/api/session/list', {}, ca)).status).toBe(200)
   })
 
+
+  it('sends Fetch resource headers before the first slow body chunk over TLS', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+
+    let releaseChunk: () => void = () => {}
+    const maySendChunk = new Promise<void>(resolve => { releaseChunk = resolve })
+    server.register({
+      kind: 'exact', path: '/slow-resource',
+      resource: async () => new Response(new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await maySendChunk
+          controller.enqueue(new TextEncoder().encode('streamed'))
+          controller.close()
+        },
+      }), { status: 200, headers: { 'content-type': 'text/plain' } }),
+    })
+
+    let notifyHeaders: () => void = () => {}
+    const headersSeen = new Promise<void>(resolve => { notifyHeaders = resolve })
+    let responseStatus: number | undefined
+    const completed = new Promise<string>((resolve, reject) => {
+      const client = httpsRequest({
+        host: '127.0.0.1', port: server.networkPort, path: '/slow-resource', ca,
+      }, (response) => {
+        responseStatus = response.statusCode
+        notifyHeaders()
+        const chunks: Buffer[] = []
+        response.on('data', chunk => { chunks.push(Buffer.from(chunk)) })
+        response.on('end', () => { resolve(Buffer.concat(chunks).toString('utf8')) })
+        response.on('error', reject)
+      })
+      client.on('error', reject)
+      client.end()
+    })
+
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      // A blocked body cannot be used to flush headers. This fails on the
+      // prior adapter (writeHead without flushHeaders), even though a normal
+      // static asset whose first chunk is ready immediately still passes.
+      const arrived = await Promise.race([
+        headersSeen.then(() => true),
+        new Promise<boolean>(resolve => { deadline = setTimeout(() => { resolve(false) }, 1_500) }),
+      ])
+      expect(arrived).toBe(true)
+      expect(responseStatus).toBe(200)
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      releaseChunk()
+    }
+    expect(await completed).toBe('streamed')
+  })
+
+  it('forwards the real socket origin to Fetch resources on HTTPS and local HTTP', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const observed: string[] = []
+    server.register({
+      kind: 'exact', path: '/resource-origin',
+      resource: async request => {
+        observed.push(request.url)
+        return new Response('ok')
+      },
+    })
+    const path = '/resource-origin?view=mobile'
+    // A client can invent Host, but that does not change the actual TLS
+    // listener's origin delivered to a Fetch resource.
+    // Node derives TLS SNI from the Host override unless it is set
+    // explicitly. Keep full certificate validation using localhost in the
+    // test certificate's SAN while deliberately spoofing only HTTP Host.
+    const httpsStatus = await new Promise<number>((resolve, reject) => {
+      const client = httpsRequest({
+        host: '127.0.0.1', servername: 'localhost', port: server.networkPort, path, ca,
+        headers: { host: 'attacker.invalid' },
+      }, response => {
+        response.resume()
+        response.on('end', () => { resolve(response.statusCode ?? 0) })
+      })
+      client.on('error', reject)
+      client.end()
+    })
+    expect(httpsStatus).toBe(200)
+    expect(await plainGet('127.0.0.1', server.port, path)).toBe(200)
+    expect(observed).toEqual([
+      `https://127.0.0.1:${server.networkPort}${path}`,
+      `http://127.0.0.1:${server.port}${path}`,
+    ])
+  })
+
+  it('aborts a failed HTTP Fetch resource after upstream handles its error', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+
+    let producerSignal: AbortSignal | undefined
+    server.register({
+      kind: 'exact', path: '/failing-resource',
+      resource: async (request: Request) => {
+        producerSignal = request.signal
+        throw new Error('simulated upstream Fetch resource failure')
+      },
+    })
+
+    // The inherited HTTP carrier still owns error status. A rejected resource
+    // must not leave an un-aborted producer after the 400 is delivered.
+    expect((await get('127.0.0.1', server.networkPort, '/failing-resource', {}, ca)).status).toBe(400)
+    expect(producerSignal?.aborted).toBe(true)
+  })
+
+  it('completes a Fetch resource HEAD response before a stalled body cancellation finishes', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+
+    let releaseCancellation: () => void = () => {}
+    const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve })
+    let cancelCalled = false
+    let resourceSignal: AbortSignal | undefined
+    server.register({
+      kind: 'exact', path: '/head-resource',
+      resource: async (request: Request) => {
+        resourceSignal = request.signal
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelCalled = true
+            return cancellation
+          },
+        }), { status: 200, headers: { 'content-type': 'text/plain' } })
+      },
+    })
+
+    const finished = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const client = httpsRequest({
+        host: '127.0.0.1', port: server.networkPort, path: '/head-resource', method: 'HEAD', ca,
+      }, (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', chunk => { chunks.push(Buffer.from(chunk)) })
+        response.on('end', () => {
+          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') })
+        })
+        response.on('error', reject)
+      })
+      client.on('error', reject)
+      client.end()
+    })
+
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    let arrived: { status: number; body: string } | undefined
+    try {
+      arrived = await Promise.race([
+        finished,
+        new Promise<undefined>(resolve => { deadline = setTimeout(() => { resolve(undefined) }, 1_500) }),
+      ])
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      // This unblocks the old, faulty path as well, so failing the assertion
+      // does not leave a suspended route/socket behind.
+      releaseCancellation()
+    }
+    expect(arrived).toEqual({ status: 200, body: '' })
+    // A stalled cancellation must not leave the producer's request alive.
+    // The old response-close hook deliberately skips already-ended sockets.
+    expect(resourceSignal?.aborted).toBe(true)
+    expect(cancelCalled).toBe(true)
+    await finished
+  })
+
+  it('returns an in-process Fetch HEAD before stalled stream cancellation finishes', async () => {
+    // Pinned older carriers lack readResource; supply only that upstream
+    // method so this test also exercises our optional compatibility adapter.
+    const original = Object.getOwnPropertyDescriptor(WebServer.prototype, 'readResource')
+    if (original === undefined) {
+      Object.defineProperty(WebServer.prototype, 'readResource', {
+        configurable: true, value: async () => new Response(null, { status: 404 }),
+      })
+    }
+    let releaseCancellation: () => void = () => {}
+    const cancellation = new Promise<void>(resolve => { releaseCancellation = resolve })
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      const { certPath, keyPath } = await certificateFiles()
+      ctx = withSession()
+      await ctx.plugin(GatedWebServer, {
+        host: '127.0.0.1', port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+      }).await()
+      const server = ctx.get('webServer') as GatedWebServer
+      let cancelCalled = false
+      let resourceSignal: AbortSignal | undefined
+      let resourceReferrer: string | undefined
+      let resourceReferrerPolicy: string | undefined
+      server.register({
+        kind: 'exact', path: '/inprocess-head-resource',
+        resource: async (request: Request) => {
+          resourceSignal = request.signal
+          resourceReferrer = request.referrer
+          resourceReferrerPolicy = request.referrerPolicy
+          return new Response(new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelCalled = true
+              return cancellation
+            },
+          }), { status: 200, headers: { 'x-lanyard-source': 'fetch' } })
+        },
+      })
+
+      const read: unknown = Reflect.get(server, 'readResource')
+      if (typeof read !== 'function') throw new Error('in-process Fetch reader was not installed')
+      const callerRequest = new Request('http://x/inprocess-head-resource', {
+        method: 'HEAD',
+        referrer: 'https://caller.example/page',
+        referrerPolicy: 'no-referrer',
+      })
+      const pending = Reflect.apply(read, server, [callerRequest, {}]) as Promise<Response>
+      const result = await Promise.race([
+        pending,
+        new Promise<undefined>(resolve => { deadline = setTimeout(() => { resolve(undefined) }, 1_500) }),
+      ])
+      expect(result?.status).toBe(200)
+      expect(result?.headers.get('x-lanyard-source')).toBe('fetch')
+      expect(result?.body).toBeNull()
+      expect(cancelCalled).toBe(true)
+      // Replacing only the signal must not silently reset Request referrer
+      // metadata (Node otherwise changes explicit values to about:client/'').
+      expect(resourceReferrer).toBe(callerRequest.referrer)
+      expect(resourceReferrerPolicy).toBe(callerRequest.referrerPolicy)
+      // Cancellation alone can remain pending. The resource must see abort,
+      // without aborting the original Request owned by its caller.
+      expect(resourceSignal?.aborted).toBe(true)
+      expect(callerRequest.signal.aborted).toBe(false)
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      // Also release the buggy, awaited path so a failed assertion cannot
+      // leave an unfinished resource reader behind.
+      releaseCancellation()
+      if (original === undefined) Reflect.deleteProperty(WebServer.prototype, 'readResource')
+    }
+  })
+
+  it.each(['lookup', 'await'] as const)(
+    'keeps TLS listening when optional Loader %s throws before readiness',
+    async (failurePoint) => {
+      const { certPath, keyPath, ca } = await certificateFiles()
+      ctx = withSession()
+      const originalGet = ctx.get.bind(ctx)
+      const secret = 'synthetic Loader diagnostic secret'
+      const warnings: string[] = []
+      vi.spyOn(ctx.logger, 'warn').mockImplementation(((value: unknown) => {
+        warnings.push(String(value))
+      }) as never)
+      const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+        if (key === 'loader') {
+          if (failurePoint === 'lookup') throw new Error(secret)
+          return { await: () => { throw new Error(secret) } }
+        }
+        return originalGet(key as never)
+      }) as typeof ctx.get)
+      try {
+        await ctx.plugin(GatedWebServer, {
+          host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0,
+        }).await()
+        const server = originalGet('webServer') as GatedWebServer
+        server.register({
+          kind: 'exact', path: '/readiness-check',
+          handler: (_req, res) => { res.writeHead(200); res.end('ready') },
+        })
+        expect(server.scheme).toBe('https')
+        expect((await get('127.0.0.1', server.networkPort, '/readiness-check', {}, ca)).status).toBe(200)
+      } finally {
+        lookup.mockRestore()
+      }
+      expect(warnings).toContain('lanyard: could not check DSH Loader readiness; unclaimed-route diagnostics unavailable for this startup')
+      expect(warnings.join(' ')).not.toContain(secret)
+    },
+  )
+
+  it('does not wait for a paired TLS socket or an incomplete handshake on shutdown', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, tlsCertPath: certPath, tlsKeyPath: keyPath, networkPort: 0,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    const paired = tlsConnect({ host: '127.0.0.1', port: server.networkPort, ca })
+    paired.on('error', () => {}) // Disposal intentionally disconnects active peers.
+    let negotiating: ReturnType<typeof tcpConnect> | undefined
+    let disposing: Promise<void> | undefined
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await new Promise<void>((resolve, reject) => {
+        paired.once('secureConnect', resolve); paired.once('error', reject)
+      })
+      // A TCP client that sends no ClientHello tests the pre-handshake seat.
+      negotiating = tcpConnect(server.networkPort, '127.0.0.1')
+      negotiating.on('error', () => {})
+      await new Promise<void>((resolve, reject) => {
+        negotiating!.once('connect', resolve); negotiating!.once('error', reject)
+      })
+      disposing = ctx.fiber.dispose()
+      const finished = await Promise.race([
+        disposing.then(() => true),
+        new Promise<boolean>(resolve => { deadline = setTimeout(() => { resolve(false) }, 1_500) }),
+      ])
+      expect(finished).toBe(true)
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      paired.destroy()
+      negotiating?.destroy()
+      await (disposing ?? ctx.fiber.dispose())
+      ctx = undefined
+    }
+  })
+
   it('refuses a network bind that has no TLS material', async () => {
     // The launch token and the session cookie are what authenticate a device;
     // over plaintext, anyone on the network could read either.
     ctx = new Context()
     const fiber = ctx.plugin(GatedWebServer, { host: networkBindHost('192.168.1.20'), port: 0 })
     await expect(fiber.await()).rejects.toThrow(/network bind requires TLS material/)
+  })
+
+  it('refuses an empty TLS bind host instead of selecting a wildcard listener', () => {
+    ctx = new Context()
+    // A direct caller can bypass CLI validation; even with valid TLS paths an
+    // empty string must be rejected before node:net treats it as 0.0.0.0 / ::.
+    expect(() => new GatedWebServer(ctx!, {
+      host: '', port: 0, networkPort: 0,
+      tlsCertPath: 'unused-cert.pem', tlsKeyPath: 'unused-key.pem',
+    })).toThrow(/bind host must be a concrete IPv4 literal/)
+  })
+
+  it.each(['localhost', 'not-a-bind-address'])('refuses non-IP host %s even with TLS configured', (host) => {
+    ctx = new Context()
+    expect(() => new GatedWebServer(ctx!, {
+      host, port: 0, networkPort: 0,
+      tlsCertPath: 'unused-cert.pem', tlsKeyPath: 'unused-key.pem',
+    })).toThrow(/bind host must be a concrete IPv4 literal/)
+  })
+
+  it('defaults an omitted direct TLS bind host to loopback, not wildcard', () => {
+    ctx = new Context()
+    const server = new GatedWebServer(ctx, {
+      port: 0, networkPort: 0,
+      tlsCertPath: 'unused-cert.pem', tlsKeyPath: 'unused-key.pem',
+    } as Config)
+    expect(server.host).toBe('127.0.0.1')
   })
 
   it('refuses a bind host it cannot serve, rather than quietly serving loopback under that name', async () => {
@@ -172,6 +558,87 @@ describe('GatedWebServer', () => {
     } finally {
       squatter.close()
     }
+  })
+
+  it('explains a stale or mistyped LAN IPv4 instead of silently serving another interface', async () => {
+    // TEST-NET-1 is not a local interface on the CI hosts. A real bind must
+    // fail with EADDRNOTAVAIL and name the operator's recovery action.
+    const { certPath, keyPath } = await certificateFiles()
+    ctx = withSession()
+    const host = '192.0.2.254'
+    const fiber = ctx.plugin(GatedWebServer, {
+      host: networkBindHost(host), port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    })
+    await expect(fiber.await()).rejects.toThrow(/192\.0\.2\.254.*not assigned.*--host.*local-only use/s)
+  })
+
+  it('refuses nonregular explicit TLS PEM paths without waiting for a FIFO writer', async () => {
+    const { certPath, keyPath } = await certificateFiles()
+    const nonregularDir = mkdtempSync(join(tmpdir(), 'lanyard-explicit-tls-'))
+    const specialPaths = [nonregularDir]
+    try {
+      // Linux's node:fs/promises.readFile() blocks on this FIFO without a
+      // writer; the production descriptor check must reject it first.
+      if (process.platform === 'linux') {
+        const pipe = join(nonregularDir, 'waiting.pipe')
+        execFileSync('mkfifo', [pipe])
+        specialPaths.push(pipe)
+      }
+      for (const special of specialPaths) {
+        for (const kind of ['certificate', 'private key'] as const) {
+          ctx = withSession()
+          const fiber = ctx.plugin(GatedWebServer, {
+            host: '127.0.0.1', port: 0, networkPort: 0,
+            tlsCertPath: kind === 'certificate' ? special : certPath,
+            tlsKeyPath: kind === 'private key' ? special : keyPath,
+          })
+          await expect(fiber.await()).rejects.toThrow(
+            new RegExp(`TLS ${kind} must resolve to a regular file`),
+          )
+          await ctx.fiber.dispose(); ctx = undefined
+        }
+      }
+    } finally {
+      rmSync(nonregularDir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses oversized operator-provided TLS PEMs without reading past 1 MiB', async () => {
+    const { certPath, keyPath, ca } = await certificateFiles()
+    const oversized = join(dirname(certPath), 'oversized.pem')
+    for (const kind of ['certificate', 'private key'] as const) {
+      // A valid PEM prefix plus surplus whitespace is closer to an accidental
+      // oversize chain than random garbage; neither role may read it unbounded.
+      const original = kind === 'certificate' ? ca : readFileSync(keyPath, 'utf8')
+      writeFileSync(oversized, `${original}\n${' '.repeat(1024 * 1024)}`)
+      ctx = withSession()
+      const fiber = ctx.plugin(GatedWebServer, {
+        host: '127.0.0.1', port: 0, networkPort: 0,
+        tlsCertPath: kind === 'certificate' ? oversized : certPath,
+        tlsKeyPath: kind === 'private key' ? oversized : keyPath,
+      })
+      // A mutant allowing the oversized but valid PEM prefix can start the Cordis
+      // service. Its object has reflective getters that throw if Vitest formats
+      // it as a fulfilled promise; normalize success to a harmless scalar so
+      // this test fails on the missing size rejection, not in the reporter.
+      await expect(fiber.await().then(() => 'started')).rejects.toThrow(
+        new RegExp(`TLS ${kind} exceeds the 1 MiB PEM size limit`),
+      )
+      await ctx.fiber.dispose()
+      ctx = undefined
+    }
+  })
+
+  it.skipIf(process.platform === 'win32')('accepts an explicit TLS PEM symlink whose target is a regular file', async () => {
+    const { certPath, keyPath } = await certificateFiles()
+    const linked = join(dirname(certPath), 'current-cert.pem')
+    symlinkSync(certPath, linked)
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: '127.0.0.1', port: 0, networkPort: 0,
+      tlsCertPath: linked, tlsKeyPath: keyPath,
+    }).await()
+    expect((ctx.get('webServer') as GatedWebServer).scheme).toBe('https')
   })
 
   it('refuses TLS material configured by halves', async () => {
@@ -231,7 +698,9 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
   async function gatedHandler(path: string, kind: WebRoute['kind'] = 'prefix', context = withSession()):
   Promise<WebRoute['handler']> {
     const captured: WebRoute[] = []
-    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((route: WebRoute) => {
+    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation((route) => {
+      // Newer DSH also registers Fetch resources; this seam must capture the Node handler.
+      if (!('handler' in route)) throw new Error('expected a Node HTTP route, not a Fetch resource')
       captured.push(route)
       return () => {}
     })
@@ -275,6 +744,46 @@ describe('GatedWebServer admission over a non-loopback peer', () => {
     const paired = response()
     await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
     expect([paired.status, paired.body]).toEqual([403, REFUSAL_BODY])
+  })
+
+  it('returns the gate refusal if upstream session verification throws', async () => {
+    const broken = new Context()
+    broken.provide('connection', {
+      requestRejection: () => { throw new Error('synthetic credential-bearing upstream failure') },
+    })
+    const handler = await gatedHandler('/api', 'prefix', broken)
+    const denied = response()
+    // Without the guard this handler rejects rather than sending the normal
+    // fixed refusal, potentially disrupting the long-running HTTP listener.
+    await expect(Promise.resolve(handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), denied)))
+      .resolves.toBeUndefined()
+    expect([denied.status, denied.body]).toEqual([403, REFUSAL_BODY])
+  })
+
+  it('refuses a LAN peer when the connection service lookup itself throws', async () => {
+    const handler = await gatedHandler('/api')
+    // Cordis mixes ctx.get into Context through the reflection service;
+    // Context.prototype itself has no "get" member to spy on.
+    const reflect = (ctx as Context).reflect
+    const originalGet = reflect.get
+    const lookup = vi.spyOn(reflect, 'get').mockImplementation((function (this: typeof reflect, ...args: unknown[]) {
+      if (args[0] === 'connection') throw new Error('synthetic connection lookup secret')
+      return Reflect.apply(originalGet, this, args)
+    }) as typeof originalGet)
+    try {
+      const denied = response()
+      await expect(Promise.resolve(handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), denied)))
+        .resolves.toBeUndefined()
+      expect([denied.status, denied.body]).toEqual([403, REFUSAL_BODY])
+      // This is only the additional LAN gate; localhost retains its old
+      // behavior, even if the upstream connection service is temporarily down.
+      const local = response()
+      await expect(Promise.resolve(handler(req('/api/session/list', '127.0.0.1'), local)))
+        .resolves.toBeUndefined()
+      expect([local.status, local.body]).toEqual([200, 'REACHED'])
+    } finally {
+      lookup.mockRestore()
+    }
   })
 
   it('keeps the configuration plane at the machine even for a paired device', async () => {
@@ -386,6 +895,67 @@ describe.skipIf(LAN === undefined)('GatedWebServer over TLS from a real LAN peer
     expect(seenPeer).toBeUndefined()
     expect((await get(lan, server.networkPort, '/api/session/list', { cookie: SESSION }, ca)).status).toBe(200)
     expect(seenPeer).toBe(lan)
+  })
+
+
+  it('admits upstream Fetch resources only after the socket gate, preserving cookie security', async () => {
+    const lan = LAN as string
+    const { certPath, keyPath, ca } = await certificateFiles()
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, {
+      host: networkBindHost(lan), port: 0, networkPort: 0, tlsCertPath: certPath, tlsKeyPath: keyPath,
+    }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    // dsh 0.2.2+ registers both browser assets and its SPA fallback as
+    // { resource }, not as the earlier (req, res) handler. The old wrapper
+    // called the object as a function and answered HTTP 400 on pairing.
+    server.register({
+      kind: 'prefix', path: '/plugins',
+      resource: async () => new Response('js bundle', { status: 200 }),
+    })
+    server.registerFallback({
+      resource: async request => {
+        if (new URL(request.url).searchParams.has('token')) {
+          return new Response(null, {
+            status: 303, headers: { location: './', 'set-cookie': `${SESSION}; HttpOnly; SameSite=Strict` },
+          })
+        }
+        return new Response('<html><script></script></html>', { status: 200, headers: { 'content-type': 'text/html' } })
+      },
+    })
+    const request = (path: string, cookie?: string): Promise<{ status: number; cookies: string[]; location: string | undefined }> =>
+      new Promise((resolve, reject) => {
+        const client = httpsRequest({
+          host: lan, port: server.networkPort, path, method: 'GET', ca,
+          headers: cookie === undefined ? {} : { cookie },
+        }, res => {
+          res.resume()
+          res.on('end', () => resolve({
+            status: res.statusCode ?? 0, cookies: res.headers['set-cookie'] ?? [],
+            location: res.headers.location,
+          }))
+        })
+        client.on('error', reject)
+        client.end()
+      })
+    expect((await request('/plugins/client.js')).status).toBe(403)
+    expect((await request('/plugins/client.js', SESSION)).status).toBe(200)
+    expect((await request('/assets/index.js.map')).status).toBe(403)
+    const exchange = await request('/?token=launch-token')
+    expect([exchange.status, exchange.location]).toEqual([303, './'])
+    expect(exchange.cookies).toHaveLength(1)
+    expect(exchange.cookies[0]).toMatch(/; Secure$/)
+    expect((await request('/')).status).toBe(200) // Public fallback; index owner decides auth.
+    expect((await plainGet('127.0.0.1', server.port, '/?token=launch-token'))).toBe(303)
+
+    // Newer carriers can also read a resource in-process after admitting its
+    // Peer. Socket fallback adaptation must not silently turn that into 404.
+    const read = Reflect.get(server, 'readResource') as
+      | ((request: Request, peer: unknown) => Promise<Response>) | undefined
+    if (read !== undefined) {
+      const inProcess = await Reflect.apply(read, server, [new Request('http://x/plugins/client.js'), {}]) as Response
+      expect([inProcess.status, await inProcess.text()]).toEqual([200, 'js bundle'])
+    }
   })
 
   it('keeps this machine on the port the stock carrier would bind, and gives the network its own', async () => {
@@ -564,7 +1134,11 @@ describe('the fallback seat', () => {
   async function gatedFallback(config: Partial<Config> = {}): Promise<WebRoute['handler']> {
     const captured: WebRoute['handler'][] = []
     const spy = vi.spyOn(WebServer.prototype, 'registerFallback')
-      .mockImplementation((handler: WebRoute['handler']) => { captured.push(handler); return () => {} })
+      .mockImplementation((fallback) => {
+        if (typeof fallback !== 'function') throw new Error('expected a Node HTTP fallback handler')
+        captured.push(fallback)
+        return () => {}
+      })
     ctx = withSession()
     await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, ...config }).await()
     const server = ctx.get('webServer') as GatedWebServer
@@ -575,6 +1149,24 @@ describe('the fallback seat', () => {
     return handler
   }
 
+  it('refuses malformed absolute request targets without throwing from the fallback seat', async () => {
+    const handler = await gatedFallback()
+    // node:http accepts these targets before the WHATWG URL parser rejects
+    // them. Public pairing/static assets must not exempt malformed requests.
+    for (const target of ['http://[', 'http://%', '//[::broken']) {
+      for (const peer of ['192.168.1.5', '127.0.0.1']) {
+        const refused = response()
+        await expect(Promise.resolve(handler(req(target, peer, { cookie: SESSION }), refused)))
+          .resolves.toBeUndefined()
+        expect([target, peer, refused.status, refused.body])
+          .toEqual([target, peer, 403, REFUSAL_BODY])
+      }
+    }
+    const valid = response()
+    await handler(req('/?token=launch-token', '192.168.1.5'), valid)
+    expect([valid.status, valid.body]).toEqual([200, 'DIST'])
+  })
+
   it('lets the pairing exchange and the built frontend through to a device holding no session yet', async () => {
     // Pairing is `GET /?token=…` from a device with nothing to present; the
     // seat's owner authenticates the index itself.
@@ -584,6 +1176,62 @@ describe('the fallback seat', () => {
       await handler(req(path, '192.168.1.5'), anonymous)
       expect([path, anonymous.status, anonymous.body]).toEqual([path, 200, 'DIST'])
     }
+  })
+
+  it('never grants anonymous fallback access to API endpoints after a routing change', async () => {
+    const handler = await gatedFallback()
+    for (const path of ['/api/session/list', '/api/settings/update', '/api%2Fsettings/update']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+    }
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect(paired.status).toBe(200)
+    const pinned = response()
+    await handler(req('/api/settings/update', '192.168.1.5', { cookie: SESSION }), pinned)
+    expect([pinned.status, pinned.body]).toEqual([403, REFUSAL_BODY])
+    const staticAsset = response()
+    await handler(req('/assets/index.js', '192.168.1.5'), staticAsset)
+    expect(staticAsset.status).toBe(200)
+  })
+
+  it('keeps loopback-only route pins even when a public fallback takes the request', async () => {
+    const handler = await gatedFallback()
+    // If upstream moves a desktop or dev route to the SPA fallback, neither
+    // an anonymous phone nor an authenticated phone may invoke that path.
+    for (const path of ['/plugins/events', '/open-in-app/open', '/open-in-app%2Fopen']) {
+      for (const headers of [{}, { cookie: SESSION }]) {
+        const denied = response()
+        await handler(req(path, '192.168.1.5', headers), denied)
+        expect([path, denied.status, denied.body]).toEqual([path, 403, REFUSAL_BODY])
+      }
+      const local = response()
+      await handler(req(path, '127.0.0.1'), local)
+      expect([path, local.status, local.body]).toEqual([path, 200, 'DIST'])
+    }
+    const ordinary = response()
+    await handler(req('/assets/index.js', '192.168.1.5'), ordinary)
+    expect([ordinary.status, ordinary.body]).toEqual([200, 'DIST'])
+  })
+
+  it('requires a session for unsafe methods at the public fallback', async () => {
+    const handler = await gatedFallback()
+    // Pairing only needs anonymous GET; assets also allow HEAD.
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const anonymous = response()
+      await handler(req('/?token=launch-token', '192.168.1.5', {}, method), anonymous)
+      expect([method, anonymous.status, anonymous.body]).toEqual([method, 403, REFUSAL_BODY])
+      const paired = response()
+      await handler(req('/assets/index.js', '192.168.1.5', { cookie: SESSION }, method), paired)
+      expect([method, paired.status]).toEqual([method, 200])
+    }
+    const head = response()
+    await handler(req('/assets/index.js', '192.168.1.5', {}, 'HEAD'), head)
+    expect(head.status).toBe(200)
+    const local = response()
+    await handler(req('/assets/index.js', '127.0.0.1', {}, 'POST'), local)
+    expect(local.status).toBe(200)
   })
 
   it('never lets a source map ride the public exemption, however it is spelled', async () => {
@@ -640,6 +1288,76 @@ describe('the fallback seat', () => {
 // A percent-encoded suffix slipped the exclusion on a public route too: the
 // handlers behind the gate decode the pathname before resolving a file.
 describe('percent-encoded paths on a public route', () => {
+  it('keeps API sessions and pins despite an explicitly public registrar', async () => {
+    const captured: WebRoute[] = []
+    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation(route => {
+      if (!('handler' in route)) throw new Error('expected a Node HTTP route')
+      captured.push(route)
+      return () => {}
+    })
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/api'] }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    server.register({ kind: 'prefix', path: '/api', handler: (_q, res) => {
+      res.writeHead(200); res.end('API')
+    } })
+    spy.mockRestore()
+    const handler = captured.at(-1)?.handler
+    if (handler === undefined) throw new Error('the API route was not registered')
+    // The normalized dot path is not classified as /api by WHATWG URL, but
+    // the upstream named /api seat may still receive its raw request target.
+    for (const path of ['/api/session/list', '/api/settings/update', '/api/../assets/index.js']) {
+      const anonymous = response()
+      await handler(req(path, '192.168.1.5'), anonymous)
+      expect([path, anonymous.status, anonymous.body]).toEqual([path, 403, REFUSAL_BODY])
+    }
+    const paired = response()
+    await handler(req('/api/session/list', '192.168.1.5', { cookie: SESSION }), paired)
+    expect(paired.status).toBe(200)
+    const pinned = response()
+    await handler(req('/api/settings/update', '192.168.1.5', { cookie: SESSION }), pinned)
+    expect([pinned.status, pinned.body]).toEqual([403, REFUSAL_BODY])
+    const local = response()
+    await handler(req('/api/settings/update', '127.0.0.1'), local)
+    expect(local.status).toBe(200)
+  })
+
+  it('never grants anonymous writes to an explicitly public named route', async () => {
+    // If an upstream bundle owner adds a write method, publicPaths must not
+    // turn it into an anonymous LAN mutation.
+    const captured: WebRoute[] = []
+    const spy = vi.spyOn(WebServer.prototype, 'register').mockImplementation(route => {
+      if (!('handler' in route)) throw new Error('expected a Node HTTP route')
+      captured.push(route)
+      return () => {}
+    })
+    ctx = withSession()
+    await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/bundles'] }).await()
+    const server = ctx.get('webServer') as GatedWebServer
+    server.register({ kind: 'prefix', path: '/bundles', handler: (_q, res) => {
+      res.writeHead(200); res.end('BUNDLE')
+    } })
+    spy.mockRestore()
+    const handler = captured.at(-1)?.handler
+    if (handler === undefined) throw new Error('the named public route was not registered')
+    for (const method of ['GET', 'HEAD']) {
+      const anonymous = response()
+      await handler(req('/bundles/client.js', '192.168.1.5', {}, method), anonymous)
+      expect([method, anonymous.status]).toEqual([method, 200])
+    }
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const anonymous = response()
+      await handler(req('/bundles/client.js', '192.168.1.5', {}, method), anonymous)
+      expect([method, anonymous.status, anonymous.body]).toEqual([method, 403, REFUSAL_BODY])
+      const paired = response()
+      await handler(req('/bundles/client.js', '192.168.1.5', { cookie: SESSION }, method), paired)
+      expect([method, paired.status]).toEqual([method, 200])
+    }
+    const local = response()
+    await handler(req('/bundles/client.js', '127.0.0.1', {}, 'POST'), local)
+    expect(local.status).toBe(200)
+  })
+
   it('excludes a source map however it is spelled', async () => {
     for (const path of [
       '/bundles/ui-theme/client.js.map', '/bundles/ui-theme/client.js.ma%70', '/bundles/ui-theme/client.js.map/',
@@ -647,7 +1365,11 @@ describe('percent-encoded paths on a public route', () => {
     ]) {
       const captured: WebRoute[] = []
       const spy = vi.spyOn(WebServer.prototype, 'register')
-        .mockImplementation((route: WebRoute) => { captured.push(route); return () => {} })
+        .mockImplementation((route) => {
+          if (!('handler' in route)) throw new Error('expected a Node HTTP route, not a Fetch resource')
+          captured.push(route)
+          return () => {}
+        })
       ctx = withSession()
       await ctx.plugin(GatedWebServer, { host: '127.0.0.1', port: 0, publicPaths: ['/bundles'] }).await()
       const server = ctx.get('webServer') as GatedWebServer

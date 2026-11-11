@@ -14,11 +14,53 @@ interface Mutant {
   from: string
   to: string
   file: string
+  /** Source file to mutate; defaults to src/tls.ts. */
+  source?: string
   test: string
   failure: RegExp
 }
 
 const mutants: Mutant[] = [
+  {
+    label: 'valid managed TLS symlink identity preservation',
+    from: 'if (hasCertificate && (!lstatSync(certPath).isFile() || !lstatSync(keyPath).isFile())) {',
+    to: 'if (false /* MUTANT: allow a managed TLS symlink to be severed during renewal */) {',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses valid linked managed TLS material before renewal can sever its pointer',
+    failure: /promise resolved/i,
+  },
+  {
+    label: 'non-regular managed TLS entries beyond symlinks',
+    from: 'if (hasCertificate && (!lstatSync(certPath).isFile() || !lstatSync(keyPath).isFile())) {',
+    to: 'if (hasCertificate && (lstatSync(certPath).isSymbolicLink() || lstatSync(keyPath).isSymbolicLink())) {',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses non-regular saved TLS entries before reuse and preserves the matching survivor',
+    failure: /cannot be used together|EISDIR|expected.*to throw/i,
+  },
+  {
+    label: 'dangling managed TLS identity symlink presence',
+    from: 'return lstatSync(path, { throwIfNoEntry: false }) !== undefined',
+    to: 'return existsSync(path) /* MUTANT: treat a dangling saved identity link as absent */',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses to overwrite dangling saved TLS material paths',
+    failure: /promise resolved/i,
+  },
+  {
+    label: 'pre-existing TLS material directory owner-only enforcement',
+    from: 'if ((statSync(dir).mode & 0o077) !== 0)',
+    to: 'if (false /* MUTANT: accept a traversable managed TLS directory */)',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses an existing world-traversable managed TLS directory until permissions are repaired',
+    failure: /promise resolved/i,
+  },
+  {
+    label: 'pre-existing managed TLS private key owner-only enforcement',
+    from: 'if (existsSync(keyPath) && (statSync(keyPath).mode & 0o077) !== 0)',
+    to: 'if (false /* MUTANT: reuse a group-readable private key */)',
+    file: 'tests/tls.spec.ts',
+    test: 'refuses an existing group-readable managed private key until permissions are repaired',
+    failure: /promise resolved/i,
+  },
   {
     label: 'filesystem-preserving lock parent canonicalization',
     from: 'realpathSync.native(dirname(path))',
@@ -44,11 +86,27 @@ const mutants: Mutant[] = [
     failure: /expected true to be false/i,
   },
   {
+    label: 'expired TLS renewal key rollback',
+    from: 'else if (previousIdentity !== undefined)',
+    to: 'else if (false /* MUTANT: strand a rotated key next to the saved certificate */)',
+    file: 'tests/tls.spec.ts',
+    test: 'keeps the old certificate and key matched after an expired certificate renewal cannot publish',
+    failure: /expected false to be true/i,
+  },
+  {
     label: 'rename-failure temporary-file cleanup',
     from: 'try { unlinkSync(temp) }',
     to: 'try { void temp /* MUTANT: retain failed rename temp */ }',
     file: 'tests/tls-rename-retry.spec.ts',
     test: 'removes only the temp it created on rename failure and retries with the saved key',
+    failure: /expected true to be false/i,
+  },
+  {
+    label: 'partial-write TLS temporary-file cleanup',
+    from: 'try { unlinkSync(temp) }',
+    to: 'try { void temp /* MUTANT: strand a partial private-key temp */ }',
+    file: 'tests/tls.spec.ts',
+    test: 'cleans a partially written TLS temp after a disk-limit error and allows a retry',
     failure: /expected true to be false/i,
   },
   {
@@ -58,6 +116,41 @@ const mutants: Mutant[] = [
     file: 'tests/tls.spec.ts',
     test: 'refuses to overwrite a surviving identity file when cert.pem is missing',
     failure: /promise resolved/i,
+  },
+  {
+    label: 'operator PEM path must resolve to a regular file before read',
+    from: 'if (!(await handle.stat()).isFile()) throw new Error(nonregular)',
+    to: 'if (false /* MUTANT: read a FIFO or directory as TLS PEM */) throw new Error(nonregular)',
+    source: 'src/webserver.ts',
+    file: 'tests/gated-webserver.spec.ts',
+    test: 'refuses nonregular explicit TLS PEM paths without waiting for a FIFO writer',
+    failure: /EISDIR|expected.*to throw/i,
+  },
+  {
+    label: 'bounded saved managed TLS PEM reads',
+    from: "if (total > MAX_MANAGED_PEM_BYTES) throw new ManagedPemTooLarge('Managed TLS PEM exceeds the 1 MiB size limit')",
+    to: "if (false /* MUTANT: accept oversized saved managed PEM */) throw new ManagedPemTooLarge('Managed TLS PEM exceeds the 1 MiB size limit')",
+    file: 'tests/tls.spec.ts',
+    test: 'refuses oversized but parseable managed cert.pem before identity reuse',
+    failure: /promise resolved|resolved instead of rejecting/i,
+  },
+  {
+    label: 'optional Loader diagnostics do not interrupt TLS startup',
+    from: "this.ctx.logger.warn('lanyard: could not check DSH Loader readiness; unclaimed-route diagnostics unavailable for this startup')",
+    to: 'throw error /* MUTANT: allow optional Loader error to abort TLS startup */',
+    source: 'src/webserver.ts',
+    file: 'tests/gated-webserver.spec.ts',
+    test: 'keeps TLS listening when optional Loader lookup throws before readiness',
+    failure: /synthetic Loader diagnostic secret/i,
+  },
+  {
+    label: 'bounded operator-provided TLS PEM reads',
+    from: 'if (total > MAX_EXPLICIT_PEM_BYTES) throw new Error(oversized)',
+    to: 'if (false /* MUTANT: accept an oversized PEM */) throw new Error(oversized)',
+    source: 'src/webserver.ts',
+    file: 'tests/gated-webserver.spec.ts',
+    test: 'refuses oversized operator-provided TLS PEMs without reading past 1 MiB',
+    failure: /expected.*to throw|promise resolved/i,
   },
 ]
 
@@ -107,16 +200,21 @@ function runTest(mutant: Mutant, label: string, expectFailure: boolean): void {
 
 try {
   for (const [index, mutant] of mutants.entries()) {
-    if (original.split(mutant.from).length !== 2) {
+    const targetSource = mutant.source === undefined ? sourcePath : resolve(root, mutant.source)
+    const sourceOriginal = mutant.source === undefined ? original : readFileSync(targetSource, 'utf8')
+    if (sourceOriginal.split(mutant.from).length !== 2) {
       throw new Error(`Mutation anchor is missing or ambiguous for ${mutant.label}`)
     }
     const id = String(index)
     runTest(mutant, id + '-baseline', false)
-    writeFileSync(sourcePath, original.replace(mutant.from, mutant.to))
+    writeFileSync(targetSource, sourceOriginal.replace(mutant.from, mutant.to))
     try {
       runTest(mutant, id + '-mutant', true)
     } finally {
-      writeFileSync(sourcePath, original)
+      writeFileSync(targetSource, sourceOriginal)
+    }
+    if (readFileSync(targetSource, 'utf8') !== sourceOriginal) {
+      throw new Error(`Mutation source restoration failed for ${mutant.label}`)
     }
   }
 } finally {

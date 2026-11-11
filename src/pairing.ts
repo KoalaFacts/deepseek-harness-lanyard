@@ -96,7 +96,13 @@ export const Config: z<Config> = z.object({
  * @param candidate - `ctx.connection`, whatever it holds.
  */
 export function isLaunchLinkIssuer(candidate: unknown): candidate is LaunchLinkIssuer {
-  return typeof (candidate as Partial<LaunchLinkIssuer> | undefined)?.authenticatedUrl === 'function'
+  try {
+    return typeof (candidate as Partial<LaunchLinkIssuer> | undefined)?.authenticatedUrl === 'function'
+  } catch {
+    // Even reading a broken upstream issuer property can throw a diagnostic
+    // containing the launch token. Refuse pairing without propagating it.
+    return false
+  }
 }
 
 /**
@@ -105,13 +111,41 @@ export function isLaunchLinkIssuer(candidate: unknown): candidate is LaunchLinkI
  * @param scheme - the scheme the carrier actually answers.
  * @param port - the port a device on the network reaches.
  * @param lanAddress - the LAN literal to advertise, or undefined on a loopback bind.
- * @returns the link, or undefined when there is no network address to pair over.
+ * @returns a same-origin HTTPS root link carrying one launch token, or undefined if the address or issuer contract is unsafe.
  */
 export function pairingLink(
   issuer: LaunchLinkIssuer, scheme: 'http' | 'https', port: number, lanAddress: string | undefined,
 ): string | undefined {
-  if (lanAddress === undefined || isIP(lanAddress) !== 4) return undefined
-  return issuer.authenticatedUrl(`${scheme}://${lanAddress}:${String(port)}/`)
+  if (lanAddress === undefined || isIP(lanAddress) !== 4 || scheme !== 'https'
+    || !Number.isSafeInteger(port) || port < 1 || port > 65_535) return undefined
+  const baseUrl = `${scheme}://${lanAddress}:${String(port)}/`
+  let link: string
+  try {
+    link = issuer.authenticatedUrl(baseUrl)
+  } catch {
+    // A drifted upstream issuer can throw a diagnostic that includes the
+    // launch token. Never allow that message into logs or an unhandled
+    // readiness promise: refuse pairing through the fixed error path below.
+    return undefined
+  }
+  if (typeof link !== 'string') return undefined
+  // The upstream issuer owns the secret, but it must never change the trusted
+  // listener we are about to ask a phone to contact. Compare parsed origins,
+  // not textual prefixes (which accept host.example.evil or userinfo tricks).
+  // Require the root token exchange and an unambiguous, canonical URL; this
+  // also excludes redirects, fragments and control characters in printed logs.
+  try {
+    const parsed = new URL(link)
+    // URL.hash is empty even for a trailing bare '#'. Refuse the delimiter
+    // itself, so an upstream contract drift never prints a fragment-bearing link.
+    if (parsed.href !== link || parsed.origin !== new URL(baseUrl).origin
+      || parsed.pathname !== '/' || parsed.username !== '' || parsed.password !== ''
+      || link.includes('#') || parsed.searchParams.size !== 1
+      || !parsed.searchParams.get('token')) return undefined
+  } catch {
+    return undefined
+  }
+  return link
 }
 
 /**
@@ -121,10 +155,11 @@ export function pairingLink(
  *
  * Linux names them by lowercase prefix, and macOS puts its virtual-machine NAT
  * on `bridge100` and up (`bridge0` is Thunderbolt Bridge, a real link, and
- * stays physical). Matched case-sensitively, so `veth` does not swallow
+ * stays physical). Match bridge100 and every higher-numbered bridge,
+ * not only bridge100–199. Matched case-sensitively, so `veth` does not swallow
  * Windows's `vEthernet`.
  */
-const MACHINE_INTERNAL_INTERFACE = /^(?:docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge1\d\d)/
+const MACHINE_INTERNAL_INTERFACE = /^(?:docker|br-|veth|virbr|lxc|lxd|incus|podman|cni|flannel|cali|cilium|weave|vboxnet|vmnet|bridge[1-9]\d{2,})/
 
 /**
  * Windows's friendly names for the same thing. Only the NAT switches are
@@ -193,12 +228,26 @@ export interface RankedAddresses {
 export function rankLanAddresses(
   addresses: readonly string[], interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
 ): RankedAddresses {
-  const nameOf = new Map<string, string>()
+  // An IP can appear on more than one adapter (e.g. an overlapping Docker
+  // bridge and Wi-Fi subnet). The last interface reported by the OS must not
+  // decide whether we print a token-bearing phone link. Treat an ambiguous
+  // address as the least phone-reachable kind reported for it.
+  const kindOf = new Map<string, InterfaceKind>()
   for (const [name, entries] of Object.entries(interfaces)) {
-    for (const entry of entries ?? []) if (entry.family === 'IPv4') nameOf.set(entry.address, name)
+    const candidate = interfaceKind(name)
+    for (const entry of entries ?? []) {
+      if (entry.family !== 'IPv4') continue
+      const previous = kindOf.get(entry.address)
+      if (previous === undefined || KIND_RANK[candidate] > KIND_RANK[previous]) {
+        kindOf.set(entry.address, candidate)
+      }
+    }
   }
-  const ranked = addresses
-    .map((address, index) => ({ address, index, kind: interfaceKind(nameOf.get(address)), range: rangeRank(address) }))
+  // An upstream LAN snapshot can contain the same IPv4 once per interface.
+  // Rank unique destinations so one phone network gets one token-bearing link,
+  // while kindOf still considers *all* adapters claiming that address.
+  const ranked = [...new Set(addresses)]
+    .map((address, index) => ({ address, index, kind: kindOf.get(address) ?? 'physical', range: rangeRank(address) }))
     .sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind] || a.range - b.range || a.index - b.index)
   return {
     ranked: ranked.map(candidate => candidate.address),
@@ -337,7 +386,15 @@ export function shouldDrawQr(wanted: boolean, isTerminal: boolean): boolean {
  * @param config - validated {@link Config}.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const issuer: unknown = ctx.get('connection')
+  let issuer: unknown
+  try {
+    issuer = ctx.get('connection')
+  } catch {
+    // Cordis may throw during an initial service replacement, before the
+    // readiness callback can apply its separate guard. The diagnostic may
+    // contain the launch token: reject with the fixed missing-auth message.
+    issuer = undefined
+  }
   // Without upstream's browser authentication there is no session for a device
   // to hold, and the gate refuses every network peer it cannot vouch for. Fail
   // the load now rather than print a link that could never work.
@@ -348,27 +405,36 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     )
   }
   if (!config.printPairingUrl) return
-  const runtime = ctx.get('webRuntime') as WebRuntimeValues | undefined
-  const host = (ctx.webServer as unknown as SchemeAwareServer).host
-  // New dsh no longer provides webRuntime and binds one concrete interface.
-  // Never advertise other interfaces that this listener does not serve.
-  const addresses = host !== undefined && host !== '0.0.0.0'
-    ? isLoopbackAddress(host) ? [] : [host]
-    : runtime?.lanAddresses ?? []
-  if (addresses.length === 0) return
-  const { ranked, offered } = rankLanAddresses(addresses, internals.networkInterfaces())
-  // A loopback bind has no network address to pair over. A tunnelled device
-  // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
-  // `dsh web:` link like any local browser.
-  if (ranked.length === 0) return
-  // Only an address a phone could be on is worth a link and a code.
-  const lanAddress = offered[0]
   const announce = async (): Promise<void> => {
+    // A delayed Loader may replace the listener or refresh its LAN snapshot.
+    // Resolve both at announcement time, not at plugin activation, so a phone
+    // never receives a link naming an interface the current server does not use.
+    const server = ctx.webServer as unknown as SchemeAwareServer
+    const host = server.host
+    // Concrete binds on current dsh do not need the legacy webRuntime service.
+    // Skip that optional lookup: a broken getter must not break pairing with
+    // an otherwise healthy TLS listener bound to one known IPv4 address.
+    const runtime = (host === undefined || host === '0.0.0.0')
+      ? ctx.get('webRuntime') as WebRuntimeValues | undefined
+      : undefined
+    // New dsh no longer provides webRuntime and binds one concrete interface.
+    // Never advertise other interfaces that this listener does not serve.
+    const addresses = host !== undefined && host !== '0.0.0.0'
+      ? isLoopbackAddress(host) ? [] : [host]
+      : runtime?.lanAddresses ?? []
+    if (addresses.length === 0) return
+    const { ranked, offered } = rankLanAddresses(addresses, internals.networkInterfaces())
+    // A loopback bind has no network address to pair over. A tunnelled device
+    // (adb reverse, ssh -R) reaches it as a loopback peer and opens the shipped
+    // `dsh web:` link like any local browser.
+    if (ranked.length === 0) return
+    // Only an address a phone could be on is worth a link and a code.
+    const lanAddress = offered[0]
     // `port` is this machine's plaintext listener, bound to loopback — not
     // somewhere a phone can reach; the gated carrier reports the TLS port as
     // `networkPort`. A shipped carrier has neither that nor a scheme, and is
     // refused just below.
-    const { scheme = 'http', port, networkPort, certificateFingerprint } = ctx.webServer as unknown as SchemeAwareServer
+    const { scheme = 'http', networkPort, certificateFingerprint } = server
     // A LAN address with a plaintext carrier means lanyard's is not the one
     // serving — say, upstream renamed the row this bundle disables — so the
     // network is meeting a carrier without this gate, over plaintext. A link
@@ -386,30 +452,98 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       console.log(`lanyard: no network a phone can join — ${ranked.join(', ')} ${ranked.length === 1 ? 'is a container or virtual-machine bridge' : 'are container or virtual-machine bridges'} inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh`)
       return
     }
-    const reachable = networkPort ?? port
-    const link = pairingLink(issuer, scheme, reachable, lanAddress)
-    if (link === undefined) return
+    // The certificate is self-signed. Without a complete fingerprint there is
+    // no identity a phone can verify before presenting the launch token.
+    // Refuse to advertise a pairing URL if the TLS carrier contract drifts.
+    if (certificateFingerprint === undefined
+      || !/^(?:[0-9a-f]{2}:){31}[0-9a-f]{2}$/i.test(certificateFingerprint)) {
+      ctx.logger.error(
+        'lanyard: stop dsh now — the TLS carrier supplied no valid SHA-256 certificate fingerprint; '
+        + 'no pairing link or QR code is printed because the phone cannot verify the self-signed certificate',
+      )
+      return
+    }
+    // 'port' is the desktop's plaintext loopback listener, never a fallback
+    // for the LAN TLS front. If the carrier no longer reports a usable
+    // networkPort, advertising a token link at 'port' would misdirect pairing.
+    if (networkPort === undefined || !Number.isSafeInteger(networkPort)
+      || networkPort < 1 || networkPort > 65_535) {
+      ctx.logger.error(
+        'lanyard: stop dsh now — the TLS carrier supplied no valid networkPort for its LAN listener; '
+        + 'no pairing link or QR code is printed',
+      )
+      return
+    }
+    const reachable = networkPort
+    // Connection can be replaced while the Loader settles, including after a
+    // service restart. The issuer captured at activation may hold a launch
+    // token the currently mounted Connection no longer accepts. Re-read once
+    // for this entire announcement, before printing any token-bearing link.
+    let currentIssuer: unknown
+    try {
+      currentIssuer = ctx.get('connection')
+    } catch {
+      currentIssuer = undefined
+    }
+    if (!isLaunchLinkIssuer(currentIssuer)) {
+      ctx.logger.error(
+        'lanyard: browser authentication is no longer available at pairing readiness; '
+        + 'no pairing link or QR code is printed; restart dsh to retry',
+      )
+      return
+    }
+    const link = pairingLink(currentIssuer, scheme, reachable, lanAddress)
+    // Validate every URL before printing even the first one. An upstream
+    // contract drift on an alternative interface must not leave a partly
+    // usable, token-bearing set of pairing instructions in terminal logs.
+    const alternatives = offered.filter(address => address !== lanAddress)
+      .map(address => ({ address, link: pairingLink(currentIssuer, scheme, reachable, address) }))
+    if (link === undefined || alternatives.some(alternative => alternative.link === undefined)) {
+      ctx.logger.error(
+        'lanyard: stop dsh now — upstream returned an unsafe pairing URL for the verified HTTPS listener; '
+        + 'no pairing link or QR code is printed',
+      )
+      return
+    }
     // The shipped line's `(LAN: …)` link pairs the plaintext loopback port with
     // the LAN address and carries the launch token. Nothing answers it, so a
     // passive listener learns nothing — but whoever impersonated this machine
     // on the network would receive the token, so say not to open it.
+    // The inherited dsh web line advertises a plaintext LAN address even on
+    // a concrete --host bind. An impersonator could collect its launch token;
+    // never hide this warning merely because the bind is not a wildcard.
     console.log(`lanyard: serving your network over TLS on port ${String(reachable)}`
-      + (host === undefined || host === '0.0.0.0'
-        ? ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token' : ''))
+      + ' — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token')
+    // Put the certificate identity before every token-bearing link; the user
+    // must compare it on the phone before accepting the self-signed TLS peer.
+    console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
+    // A QR code is a bearer credential. A phone must inspect the listener's
+    // certificate through a separate, token-free visit before it sends that
+    // credential. Include the actual address; other interfaces need the same
+    // preflight at their own HTTPS root, not at an unreachable primary IP.
+    console.log(`lanyard: FIRST visit https://${lanAddress}:${String(reachable)}/ on the phone without a token and verify the FULL SHA-256 fingerprint above; for another network, check that link's token-free HTTPS root first. If verification or trust is unavailable, do NOT scan or open a pairing link`)
     console.log(`lanyard: pair a device by opening ${link} once`)
     // The code names one address; a phone on another of this machine's
     // networks gets its own link rather than a guess to edit by hand.
-    for (const alternative of offered.filter(address => address !== lanAddress)) {
-      console.log(`lanyard: or, from a device on the ${alternative} network: ${String(pairingLink(issuer, scheme, reachable, alternative))}`)
+    for (const alternative of alternatives) {
+      console.log(`lanyard: or, from a device on the ${alternative.address} network: ${alternative.link}`)
     }
     // The certificate is self-signed, so the phone's warning is the only check
     // there is; this is what makes it a check rather than a formality.
-    if (certificateFingerprint !== undefined) {
-      console.log(`lanyard: the phone should show certificate SHA-256 ${certificateFingerprint} — if it ever shows another, do not continue`)
-    }
     if (!shouldDrawQr(config.printPairingQr, process.stdout.isTTY === true)) return
     // https://no-color.org — an explicit request not to emit escape codes.
-    const code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))
+    let code: string
+    try {
+      code = await renderPairingQr(link, wantsColour(process.env.NO_COLOR))
+    } catch {
+      // QR rendering is optional after a verified HTTPS link is already
+      // printed. An encoder error could contain the launch token: do not
+      // expose its message or reject the loader's readiness promise.
+      ctx.logger.error(
+        'lanyard: could not render the pairing QR code; use the verified HTTPS pairing link above instead',
+      )
+      return
+    }
     const columns = terminalColumns(process.stdout.columns)
     if (!fitsTerminal(code, columns)) {
       console.log(`lanyard: the code needs ${String(renderedWidth(code))} columns and this terminal has ${String(columns)}, so open the link above instead`)
@@ -421,15 +555,36 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   // Same readiness contract as the shipped URL line: wait for the Loader tree,
   // or print at once in a hand-built context that has no Loader.
-  const settled = ctx.get('loader')?.await()
+  const settled = (() => {
+    try {
+      return ctx.get('loader')?.await()
+    } catch {
+      // Upstream can replace Loader during startup. Its getter or await()
+      // may throw a diagnostic with a launch token; never propagate it.
+      throw new Error('lanyard: could not read DSH startup readiness; no pairing link was printed; restart dsh to retry')
+    }
+  })()
   if (settled === undefined) {
-    await announce()
+    // Hand-built contexts without Loader announce immediately. Their errors
+    // need the same nonsecret recovery path as delayed readiness callbacks.
+    try {
+      await announce()
+    } catch {
+      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')
+    }
     return
   }
   void settled.then(async () => {
     // The tree can be disposed while the boot was in flight (an early SIGTERM);
     // a pairing link for a dead server would only mislead.
-    if (ctx.get('webServer') !== undefined) await announce()
+    try {
+      if (ctx.get('webServer') !== undefined) await announce()
+    } catch {
+      // A service can be replaced or fail during Loader readiness. The
+      // accessor's error may contain session data; never let it escape the
+      // detached readiness promise or copy its diagnostic to a log.
+      ctx.logger.error('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')
+    }
     // Loader reports a failed boot; this row only stays quiet.
   }, () => {})
 }
