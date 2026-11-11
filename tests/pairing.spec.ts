@@ -1,5 +1,6 @@
 /** The pairing link, its QR code, and the row that announces them. */
 import jsQR from 'jsqr'
+import qrcodeTerminal from 'qrcode-terminal'
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import {
@@ -10,6 +11,9 @@ import * as Pairing from '../src/pairing.ts'
 
 /** A launch token of the length upstream mints: 32 random bytes, base64url. */
 const LAUNCH_TOKEN = 'nWXNEOWudT5Vfz4m2-h1bY2lU-pBvOB2oHCufgtaH2E'
+/** The SHA-256 identity a phone must compare before opening the token link. */
+const CERT_FINGERPRINT = '7F:52:AF:73:DB:4B:08:A0:9E:56:2D:83:B1:C5:7D:AF:0C:ED:3D:9A:F8:88:B9:B8:8C:27:3A:7A:2A:02:E4:B3'
+const TOKEN_FREE_PREFLIGHT = "lanyard: FIRST visit https://192.168.1.5:3443/ on the phone without a token and verify the FULL SHA-256 fingerprint above; for another network, check that link's token-free HTTPS root first. If verification or trust is unavailable, do NOT scan or open a pairing link"
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
 
@@ -27,6 +31,41 @@ describe('pairingLink', () => {
     const asked: string[] = []
     pairingLink({ authenticatedUrl: (baseUrl) => { asked.push(baseUrl); return baseUrl } }, 'https', 3080, '192.168.1.5')
     expect(asked).toEqual(['https://192.168.1.5:3080/'])
+  })
+
+  it.each([
+    ['plaintext downgrade', (base: string) => base.replace('https:', 'http:') + `?token=${LAUNCH_TOKEN}`],
+    ['different IP', (_base: string) => `https://192.168.1.6:3443/?token=${LAUNCH_TOKEN}`],
+    ['different port', (base: string) => base.replace(':3443', ':3080') + `?token=${LAUNCH_TOKEN}`],
+    ['lookalike host', (_base: string) => `https://192.168.1.5.example.invalid:3443/?token=${LAUNCH_TOKEN}`],
+    ['userinfo', (base: string) => base.replace('://', '://user@') + `?token=${LAUNCH_TOKEN}`],
+    ['different path', (base: string) => base + `redirect/?token=${LAUNCH_TOKEN}`],
+    ['fragment', (base: string) => base + `?token=${LAUNCH_TOKEN}#redirect`],
+    ['empty fragment', (base: string) => base + `?token=${LAUNCH_TOKEN}#`],
+    ['extra query', (base: string) => base + `?token=${LAUNCH_TOKEN}&next=https://example.invalid`],
+    ['duplicate token', (base: string) => base + `?token=${LAUNCH_TOKEN}&token=other`],
+    ['empty token', (base: string) => base + '?token='],
+    ['missing token', (base: string) => base + '?other=value'],
+    ['relative URL', (_base: string) => `//192.168.1.5:3443/?token=${LAUNCH_TOKEN}`],
+    ['not a URL', (_base: string) => 'not a URL'],
+    ['leading newline', (base: string) => `\n${base}?token=${LAUNCH_TOKEN}`],
+  ])('does not trust an upstream-issued %s pairing URL', (_case, authenticatedUrl) => {
+    expect(pairingLink({ authenticatedUrl }, 'https', 3443, '192.168.1.5')).toBeUndefined()
+  })
+
+  it('treats a throwing upstream link issuer as an unsafe contract, without propagating its token-bearing error', () => {
+    const failing: LaunchLinkIssuer = {
+      authenticatedUrl: () => { throw new Error(`upstream diagnostic contained ${LAUNCH_TOKEN}`) },
+    }
+    expect(pairingLink(failing, 'https', 3443, '192.168.1.5')).toBeUndefined()
+  })
+
+  it('does not ask upstream to issue a plaintext or invalid-port LAN link', () => {
+    const authenticatedUrl = vi.fn(issuer.authenticatedUrl)
+    for (const [scheme, port] of [['http', 3443], ['https', 0], ['https', 65_536], ['https', 3443.5]] as const) {
+      expect(pairingLink({ authenticatedUrl }, scheme, port, '192.168.1.5')).toBeUndefined()
+    }
+    expect(authenticatedUrl).not.toHaveBeenCalled()
   })
 
   it('has no link on a loopback bind with no LAN address to advertise', () => {
@@ -78,6 +117,43 @@ describe('rankLanAddresses', () => {
       .toEqual({ ranked: ['10.0.1.7', '192.168.64.1'], offered: ['10.0.1.7'] })
   })
 
+  it('does not offer an IP shared by a physical adapter and a virtual bridge, regardless of OS order', () => {
+    // The old Map<IP, adapter-name> used the *last* matching adapter. If a
+    // physical adapter came after Docker, an ambiguous address was advertised
+    // as reachable, even though the same IPv4 belonged to a VM-only bridge.
+    for (const machine of [
+      interfaces({ docker0: '192.168.1.40', en0: '192.168.1.40', wlan0: '10.1.2.3' }),
+      interfaces({ en0: '192.168.1.40', docker0: '192.168.1.40', wlan0: '10.1.2.3' }),
+    ]) {
+      expect(rankLanAddresses(['192.168.1.40', '10.1.2.3'], machine)).toEqual({
+        ranked: ['10.1.2.3', '192.168.1.40'],
+        offered: ['10.1.2.3'],
+      })
+    }
+  })
+
+  it('deduplicates repeated IPv4 destinations without trusting an ambiguous bridge address', () => {
+    const machine = interfaces({ en0: '192.168.1.40', docker0: '192.168.1.40', wlan0: '10.1.2.3' })
+    expect(rankLanAddresses(['192.168.1.40', '10.1.2.3', '192.168.1.40', '10.1.2.3'], machine))
+      .toEqual({ ranked: ['10.1.2.3', '192.168.1.40'], offered: ['10.1.2.3'] })
+  })
+
+  it('treats an IP also claimed by an overlay as overlay, not physical', () => {
+    const machine = interfaces({ wg0: '192.168.100.2', eth0: '192.168.100.2', wlan0: '10.0.0.5' })
+    expect(rankLanAddresses(['192.168.100.2', '10.0.0.5'], machine)).toEqual({
+      ranked: ['10.0.0.5', '192.168.100.2'],
+      offered: ['10.0.0.5', '192.168.100.2'],
+    })
+  })
+
+  it('excludes macOS bridge200 VM NAT without hiding physical bridge0', () => {
+    const machine = interfaces({ bridge200: '192.168.65.1', bridge0: '10.5.0.8', en0: '10.0.1.7' })
+    expect(rankLanAddresses(['192.168.65.1', '10.5.0.8', '10.0.1.7'], machine)).toEqual({
+      ranked: ['10.5.0.8', '10.0.1.7', '192.168.65.1'],
+      offered: ['10.5.0.8', '10.0.1.7'],
+    })
+  })
+
   it('tells Windows\'s NAT switches from an external one carrying the real address', () => {
     // Binding an external Hyper-V switch moves the machine's LAN address onto
     // a vEthernet adapter; hiding it as a bridge would leave nothing to pair.
@@ -107,6 +183,13 @@ describe('rankLanAddresses', () => {
 })
 
 describe('isLaunchLinkIssuer', () => {
+  it('rejects a throwing issuer accessor without propagating a token-bearing diagnostic', () => {
+    const broken = Object.defineProperty({}, 'authenticatedUrl', {
+      get() { throw new Error(`synthetic launch token diagnostic ${LAUNCH_TOKEN}`) },
+    })
+    expect(isLaunchLinkIssuer(broken)).toBe(false)
+  })
+
   it('recognises a connection that issues launch-token links, and nothing else', () => {
     expect(isLaunchLinkIssuer(issuer)).toBe(true)
     for (const candidate of [undefined, {}, { authenticatedUrl: 'x' }, { requestRejection: () => undefined }]) {
@@ -250,7 +333,7 @@ describe('the pairing row', () => {
     { lanAddresses = ['192.168.1.5'], connection = issuer as unknown, server, onError }: {
       lanAddresses?: string[]
       connection?: unknown
-      server?: { scheme: 'http' | 'https'; port: number; networkPort?: number; certificateFingerprint?: string }
+      server?: { host?: string; scheme: 'http' | 'https'; port: number; networkPort?: number; certificateFingerprint?: string }
       onError?: (line: string) => void
     } = {},
   ): Promise<string[]> {
@@ -276,24 +359,345 @@ describe('the pairing row', () => {
     expect(errors).toEqual([expect.stringMatching(/^lanyard: stop dsh now .*without lanyard's TLS carrier.*in the clear/)])
   })
 
+  it('refuses to print a token link when the TLS carrier has no certificate fingerprint', async () => {
+    const errors: string[] = []
+    const printed = await mount({}, {
+      server: { scheme: 'https', port: 3080, networkPort: 3443 },
+      onError: line => { errors.push(line) },
+    })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/stop dsh now.*no valid SHA-256 certificate fingerprint.*no pairing link/)])
+  })
+
+  it.each(['', 'AB:CD:EF', 'not-a-fingerprint'])(
+    'refuses a malformed TLS SHA-256 fingerprint (%s) instead of announcing a token', async (invalid) => {
+      const errors: string[] = []
+      const printed = await mount({}, {
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: invalid },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toEqual([])
+      expect(errors).toEqual([expect.stringMatching(/no valid SHA-256 certificate fingerprint.*no pairing link/)])
+    },
+  )
+
+  it.each([undefined, 0, -1, 65_536, 3443.5, Number.NaN])(
+    'refuses pairing when the TLS carrier has no valid LAN port (%s)', async (networkPort) => {
+      const errors: string[] = []
+      const printed = await mount({}, {
+        server: { scheme: 'https', port: 3080, ...(networkPort === undefined ? {} : { networkPort }), certificateFingerprint: CERT_FINGERPRINT },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toEqual([])
+      expect(errors).toEqual([expect.stringMatching(/stop dsh now.*no valid networkPort.*no pairing link/)])
+    },
+  )
+
+  it.each(['primary', 'alternative'])(
+    'does not print any token or propagate an issuer exception for the %s interface', async (failingInterface) => {
+      const errors: string[] = []
+      const printed = await mount({}, {
+        lanAddresses: ['192.168.1.5', '10.8.0.2'],
+        connection: {
+          authenticatedUrl: (base: string) => {
+            if (base.includes(failingInterface === 'primary' ? '192.168.1.5' : '10.8.0.2')) {
+              throw new Error(`upstream diagnostic containing launch token ${LAUNCH_TOKEN}`)
+            }
+            return `${base}?token=${LAUNCH_TOKEN}`
+          },
+        },
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toEqual([])
+      expect(errors).toEqual([expect.stringMatching(/unsafe pairing URL.*no pairing link/)])
+      expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+    },
+  )
+
+  it('refuses an upstream origin downgrade without printing a token or QR code', async () => {
+    const errors: string[] = []
+    const printed = await mount({}, {
+      connection: { authenticatedUrl: (base: string) => base.replace('https:', 'http:') + `?token=${LAUNCH_TOKEN}` },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+      onError: line => { errors.push(line) },
+    })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/stop dsh now.*unsafe pairing URL.*no pairing link/) ])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
+
+  it('validates all alternate interface links before printing any pairing instructions', async () => {
+    const errors: string[] = []
+    const printed = await mount({}, {
+      lanAddresses: ['10.8.0.2', '192.168.1.5'],
+      connection: { authenticatedUrl: (base: string) => base.includes('10.8.0.2')
+        ? base.replace('https:', 'http:') + `?token=${LAUNCH_TOKEN}` : `${base}?token=${LAUNCH_TOKEN}` },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+      onError: line => { errors.push(line) },
+    })
+    expect(printed).toEqual([])
+    expect(errors).toEqual([expect.stringMatching(/unsafe pairing URL.*no pairing link/) ])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
+
+  it('keeps a verified HTTPS pairing link usable if QR rendering throws a token-bearing error', async () => {
+    // Only the optional terminal encoder fails. This must not turn successful
+    // sign-in link generation into a startup rejection or log encoder secrets.
+    const previousIsTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+    Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: true })
+    vi.spyOn(qrcodeTerminal, 'generate').mockImplementation(() => {
+      throw new Error(`QR renderer diagnostic included ${LAUNCH_TOKEN}`)
+    })
+    try {
+      const errors: string[] = []
+      const printed = await mount({ printPairingQr: true }, {
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+        onError: line => { errors.push(line) },
+      })
+      expect(printed).toContain(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+      expect(printed).toContain(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
+      expect(printed.some(line => line.includes('or scan this with the phone'))).toBe(false)
+      expect(errors).toEqual(['lanyard: could not render the pairing QR code; use the verified HTTPS pairing link above instead'])
+      expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+    } finally {
+      if (previousIsTTY === undefined) Reflect.deleteProperty(process.stdout, 'isTTY')
+      else Object.defineProperty(process.stdout, 'isTTY', previousIsTTY)
+    }
+  })
+
+  it.each(['replaced', 'unavailable'])(
+    'does not print a stale launch token when the connection is %s before readiness', async (change) => {
+      const printed: string[] = []
+      const errors: string[] = []
+      vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+      ctx = new Context()
+      ctx.provide('webRuntime', { lanAddresses: ['192.168.1.5'] })
+      ctx.provide('connection', issuer)
+      ctx.provide('webServer', {
+        scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT,
+      })
+      let releaseReadiness!: () => void
+      const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve })
+      ctx.provide('loader', { await: () => readiness })
+      vi.spyOn(ctx.logger, 'error').mockImplementation(((line: unknown) => { errors.push(String(line)) }) as never)
+      await ctx.plugin(Pairing, {} as PairingConfig).await()
+      const getService = ctx.get.bind(ctx)
+      const freshIssuer = { authenticatedUrl: (base: string) => `${base}?token=refreshed-session-token` }
+      const currentConnection: unknown = change === 'replaced' ? freshIssuer : undefined
+      vi.spyOn(ctx, 'get').mockImplementation(((key: string) =>
+        key === 'connection' ? currentConnection : getService(key as never)) as typeof ctx.get)
+      releaseReadiness()
+      await vi.waitFor(() => {
+        if (change === 'replaced') {
+          expect(printed).toContain('lanyard: pair a device by opening https://192.168.1.5:3443/?token=refreshed-session-token once')
+        } else {
+          expect(errors).toContain('lanyard: browser authentication is no longer available at pairing readiness; no pairing link or QR code is printed; restart dsh to retry')
+        }
+      })
+      expect(printed.join(' ')).not.toContain(LAUNCH_TOKEN)
+      if (change === 'unavailable') expect(printed).toEqual([])
+      expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+    },
+  )
+
+  it('refreshes the LAN address snapshot after delayed readiness instead of printing a stale pairing link', async () => {
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    ctx = new Context()
+    ctx.provide('webRuntime', { lanAddresses: ['192.168.1.5'] })
+    ctx.provide('connection', issuer)
+    ctx.provide('webServer', {
+      scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT,
+    })
+    let releaseReadiness!: () => void
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve })
+    ctx.provide('loader', { await: () => readiness })
+    await ctx.plugin(Pairing, {} as PairingConfig).await()
+
+    // Simulate the upstream LAN snapshot being replaced before Loader settles.
+    // An old QR for .5 is wrong even while the new TLS front serves .9.
+    const originalGet = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) =>
+      key === 'webRuntime' ? { lanAddresses: ['10.0.0.9'] } : originalGet(key as never)) as typeof ctx.get)
+    try {
+      releaseReadiness()
+      await vi.waitFor(() => {
+        expect(printed).toContain(`lanyard: pair a device by opening https://10.0.0.9:3443/?token=${LAUNCH_TOKEN} once`)
+      })
+      expect(printed.join(' ')).not.toContain('192.168.1.5')
+    } finally {
+      lookup.mockRestore()
+    }
+  })
+
+  it.each(['lookup', 'await'] as const)(
+    'refuses a throwing Loader %s without exposing a launch token', async (phase) => {
+      const printed: string[] = []
+      vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+      const fakeContext = {
+        get: (name: string) => {
+          if (name === 'connection') return issuer
+          if (name === 'loader') {
+            if (phase === 'lookup') throw new Error(`upstream Loader getter included ${LAUNCH_TOKEN}`)
+            return { await: () => { throw new Error(`upstream Loader await included ${LAUNCH_TOKEN}`) } }
+          }
+          return undefined
+        },
+      } as unknown as Context
+      let failure: unknown
+      try {
+        await Pairing.apply(fakeContext, { printPairingUrl: true, printPairingQr: false })
+      } catch (error) {
+        failure = error
+      }
+      expect(String(failure)).toBe('Error: lanyard: could not read DSH startup readiness; no pairing link was printed; restart dsh to retry')
+      expect(String(failure)).not.toContain(LAUNCH_TOKEN)
+      expect(printed).toEqual([])
+    },
+  )
+
+  it('does not leak a failing webServer lookup without Loader', async () => {
+    const printed: string[] = []
+    const errors: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    const bareContext = {
+      get: (key: string) => key === 'connection' ? issuer : undefined,
+      get webServer() { throw new Error(`upstream TLS-service getter leaked ${LAUNCH_TOKEN}`) },
+      logger: { error: (line: string) => { errors.push(line) } },
+    } as unknown as Context
+    let failure: unknown
+    try {
+      await Pairing.apply(bareContext, { printPairingUrl: true, printPairingQr: false })
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toBe('undefined')
+    expect(printed).toEqual([])
+    expect(errors).toEqual(['lanyard: TLS service unavailable at pairing readiness; restart dsh to retry'])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
+
+  it('does not leak a failing webServer lookup after delayed readiness', async () => {
+    const printed: string[] = []
+    const errors: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    ctx = new Context()
+    ctx.provide('webRuntime', { lanAddresses: ['192.168.1.5'] })
+    ctx.provide('connection', issuer)
+    ctx.provide('webServer', {
+      scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT,
+    })
+    let releaseReadiness!: () => void
+    const readiness = new Promise<void>((resolve) => { releaseReadiness = resolve })
+    ctx.provide('loader', { await: () => readiness })
+    vi.spyOn(ctx.logger, 'error').mockImplementation(((line: unknown) => { errors.push(String(line)) }) as never)
+    await ctx.plugin(Pairing, {} as PairingConfig).await()
+    const getService = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+      if (key === 'webServer') throw new Error(`upstream service diagnostic includes ${LAUNCH_TOKEN}`)
+      return getService(key as never)
+    }) as typeof ctx.get)
+    try {
+      releaseReadiness()
+      await vi.waitFor(() => {
+        expect(errors).toContain('lanyard: TLS service unavailable at pairing readiness; restart dsh to retry')
+      })
+    } finally {
+      lookup.mockRestore()
+    }
+    expect(printed).toEqual([])
+    expect(errors.join(' ')).not.toContain(LAUNCH_TOKEN)
+  })
   it('names the TLS port a device reaches, never the loopback one, and the certificate to expect', async () => {
     // `port` is this machine's plaintext listener, bound to loopback; a link
     // naming it sends the phone to a port nothing on the network answers.
-    const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' } })
+    const printed = await mount({}, { server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT } })
     expect(printed).toEqual([
       'lanyard: serving your network over TLS on port 3443 — do not open the (LAN: …) link on the dsh web line: it is plain http and carries the launch token',
+      `lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`,
+      TOKEN_FREE_PREFLIGHT,
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
-      'lanyard: the phone should show certificate SHA-256 AB:CD:EF — if it ever shows another, do not continue',
     ])
+  })
+
+  it('keeps one TLS carrier snapshot when webServer changes during pairing', async () => {
+    // A live service replacement between two property reads must not combine
+    // the old listener IP with a new listener port in a token-bearing URL.
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    const first = { host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT }
+    const replacement = { host: '10.0.0.9', scheme: 'https', port: 3080, networkPort: 3444, certificateFingerprint: CERT_FINGERPRINT }
+    let serverReads = 0
+    const errors: string[] = []
+    const volatileContext = {
+      get: (key: string) => key === 'connection' ? issuer : undefined,
+      get webServer() { return ++serverReads === 1 ? first : replacement },
+      logger: { error: (line: string) => { errors.push(line) } },
+    } as unknown as Context
+    await Pairing.apply(volatileContext, { printPairingUrl: true, printPairingQr: false })
+    expect(serverReads).toBe(1)
+    expect(printed).toContain(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+    expect(printed.join(' ')).not.toContain('https://192.168.1.5:3444/')
+    expect(errors).toEqual([])
+  })
+
+  it('pairs a concrete LAN bind without querying a broken legacy webRuntime', async () => {
+    // Newer dsh versions no longer provide webRuntime. Even a throwing
+    // optional-service getter must not prevent a concrete TLS pairing link.
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    ctx = new Context()
+    ctx.provide('connection', issuer)
+    ctx.provide('webServer', {
+      host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443,
+      certificateFingerprint: CERT_FINGERPRINT,
+    })
+    const originalGet = ctx.get.bind(ctx)
+    const lookup = vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+      if (key === 'webRuntime') throw new Error('synthetic legacy runtime failure with ' + LAUNCH_TOKEN)
+      return originalGet(key as never)
+    }) as typeof ctx.get)
+    await ctx.plugin(Pairing, {} as PairingConfig).await()
+    expect(lookup.mock.calls.some(([key]) => key === 'webRuntime')).toBe(false)
+    expect(printed).toContain(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
+    expect(printed.join(' ')).not.toContain('synthetic legacy runtime failure')
+  })
+
+  it('warns concrete LAN bind users not to open the upstream plaintext token link', async () => {
+    // Upstream's dsh web line still carries an HTTP LAN token URL when --host
+    // names a concrete IPv4; the lack of a wildcard must not suppress advice.
+    const printed = await mount({}, {
+      server: { host: '192.168.1.5', scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+    })
+    expect(printed[0]).toContain('do not open the (LAN: …) link on the dsh web line')
+    expect(printed[1]).toBe(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
+    expect(printed[2]).toBe(TOKEN_FREE_PREFLIGHT)
+    expect(printed[2]).not.toContain(LAUNCH_TOKEN)
+    expect(printed[3]).toBe(`lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`)
   })
 
   it('pairs over the likeliest address, and offers a link for each other one a phone could share', async () => {
     const printed = await mount({}, {
       lanAddresses: ['10.8.0.2', '192.168.1.5'],
-      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
     })
-    expect(printed.slice(1, 3)).toEqual([
+    // Never present a token-bearing primary or alternative before the identity check.
+    expect(printed[1]).toBe(`lanyard: the phone should show certificate SHA-256 ${CERT_FINGERPRINT} — if it ever shows another, do not continue`)
+    expect(printed[2]).toBe(TOKEN_FREE_PREFLIGHT)
+    expect(printed[2]).not.toContain(LAUNCH_TOKEN)
+    expect(printed.slice(3, 5)).toEqual([
       `lanyard: pair a device by opening https://192.168.1.5:3443/?token=${LAUNCH_TOKEN} once`,
+      `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
+    ])
+  })
+
+  it('prints each alternate IPv4 only once when runtime repeats it', async () => {
+    const printed = await mount({}, {
+      lanAddresses: ['192.168.1.5', '10.8.0.2', '10.8.0.2', '192.168.1.5'],
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+    })
+    expect(printed.filter(line => line.startsWith('lanyard: or, from a device on the '))).toEqual([
       `lanyard: or, from a device on the 10.8.0.2 network: https://10.8.0.2:3443/?token=${LAUNCH_TOKEN}`,
     ])
   })
@@ -304,11 +708,50 @@ describe('the pairing row', () => {
     vi.spyOn(Pairing.internals, 'networkInterfaces').mockReturnValue(interfaces({ docker0: '172.17.0.1', virbr0: '192.168.122.1' }))
     const printed = await mount({}, {
       lanAddresses: ['172.17.0.1', '192.168.122.1'],
-      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: 'AB:CD:EF' },
+      server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
     })
     expect(printed).toEqual([
       'lanyard: no network a phone can join — 192.168.122.1, 172.17.0.1 are container or virtual-machine bridges inside this machine; connect it to your Wi-Fi or Ethernet and restart dsh',
     ])
+  })
+
+  it('fails pairing activation without leaking a throwing initial connection lookup', async () => {
+    // A failed initial lookup is different from a service disappearing while
+    // Loader readiness is pending: this happens before any link can be issued.
+    ctx = new Context()
+    const printed: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((line: string) => { printed.push(line) })
+    const getService = ctx.get.bind(ctx)
+    vi.spyOn(ctx, 'get').mockImplementation(((key: string) => {
+      if (key === 'connection') throw new Error(`upstream lookup diagnostic carries ${LAUNCH_TOKEN}`)
+      return getService(key as never)
+    }) as typeof ctx.get)
+    let failure: unknown
+    try {
+      await Pairing.apply(ctx, { printPairingUrl: true, printPairingQr: true })
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toContain('lanyard: this dsh has no browser authentication to pair a device with')
+    expect(String(failure)).not.toContain(LAUNCH_TOKEN)
+    expect(printed).toEqual([])
+  })
+
+  it('fails the load without leaking an upstream issuer accessor error', async () => {
+    const connection = Object.defineProperty({}, 'authenticatedUrl', {
+      get() { throw new Error(`synthetic upstream accessor leaked ${LAUNCH_TOKEN}`) },
+    })
+    let failure: unknown
+    try {
+      await mount({}, {
+        connection,
+        server: { scheme: 'https', port: 3080, networkPort: 3443, certificateFingerprint: CERT_FINGERPRINT },
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(String(failure)).toMatch(/no browser authentication to pair a device with/)
+    expect(String(failure)).not.toContain(LAUNCH_TOKEN)
   })
 
   it('fails the load on a dsh whose connection cannot issue pairing links', async () => {

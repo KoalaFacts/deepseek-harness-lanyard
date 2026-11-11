@@ -73,6 +73,25 @@ describe('admit', () => {
     }
   })
 
+  it('refuses a LAN peer when reading the upstream session checker itself throws', () => {
+    // The accessor runs in isSessionAuthority(), before requestRejection()
+    // is ever called. A broken Cordis service getter must not escape the gate.
+    const broken = Object.defineProperty({}, 'requestRejection', {
+      get() { throw new Error('synthetic secret-bearing session accessor') },
+    })
+    expect(isSessionAuthority(broken)).toBe(false)
+    expect(admit(req({ cookie: SESSION }, '192.168.1.5'), broken)).toBe(false)
+    expect(admit(req({}, '127.0.0.1'), broken)).toBe(true)
+  })
+
+  it('fails closed when upstream session verification throws instead of returning a refusal', () => {
+    // Contract-drift or auth-state failure must not escape from the admission
+    // predicate into a request handler. A real loopback peer stays exempt.
+    const broken = { requestRejection: () => { throw new Error('synthetic auth secret in diagnostic') } }
+    expect(admit(req({ cookie: SESSION }, '192.168.1.5'), broken)).toBe(false)
+    expect(admit(req({}, '127.0.0.1'), broken)).toBe(true)
+  })
+
   it('refuses every network peer while no connection can vouch for it', () => {
     // Before Connection mounts, after it is disposed, and on a connection that
     // predates browser authentication: fail closed, never open.

@@ -80,7 +80,7 @@ interface WebOptions {
 export function webCommand(): Command {
   return new Command()
     .name('dsh --profile web')
-    .description('Serve the DeepSeek Harness browser UI (lanyard: use --host with your LAN IPv4 to pair a phone over TLS).')
+    .description('Serve the DeepSeek Harness browser UI (lanyard: bind your LAN IPv4 and verify phone TLS identity before pairing).')
     .helpOption('-h, --help', 'show this help')
     .option('--host <host>', 'bind host; use this computer\'s assigned LAN IPv4 on the 0.2.1 line (legacy 0.2.0 also accepts 0.0.0.0)')
     .option('--no-open', 'do not open the Web UI in the default browser')
@@ -94,10 +94,16 @@ export function webCommand(): Command {
     .addHelpText('after', `
 Examples:
   dsh --profile web                          serve this machine only, on the composed port
-  dsh --profile web --host 192.168.1.5       serve this LAN interface over TLS; scan the QR code with a phone
+  dsh --profile web --host 192.168.1.5       serve this LAN interface over TLS; verify the certificate fingerprint before scanning the QR code
   dsh --profile web --host 192.168.1.5 --network-port 8443
                                              serve this LAN interface on another TLS port
   dsh --profile web --no-open                serve without opening a browser
+
+Phone pairing:
+  Open the printed token-free HTTPS address on the phone first.
+  Verify the complete SHA-256 certificate fingerprint before opening
+  any token-bearing link or scanning the QR code.
+  If you cannot verify and trust the certificate, do not pair.
 `)
 }
 
@@ -115,9 +121,37 @@ export function resolveStartupValues(program: Command): WebStartupValues {
   if (options.publicUrl !== undefined) {
     const value = options.publicUrl
     const authority = value.slice(value.indexOf('://') + 3).split(/[/\\]/, 1)[0] ?? ''
-    // Match upstream's public-root contract before any row can advertise it.
-    if (/[\u0000-\u0020\u007f]/u.test(value) || !/^https?:\/\//iu.test(value)
-      || /[?#]/u.test(value) || authority === '' || authority.includes('@') || URL.parse(value) === null) {
+    // Upstream supports a Web UI rooted under a path (e.g. /ui/), so do not
+    // reject path prefixes. But do reject a URL that parses to a *different*
+    // pathname: URL parsing normalizes /ui/.. or encoded dot segments into /
+    // and turns backslashes into path separators, silently changing what the
+    // operator thought they had advertised. Harmless UTF-8 percent-encoding of
+    // non-ASCII characters is not a path rewrite.
+    const suffix = value.slice(value.indexOf('://') + 3 + authority.length)
+    const parsed = URL.parse(value)
+    // WHATWG URL harmlessly encodes non-ASCII and the ASCII path-encode set
+    // (quotes, angle brackets, backticks, braces). Compare those canonical
+    // encodings without normalizing raw %, dot segments or backslashes:
+    // rewrites of operator-supplied paths must still fail closed.
+    let expectedPathname = suffix
+    try {
+      expectedPathname = suffix.replace(/["<>\x60{}]|[^\x00-\x7F]/gu, character => encodeURIComponent(character))
+    } catch {
+      // Unpaired surrogates would be silently rewritten to replacement chars.
+      program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
+    }
+    // Supported Node versions differ: Node 22 leaves ^ raw in pathname,
+    // while Node 24 percent-encodes it. Accept only that harmless variant;
+    // neither option normalizes raw %, dot segments, or backslashes.
+    const expectedWithEncodedCarets = expectedPathname.replace(/\^/gu, '%5E')
+    // WHATWG encodes Unicode spaces, soft hyphens, zero-width separators and bidirectional
+    // formatting controls in paths. Reject their raw forms: an invisible or
+    // visually reordered advertised URL cannot be safely checked by sight.
+    // Ordinary Unicode text (including emoji joiners) remains valid.
+    if (/[\u0000-\u0020\u007f\u00AD\u061C\u200B\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]|\p{White_Space}/u.test(value) || !/^https?:\/\//iu.test(value)
+      || /[?#]/u.test(value) || authority === '' || authority.includes('@')
+      || parsed === null || (suffix !== '' && expectedPathname !== parsed.pathname
+        && expectedWithEncodedCarets !== parsed.pathname)) {
       program.error('error: --public-url must be an absolute HTTP(S) root without credentials, whitespace, query or fragment')
     }
   }
@@ -126,8 +160,16 @@ export function resolveStartupValues(program: Command): WebStartupValues {
   // listener, not the flag, means a composition that configures the carrier
   // directly meets the same refusal.
   for (const [flag, value] of [['--port', options.port], ['--network-port', options.networkPort]] as const) {
-    if (value !== undefined && !/^\d+$/.test(value)) {
+    if (value === undefined) continue
+    if (!/^\d+$/.test(value)) {
       program.error(`error: ${flag} must be a number, got ${JSON.stringify(value)}`)
+    }
+    // A syntactically numeric value may overflow Number or the OS's TCP port
+    // range. Refuse it here with a flag-specific recovery error instead of
+    // publishing Infinity or deferring an opaque listen failure to the carrier.
+    const port = Number(value)
+    if (!Number.isSafeInteger(port) || port > 65_535) {
+      program.error(`error: ${flag} must be an integer between 0 and 65535`)
     }
   }
   return {
