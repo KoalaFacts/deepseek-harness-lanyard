@@ -57,8 +57,87 @@ describe('the lanyard web command line', () => {
       .toEqual({ trustedHosts: ['app.internal', 'app2.internal'], openBrowser: true })
   })
 
+  it.each([
+    'https://dsh.example',
+    'https://dsh.example/',
+    'https://dsh.example/ui/',
+    'https://dsh.example/café/',
+    'https://dsh.example/a"b/',
+    'https://dsh.example/a<b>/',
+    'https://dsh.example/a`b/',
+    'https://dsh.example/a{b}/',
+    'https://dsh.example/a^b/',
+    'https://dsh.example/a%5Eb/',
+    'https://dsh.example/café/a^b/',
+    'https://dsh.example/café/a"b/',
+    'https://dsh.example/文档/📱/',
+    'https://dsh.example/العربية/',
+    'https://dsh.example/caf%C3%A9/',
+    'https://dsh.example/a%C2%ADb/',
+    'https://dsh.example/👩‍💻/',
+    'https://dsh.example//',
+    'http://localhost:3080/',
+    'https://[::1]:3443/',
+  ])('accepts an absolute --public-url base, including supported path prefixes: %s', (url) => {
+    expect(parse(['--public-url', url])).toMatchObject({ publicUrl: url })
+  })
+
+  it.each([
+    'https://dsh.example/workspace/..',
+    'https://dsh.example/café/..',
+    'https://dsh.example/a"b/%2e%2e/',
+    'https://dsh.example/a^b/..',
+    'https://dsh.example/a^b/%2e%2e/',
+    'https://dsh.example/a%5Eb/%2e%2e/',
+    'https://dsh.example/a<b>\\other',
+    'https://dsh.example/café/%2e%2e/',
+    'https://dsh.example/café\\other',
+    'https://dsh.example/%2e/',
+    'https://dsh.example\\\\other',
+    'https://dsh.example?token=1',
+    'https://user@dsh.example/',
+  ])('rejects a rewritten or unsafe --public-url %s', (url) => {
+    expect(String(parse(['--public-url', url]))).toContain('--public-url must be an absolute HTTP(S) root')
+  })
+
+  it.each([
+    ['NEXT LINE', '\u0085'],
+    ['non-breaking space', '\u00a0'],
+    ['em space', '\u2003'],
+    ['line separator', '\u2028'],
+    ['ideographic space', '\u3000'],
+    ['byte-order mark', '\uFEFF'],
+    ['soft hyphen', '\u00AD'],
+    ['zero-width space', '\u200B'],
+    ['word joiner', '\u2060'],
+    ['Arabic letter mark', '\u061C'],
+    ['left-to-right mark', '\u200E'],
+    ['right-to-left mark', '\u200F'],
+    ['right-to-left override', '\u202E'],
+    ['left-to-right isolate', '\u2066'],
+    ['pop directional isolate', '\u2069'],
+  ])('refuses raw Unicode whitespace, invisible formatting or bidi controls in --public-url (%s)', (_label, whitespace) => {
+    expect(String(parse(['--public-url', `https://dsh.example/café/a${whitespace}b/`])))
+      .toContain('--public-url must be an absolute HTTP(S) root')
+  })
+
   it('refuses a non-numeric port', () => {
     expect(String(parse(['--port', '80a']))).toMatch(/--port must be a number/)
+  })
+
+  it.each([
+    ['--port', '65536'],
+    ['--network-port', '65536'],
+    ['--port', '999999999999999999999999999999999999'],
+    ['--network-port', '999999999999999999999999999999999999'],
+  ])('rejects out-of-range %s %s before starting a listener', (flag, value) => {
+    expect(String(parse([flag, value]))).toMatch(new RegExp(`${flag} must be an integer between 0 and 65535`))
+  })
+
+  it('preserves zero for OS-assigned ports and allows the highest TCP port', () => {
+    expect(parse(['--port', '0', '--network-port', '0'])).toMatchObject({ port: 0, networkPort: 0 })
+    expect(parse(['--port', '65535'])).toMatchObject({ port: 65535 })
+    expect(parse(['--network-port', '65535'])).toMatchObject({ networkPort: 65535 })
   })
 
   it('carries --network-port through, and refuses a non-numeric one', () => {
@@ -87,6 +166,10 @@ describe('the lanyard web command line', () => {
     expect(help).toContain('legacy 0.2.0 also accepts 0.0.0.0')
     expect(help).toContain('dsh --profile web --host 192.168.1.5')
     expect(help).toContain('dsh --profile web --host 192.168.1.5 --network-port 8443')
+    // The CLI must not invite bearer-token QR use before TLS peer verification.
+    expect(help).toContain('Open the printed token-free HTTPS address on the phone first.')
+    expect(help).toContain('Verify the complete SHA-256 certificate fingerprint before opening any token-bearing link or scanning the QR code.')
+    expect(help).toContain('If you cannot verify and trust the certificate, do not pair.')
     // The default the help names is the one the carrier applies.
     expect(help).toContain(`(default ${String(DEFAULT_NETWORK_PORT)})`)
   })

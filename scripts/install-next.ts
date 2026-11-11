@@ -10,8 +10,10 @@
  */
 
 import { pathToFileURL } from 'node:url'
-import { realpathSync } from 'node:fs'
-import { ROOT, run, unresolvedDependency } from './dsh-harness.ts'
+import { createRequire } from 'node:module'
+import { readFileSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
+import { ROOT, run, isMissingDshWaveDependency, unresolvedDependency } from './dsh-harness.ts'
 
 /** What the contract job tests against: the CLI's whole surface, plus the three contracts the unit suite reads. */
 export const NEXT_PACKAGES = [
@@ -28,14 +30,21 @@ export const NEXT_PACKAGES = [
  * @param requested - the packages this install asked for by name.
  */
 export function isWaveIncomplete(reported: string, requested: readonly string[]): boolean {
-  const unresolved = unresolvedDependency(reported)
-  return unresolved !== undefined && !requested.includes(unresolved)
+  return isMissingDshWaveDependency(reported, requested)
 }
 
 const invoked = process.argv[1]
 if (invoked !== undefined && invoked !== '-' && import.meta.url === pathToFileURL(realpathSync(invoked)).href) {
   try {
     run('pnpm', ['add', '-D', ...NEXT_PACKAGES.map(name => `${name}@next`)], { cwd: ROOT })
+    // pnpm output is captured by run(); explicitly report resolved versions,
+    // because a moving @next tag is not an exact runtime provenance record.
+    const requireFromRoot = createRequire(join(ROOT, 'package.json'))
+    for (const name of NEXT_PACKAGES) {
+      const resolvedPath = requireFromRoot.resolve(`${name}/package.json`)
+      const manifest = JSON.parse(readFileSync(resolvedPath, 'utf8')) as { version: string }
+      console.log(`lanyard contract: installed ${name}@${manifest.version}`)
+    }
   } catch (error) {
     const reported = String(error)
     if (!isWaveIncomplete(reported, NEXT_PACKAGES)) throw error

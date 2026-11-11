@@ -41,12 +41,16 @@
  */
 
 import { createServer as createTlsServer } from 'node:tls'
-import { readFile } from 'node:fs/promises'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
+import { open, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { X509Certificate } from 'node:crypto'
 import { posix } from 'node:path'
 import { isIP } from 'node:net'
 import type { IncomingMessage, OutgoingHttpHeaders, Server, ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import type { Server as TlsServer, TLSSocket } from 'node:tls'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -374,6 +378,50 @@ function secureCookiesOf(res: ServerResponse): void {
   }))) as ServerResponse['writeHead']
 }
 
+/**
+ * Read caller-managed TLS material without ever blocking on a POSIX FIFO.
+ *
+ * A user-supplied PEM path may legitimately be a symlink (e.g. a certificate
+ * manager's current link), so check the *opened target*, not lstat(path).
+ * O_NONBLOCK prevents a same-user file replacement from turning open() into
+ * an indefinite FIFO wait. A FileHandle stat then verifies that the exact
+ * descriptor being read is a regular file, not an earlier path snapshot.
+ * Windows does not have the same POSIX nonblocking-open contract: stat the
+ * path before opening to reject nonregular entries there as well.
+ *
+ * A regular descriptor can also point to an enormous file or a dynamic pseudo
+ * file reporting size zero. Bound actual reads, not only descriptor type.
+ */
+const MAX_EXPLICIT_PEM_BYTES = 1024 * 1024
+const PEM_READ_CHUNK_BYTES = 64 * 1024
+
+async function readExplicitPem(path: string, kind: 'certificate' | 'private key'): Promise<Buffer> {
+  const nonregular = `lanyard: TLS ${kind} must resolve to a regular file`
+  if (process.platform === 'win32' && !(await stat(path)).isFile()) {
+    throw new Error(nonregular)
+  }
+  const handle = await open(path, constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NONBLOCK))
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(nonregular)
+    const oversized = `lanyard: TLS ${kind} exceeds the 1 MiB PEM size limit`
+    const chunks: Buffer[] = []
+    let total = 0
+    // Read at most one byte beyond the limit; readFile() would buffer to EOF.
+    while (total <= MAX_EXPLICIT_PEM_BYTES) {
+      const length = Math.min(PEM_READ_CHUNK_BYTES, MAX_EXPLICIT_PEM_BYTES + 1 - total)
+      const chunk = Buffer.allocUnsafe(length)
+      const { bytesRead } = await handle.read(chunk, 0, length, null)
+      if (bytesRead === 0) break
+      chunks.push(chunk.subarray(0, bytesRead))
+      total += bytesRead
+    }
+    if (total > MAX_EXPLICIT_PEM_BYTES) throw new Error(oversized)
+    return Buffer.concat(chunks, total)
+  } finally {
+    await handle.close()
+  }
+}
+
 /** Whether a request arrived through this carrier's TLS front. */
 function overTls(req: IncomingMessage): boolean {
   return (req.socket as Partial<TLSSocket>).encrypted === true
@@ -491,6 +539,119 @@ function openedName(decoded: string): string | undefined {
   return posix.normalize(decoded.replaceAll('\\', '/')).replace(/[/. ]+$/, '').toLowerCase()
 }
 
+
+/**
+ * Newer dsh carriers register Fetch resources as well as node:http handlers.
+ * Adapt a Fetch resource only AFTER the socket-backed admission decision:
+ * Fetch Request does not carry the real socket peer address and cannot safely
+ * decide whether a LAN caller may pass the loopback/session gate.
+ */
+type FetchResource = (request: Request) => Promise<Response>
+type FetchRoute = { kind: WebRoute['kind']; path: string; resource: FetchResource }
+type RegisteredRoute = { kind: WebRoute['kind']; path: string; resource?: FetchResource }
+
+/** Preserve GET/HEAD semantics, streaming, cancellation and all Set-Cookie lines. */
+async function serveFetchResource(req: IncomingMessage, res: ServerResponse, resource: FetchResource): Promise<void> {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { allow: 'GET, HEAD' })
+    res.end()
+    return
+  }
+  const headers = new Headers()
+  for (const [name, value] of Object.entries(req.headers)) {
+    for (const item of typeof value === 'string' ? [value] : value ?? []) headers.append(name, item)
+  }
+  const abort = new AbortController()
+  const onClose = (): void => { if (!res.writableEnded) abort.abort() }
+  res.on('close', onClose)
+  try {
+    // A Fetch resource may resolve relative links against request.url. The
+    // previous synthetic http://x origin did not describe either listener and
+    // could make a TLS response generate an unusable HTTP absolute URL.
+    // Use the actual socket's local address/port, never the untrusted Host
+    // header or an absolute-form request target supplied by the client.
+    const localAddress = req.socket.localAddress ?? '127.0.0.1'
+    const socketHost = isIP(localAddress) === 6 ? `[${localAddress}]` : localAddress
+    const socketPort = req.socket.localPort
+    const origin = new URL(`${overTls(req) ? 'https' : 'http'}://${socketHost}${socketPort === undefined ? '' : `:${socketPort}`}/`)
+    const target = new URL(req.url ?? '/', 'http://x')
+    origin.pathname = target.pathname
+    origin.search = target.search
+    const answer = await resource(new Request(origin, {
+      method: req.method, headers, signal: abort.signal,
+    }))
+    const outgoing: OutgoingHttpHeaders = Object.fromEntries(answer.headers)
+    const cookies = answer.headers.getSetCookie()
+    if (cookies.length > 0) outgoing['set-cookie'] = cookies
+    res.writeHead(answer.status, outgoing)
+    if (req.method === 'HEAD' || answer.body === null) {
+      // A HEAD client has no body to read. Do not hold its response open until
+      // a resource finishes cancelling an unused (possibly stalled) stream.
+      res.end()
+      if (req.method === 'HEAD') {
+        // end() marks the response complete, so the socket close hook no
+        // longer aborts its Fetch request. Signal that its producer can stop
+        // even if cancelling the unused stream never settles.
+        abort.abort()
+      }
+      if (req.method === 'HEAD' && answer.body !== null) {
+        void answer.body.cancel().catch(() => {
+          // The response has already completed: a resource cancellation error
+          // must not reject the HTTP route or leave the phone waiting.
+        })
+      }
+      return
+    }
+    // Upstream's Fetch carrier flushes headers before the first body chunk.
+    // Without this, a slow resource makes the phone wait for the first chunk
+    // before it can even observe the response status or content type.
+    res.flushHeaders()
+    // Never buffer browser bundles or streaming resources into RAM. Pipeline
+    // forwards backpressure, closes the response, and cancels on disconnection.
+    await pipeline(Readable.fromWeb(answer.body as unknown as NodeReadableStream), res, { signal: abort.signal })
+  } catch (error) {
+    // The inherited carrier turns a rejected Fetch resource into HTTP 400.
+    // End that resource's request even if no response/body ever existed: an
+    // ordinary response.close after upstream's 400 sees writableEnded=true
+    // and cannot otherwise signal its abandoned producer to stop.
+    abort.abort()
+    throw error
+  } finally {
+    res.off('close', onClose)
+  }
+}
+
+/** An in-process resource read already carries the caller's authorized Peer. */
+async function readFetchResource(resource: FetchResource, request: Request, peer: unknown): Promise<Response> {
+  if (request.method !== 'HEAD') {
+    return Reflect.apply(resource, undefined, [request, peer]) as Promise<Response>
+  }
+  // A caller owns the original Request signal. Use a forwarded HEAD Request
+  // so we can stop its resource producer after returning the bodyless result,
+  // without aborting the caller's Request or waiting on a stalled cancel().
+  const stop = new AbortController()
+  // Node's Request(input, { signal }) resets the caller's referrer metadata.
+  // Keep all HEAD Request fields intact while giving the producer our own stop signal.
+  const forwarded = new Request(request, {
+    signal: AbortSignal.any([request.signal, stop.signal]),
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+  })
+  try {
+    const answer = await (Reflect.apply(resource, undefined, [forwarded, peer]) as Promise<Response>)
+    if (answer.body !== null) {
+      void answer.body.cancel().catch(() => {
+        // Cancellation is best-effort after the bodyless HEAD result is ready.
+      })
+    }
+    return new Response(null, { status: answer.status, statusText: answer.statusText, headers: answer.headers })
+  } finally {
+    // A stalled or rejected cancellation must not leave the producer running.
+    // Also release it if the resource itself rejects before returning headers.
+    stop.abort()
+  }
+}
+
 export class GatedWebServer extends WebServer {
   static override Config: z<Config> = Config
 
@@ -502,7 +663,10 @@ export class GatedWebServer extends WebServer {
   private readonly apiPathPrefix: string
   private readonly authority: EndpointAuthority
   /** Route paths some row actually claimed, for the drift warning below. */
-  private readonly claimedPaths = new Set<string>()
+  private readonly claimedPaths = new Map<string, number>()
+  /** Exact/prefix registration order for preserving in-process Fetch reads. */
+  private readonly namedRoutes = new Map<string, RegisteredRoute>()
+  private fallbackResource: FetchResource | undefined
   private readonly networkPortConfigured: number
   private tls: TlsServer | undefined
   private tlsPort: number | undefined
@@ -512,8 +676,17 @@ export class GatedWebServer extends WebServer {
     assertRegistrarsWrapped()
     // Our generated certificates and device-address selection cover IPv4.
     // Do not inherit next's wider bind surface until those contracts cover it.
-    if (isIP(config.host) === 6) {
+    // Node treats an empty hostname (and an omitted host passed to listen)
+    // as a wildcard bind. Never let a typo or a direct composition expose a
+    // LAN TLS listener on every adapter instead of the one the user selected.
+    // An omitted host is loopback; only an explicit legacy 0.0.0.0 remains
+    // wildcard-capable, with the existing mandatory TLS + session gate.
+    const bindHost = config.host ?? '127.0.0.1'
+    if (isIP(bindHost) === 6) {
       throw new Error('lanyard: IPv6 binds are not supported; choose one concrete local IPv4 address')
+    }
+    if (isIP(bindHost) !== 4) {
+      throw new Error('lanyard: bind host must be a concrete IPv4 literal; omit --host to serve loopback only')
     }
     // The inherited server is always the loopback listener on the configured
     // port — the one every local URL names — and never sees the network: under
@@ -535,7 +708,7 @@ export class GatedWebServer extends WebServer {
     if ((config.tlsCertPath === undefined) !== (config.tlsKeyPath === undefined)) {
       throw new Error('lanyard: tlsCertPath and tlsKeyPath must be configured together')
     }
-    if (!isLoopbackAddress(config.host) && !servesTls) {
+    if (!isLoopbackAddress(bindHost) && !servesTls) {
       throw new Error(
         'lanyard: a network bind requires TLS material (tlsCertPath and tlsKeyPath), because the launch token '
         + 'and the session cookie that authenticate a device would otherwise cross the network in plaintext',
@@ -551,7 +724,7 @@ export class GatedWebServer extends WebServer {
         + 'TLS front devices reach need a port each',
       )
     }
-    this.gate = config
+    this.gate = { ...config, host: bindHost }
     this.publicPaths = config.publicPaths ?? [...DEFAULT_PUBLIC_PATHS]
     this.publicPathExcludedSuffixes = config.publicPathExcludedSuffixes ?? [...DEFAULT_PUBLIC_PATH_EXCLUDED_SUFFIXES]
     this.loopbackOnlyPaths = config.loopbackOnlyPaths ?? [...DEFAULT_LOOPBACK_ONLY_PATHS]
@@ -561,6 +734,59 @@ export class GatedWebServer extends WebServer {
       privilegedMethods: new Set(config.privilegedMethods ?? DEFAULT_PRIVILEGED_METHODS),
       pairedNamespaces: new Set(config.pairedNamespaces ?? DEFAULT_PAIRED_NAMESPACES),
       pairedRoutes: new Set(config.pairedRoutes ?? DEFAULT_PAIRED_ROUTES),
+    }
+    this.installResourceReadAdapter()
+  }
+
+  /**
+   * Newer WebServer exposes readResource(request, peer). A socket-only adapter
+   * would make the UI's in-process resource reads return 404. Install this
+   * adapter only when that optional upstream method exists, so our pinned older
+   * WebServer remains compatible without importing a new API or widening LAN
+   * admission. The upstream reader still owns handler and absent-route cases.
+   */
+  private installResourceReadAdapter(): void {
+    const inherited: unknown = Reflect.get(WebServer.prototype, 'readResource')
+    if (typeof inherited !== 'function') return
+    Object.defineProperty(this, 'readResource', {
+      configurable: true,
+      value: async (request: Request, peer: unknown): Promise<Response> => {
+        const fallback = (): Promise<Response> => Reflect.apply(inherited, this, [request, peer]) as Promise<Response>
+        if (request.method !== 'GET' && request.method !== 'HEAD') return fallback()
+        const pathname = new URL(request.url).pathname
+        const exact = this.namedRoutes.get(`exact:${pathname}`)
+        let route = exact
+        if (route === undefined) {
+          for (const candidate of this.namedRoutes.values()) {
+            if (candidate.kind !== 'prefix') continue
+            if (pathname !== candidate.path && !pathname.startsWith(`${candidate.path}/`)) continue
+            if (route === undefined || candidate.path.length > route.path.length) route = candidate
+          }
+        }
+        // A handler route shadows the fallback just as it does over HTTP.
+        if (route !== undefined) {
+          return route.resource === undefined ? fallback() : readFetchResource(route.resource, request, peer)
+        }
+        return this.fallbackResource === undefined ? fallback() : readFetchResource(this.fallbackResource, request, peer)
+      },
+    })
+  }
+
+  /**
+   * Track *live* route owners, rather than names that were ever registered.
+   * A path may be claimed by HTTP exact/prefix routes and an upgrade seat at
+   * once. A boot-time disposer or rejected duplicate must not mask an unclaimed
+   * configuration pin when the Loader settles.
+   */
+  private claimPath(path: string): () => void {
+    this.claimedPaths.set(path, (this.claimedPaths.get(path) ?? 0) + 1)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      const count = this.claimedPaths.get(path)
+      if (count === undefined || count === 1) this.claimedPaths.delete(path)
+      else this.claimedPaths.set(path, count - 1)
     }
   }
 
@@ -654,15 +880,33 @@ export class GatedWebServer extends WebServer {
     // complete once the tree has settled. A hand-built context has no Loader
     // and therefore no settle point — reporting there would warn about paths
     // whose rows simply have not mounted yet.
-    const settled = this.ctx.get('loader')?.await() as Promise<unknown> | undefined
+    let settled: Promise<unknown> | undefined
+    try {
+      settled = this.ctx.get('loader')?.await() as Promise<unknown> | undefined
+    } catch (error) {
+      // This is only a route-claim diagnostic. A transient service replacement
+      // must not prevent the TLS listener from starting or expose upstream
+      // exception text, which can include sensitive authentication state.
+      this.ctx.logger.warn('lanyard: could not check DSH Loader readiness; unclaimed-route diagnostics unavailable for this startup')
+    }
     // A failed boot reports itself; this row stays quiet.
     void settled?.then(() => { this.reportUnclaimedPaths() }, () => {})
     const { tlsCertPath, tlsKeyPath } = this.gate
     if (tlsCertPath === undefined || tlsKeyPath === undefined) return
     const routed = assertServer((this as unknown as { server: unknown }).server)
-    const [cert, key] = await Promise.all([readFile(tlsCertPath), readFile(tlsKeyPath)])
+    const [cert, key] = await Promise.all([
+      readExplicitPem(tlsCertPath, 'certificate'),
+      readExplicitPem(tlsKeyPath, 'private key'),
+    ])
     const fingerprint = new X509Certificate(cert).fingerprint256
     const tls = createTlsServer({ cert, key })
+    // Track underlying TCP sockets, including peers that never finish TLS
+    // negotiation. A stalled handshake has no secureConnection event.
+    const connections = new Set<Socket>()
+    tls.on('connection', socket => {
+      connections.add(socket)
+      socket.once('close', () => { connections.delete(socket) })
+    })
     // The decrypted TLSSocket keeps the underlying connection's remoteAddress,
     // so admission still reads the real peer rather than this process.
     tls.on('secureConnection', socket => { routed.emit('connection', socket) })
@@ -675,7 +919,12 @@ export class GatedWebServer extends WebServer {
             + 'reach this machine on it; pass --network-port to choose another, or --host 127.0.0.1 to serve this machine only',
             { cause: error },
           )
-          : error)
+          : error.code === 'EADDRNOTAVAIL'
+            ? new Error(
+              `lanyard: ${JSON.stringify(this.gate.host)} is not assigned to this computer; choose an active Wi-Fi or Ethernet IPv4 address for --host, or omit --host for local-only use`,
+              { cause: error },
+            )
+            : error)
       }
       tls.once('error', failed)
       tls.listen(this.networkPortConfigured, this.gate.host, () => {
@@ -687,7 +936,13 @@ export class GatedWebServer extends WebServer {
       })
     })
     this.ctx.effect(() => async () => {
-      await new Promise<void>((resolve) => { tls.close(() => { resolve() }) })
+      await new Promise<void>((resolve) => {
+        tls.close(() => { resolve() })
+        // Closing the listener alone waits for every connected TLS socket.
+        // A paired phone's WebSocket or an incomplete handshake may never
+        // end by itself; drop these peers only when the carrier is disposed.
+        for (const socket of connections) socket.destroy()
+      })
       this.tls = undefined
       this.tlsPort = undefined
       this.fingerprint = undefined
@@ -701,6 +956,12 @@ export class GatedWebServer extends WebServer {
    */
   private posture(routePath: string): Admission {
     if (this.loopbackOnlyPaths.includes(routePath)) return 'loopback-only'
+    // A public asset override must not make upstream's API registrar anonymous.
+    if (routePath === this.apiPathPrefix || routePath.startsWith(`${this.apiPathPrefix}/`)) return 'gated'
+    // A stale customized prefix must not strip the known shipped /api loopback pins.
+    // This only protects the known /api route, not an arbitrary future upstream rename.
+    if (this.apiPathPrefix !== DEFAULT_API_PATH_PREFIX
+      && (routePath === DEFAULT_API_PATH_PREFIX || routePath.startsWith(`${DEFAULT_API_PATH_PREFIX}/`))) return 'gated'
     if (this.publicPaths.includes(routePath)) return 'public'
     return 'gated'
   }
@@ -712,27 +973,68 @@ export class GatedWebServer extends WebServer {
    */
   private permits(req: IncomingMessage, admission: Admission): boolean {
     /* v8 ignore next -- node always sets url on server requests */
-    const raw = new URL(req.url ?? '/', 'http://x').pathname
-    if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
+    let raw: string
+    try {
+      raw = new URL(req.url ?? '/', 'http://x').pathname
+    } catch {
+      // node:http accepts malformed absolute-form request targets such as
+      // "http://[". Never let their URL parse errors escape a route promise
+      // (or let an unparsable target use the public fallback exemption).
+      return false
+    }
     const decoded = decodedPathname(raw)
+    // A known loopback-only path stays private even if an upstream routing
+    // change sends it to a different named seat or the public SPA fallback.
+    // Compare the decoded spelling too: a future route owner may interpret
+    // percent-encoded separators before dispatching a desktop-only action.
+    if (this.loopbackOnlyPaths.some(path => raw === path || decoded === path)) {
+      return isLoopbackAddress(req.socket.remoteAddress)
+    }
+    if (admission === 'loopback-only') return isLoopbackAddress(req.socket.remoteAddress)
     // A pathname whose escapes do not decode, or whose opened name cannot be
     // pinned down, cannot be checked against the exclusions, so it never
     // rides the public exemption.
     const opened = decoded === undefined ? undefined : openedName(decoded)
     const excluded = opened === undefined
       || this.publicPathExcludedSuffixes.some(suffix => opened.endsWith(suffix.toLowerCase()))
-    if (admission === 'public' && !excluded) return true
+    // A public fallback may be handed an API request when upstream changes its
+    // routing. Neither it nor an explicitly public named seat may bypass API
+    // sessions or loopback-only method pins, including percent-encoded paths.
+    const apiPrefix = `${this.apiPathPrefix}/`
+    const isApiRequest = raw === this.apiPathPrefix || raw.startsWith(apiPrefix)
+      || (decoded !== undefined && (decoded === this.apiPathPrefix || decoded.startsWith(apiPrefix)))
+    // An accidentally stale apiPathPrefix must not make the *shipped* /api
+    // routes anonymous when an operator also configured their seat as public.
+    const isKnownApiRequest = this.apiPathPrefix !== DEFAULT_API_PATH_PREFIX
+      && (raw === DEFAULT_API_PATH_PREFIX || raw.startsWith(`${DEFAULT_API_PATH_PREFIX}/`)
+        || (decoded !== undefined && (decoded === DEFAULT_API_PATH_PREFIX
+          || decoded.startsWith(`${DEFAULT_API_PATH_PREFIX}/`))))
+    // Exempt only static/pairing reads; unsafe methods and API requests need a session.
+    if (admission === 'public' && !excluded && !isApiRequest && !isKnownApiRequest && (req.method === 'GET' || req.method === 'HEAD')) return true
     // Looked up per request: Connection mounts after this carrier, since it
     // registers its own routes here, and may be replaced while the carrier
     // lives. Whatever the lookup finds, a network peer it cannot vouch for is
     // refused.
-    if (!admit(req, this.ctx.get('connection'))) return false
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      let authority: unknown
+      try {
+        authority = this.ctx.get('connection')
+      } catch {
+        // The service lookup can itself throw while Connection is replaced or
+        // torn down. Its error may carry session diagnostics: refuse a network
+        // peer without rejecting the route promise or logging the exception.
+        return false
+      }
+      if (!admit(req, authority)) return false
+    }
     // Both readings are classified: upstream resolves the endpoint from the raw
     // pathname and rejects a `%` outright, but a version that starts decoding
     // would otherwise turn `%2F` into a way to spell a pinned method unpinned.
     const readings = decoded === undefined || decoded === raw ? [raw] : [raw, decoded]
     const named = readings
-      .map(reading => endpointOf(reading, this.apiPathPrefix))
+      .map(reading => endpointOf(reading, this.apiPathPrefix)
+        ?? (this.apiPathPrefix === DEFAULT_API_PATH_PREFIX
+          ? undefined : endpointOf(reading, DEFAULT_API_PATH_PREFIX)))
       .filter(endpoint => endpoint !== undefined)
     if (named.length === 0) return true
     // A session authenticates a device; the configuration plane additionally
@@ -746,11 +1048,11 @@ export class GatedWebServer extends WebServer {
    * @param route - kind, path, and the owning handler.
    * @returns the disposer removing the route.
    */
-  override register(route: WebRoute): () => void {
-    const inner = route.handler
-    this.claimedPaths.add(route.path)
-    return super.register({
-      ...route,
+  override register(route: WebRoute | FetchRoute): () => void {
+    const resource = 'resource' in route ? route.resource : undefined
+    const handler = 'handler' in route ? route.handler : undefined
+    const dispose = super.register({
+      kind: route.kind, path: route.path,
       handler: async (req, res) => {
         if (!this.permits(req, this.posture(route.path))) {
           res.writeHead(403)
@@ -758,9 +1060,17 @@ export class GatedWebServer extends WebServer {
           return
         }
         if (overTls(req)) secureCookiesOf(res)
-        await inner(req, res)
+        if (resource !== undefined) await serveFetchResource(req, res, resource)
+        else await handler?.(req, res)
       },
     })
+    const unclaim = this.claimPath(route.path)
+    const key = `${route.kind}:${route.path}`
+    this.namedRoutes.set(key, { kind: route.kind, path: route.path, ...resource === undefined ? {} : { resource } })
+    return () => {
+      this.namedRoutes.delete(key)
+      try { dispose() } finally { unclaim() }
+    }
   }
 
   /**
@@ -771,8 +1081,7 @@ export class GatedWebServer extends WebServer {
    */
   override registerUpgrade(route: WebUpgradeRoute): () => void {
     const inner = route.handler
-    this.claimedPaths.add(route.path)
-    return super.registerUpgrade({
+    const dispose = super.registerUpgrade({
       ...route,
       handler: (req, socket, head) => {
         if (!this.permits(req, this.posture(route.path))) {
@@ -787,6 +1096,8 @@ export class GatedWebServer extends WebServer {
         return inner(req, socket, head)
       },
     })
+    const unclaim = this.claimPath(route.path)
+    return () => { try { dispose() } finally { unclaim() } }
   }
 
   /**
@@ -797,16 +1108,25 @@ export class GatedWebServer extends WebServer {
    * @param handler - owns the full response lifecycle of unmatched requests.
    * @returns the disposer releasing the seat.
    */
-  override registerFallback(handler: WebRoute['handler']): () => void {
-    return super.registerFallback(async (req, res) => {
-      if (!this.permits(req, this.fallbackAdmission)) {
+  override registerFallback(fallback: WebRoute['handler'] | { resource: FetchResource }): () => void {
+    const resource = typeof fallback === 'function' ? undefined : fallback.resource
+    const handler = typeof fallback === 'function' ? fallback : undefined
+    const dispose = super.registerFallback(async (req, res) => {
+      // Anonymous pairing and static assets only require GET and HEAD.
+      // A new fallback write handler must not inherit that exemption.
+      const posture = this.fallbackAdmission === 'public'
+        && req.method !== 'GET' && req.method !== 'HEAD' ? 'gated' : this.fallbackAdmission
+      if (!this.permits(req, posture)) {
         res.writeHead(403)
         res.end(REFUSAL_BODY)
         return
       }
       if (overTls(req)) secureCookiesOf(res)
-      await handler(req, res)
+      if (resource !== undefined) await serveFetchResource(req, res, resource)
+      else await handler?.(req, res)
     })
+    this.fallbackResource = resource
+    return () => { this.fallbackResource = undefined; dispose() }
   }
 }
 
