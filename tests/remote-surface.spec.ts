@@ -80,7 +80,7 @@ async function installedSurface(): Promise<Map<string, Set<string>>> {
   const root = dirname(dirname(fileURLToPath(import.meta.url)))
   const start = packageDir(root, '@deepseek-ai/dsh')
   if (start === undefined) throw new Error('@deepseek-ai/dsh is not installed; it is a devDependency')
-  const visited = new Map<string, string>()
+  const visited = new Set<string>()
   const queue = [start]
   while (queue.length > 0) {
     const dir = queue.pop() as string
@@ -90,8 +90,10 @@ async function installedSurface(): Promise<Map<string, Set<string>>> {
       optionalDependencies?: Record<string, string>
       peerDependencies?: Record<string, string>
     }
-    if (visited.has(manifest.name)) continue
-    visited.set(manifest.name, dir)
+    // Distinct installed copies of one package can expose different Remote methods.
+    // Deduplicate by canonical package directory, not by package name.
+    if (visited.has(dir)) continue
+    visited.add(dir)
     const deps = { ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies }
     for (const dep of Object.keys(deps)) {
       if (!dep.startsWith('@deepseek-ai/')) continue
@@ -100,7 +102,7 @@ async function installedSurface(): Promise<Map<string, Set<string>>> {
     }
   }
   const surface = new Map<string, Set<string>>()
-  for (const dir of visited.values()) {
+  for (const dir of visited) {
     const file = join(dir, 'lib', 'typert.host.js')
     if (!existsSync(file)) continue
     const { TYPERT } = await import(pathToFileURL(file).href) as { TYPERT: { invocations: Array<{ namespace: string; method: string }> } }
