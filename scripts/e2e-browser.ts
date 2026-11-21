@@ -247,7 +247,7 @@ async function withNativePhoneTab(tlsSpkiArg: string, deployedPem: string, run: 
  * and this gate refuses is a namespace the GUI needs and the classification
  * missed — the failure this suite exists to catch.
  */
-const PINNED_BY_DESIGN = /^\/api\/(settings|credentials|account|llm|pluginManager|pluginRegistryProbe|pluginInventory|dynamicCordisRunner)\/|^\/api\/(present|changes)\.open$|^\/plugins\/events$|^\/open-in-app\/open$/
+const PINNED_BY_DESIGN = /^\/api\/(settings|credentials|account|llm|pluginManager|pluginRegistryProbe|pluginInventory|dynamicCordisRunner)\/|^\/api\/web\/listProviders$|^\/api\/(present|changes)\.open$|^\/plugins\/events$|^\/open-in-app\/open$/
 
 /** What the page saw when it called the api the way the shell does. */
 interface PageAnswer {
