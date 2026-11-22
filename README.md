@@ -18,6 +18,10 @@ An explicitly configured named public path (such as client bundles) permits anon
 
 Upstream DSH prereleases may register the GUI and browser bundles as Fetch resources rather than Node HTTP handlers. The same LAN TLS, cookie and admission restrictions apply to both forms; a green check against an older pinned DSH does not prove a newer prerelease is compatible. For a streamed Fetch resource, Lanyard also sends HTTP response headers before the first body chunk arrives; a slow stream must not leave the phone waiting just to learn its response status. Network and in-process HEAD resource reads also finish without waiting for an unused response body to cancel. Both signal the resource producer to stop after the bodyless response, even if cancellation stalls; the in-process adapter leaves the caller's original Request signal untouched and preserves its explicit referrer and referrer policy. When a Fetch resource rejects before it can produce a response, upstream still handles the HTTP error, while Lanyard aborts the forwarded request so the failed resource does not leave its producer running.
 
+### Paired phone access to provider choices
+
+The upstream GUI may call `web/listProviders` to populate its search and web-fetch provider selectors. Lanyard allows **only that exact Gateway method** from a paired phone; it does not open the `web` namespace. Other `web/*` methods remain loopback-only, as do settings, credentials and plugin-management methods. The exception is **not public**: a network request still needs upstream dsh's signed-in browser session, and TLS and explicit LAN binding remain mandatory. If the GUI cannot load provider choices, check that the phone is signed in before changing any admission rules.
+
 ## Install
 
 **First check what npm actually publishes:**

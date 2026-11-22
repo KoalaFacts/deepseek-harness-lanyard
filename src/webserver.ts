@@ -148,6 +148,9 @@ export const DEFAULT_PAIRED_NAMESPACES: readonly string[] = [
  * - `session.export`, `present.host`, `changes.summary` and `changes.diff` are
  *   reads the session views make.
  */
+/** Individually reviewed Gateway methods in otherwise loopback-only namespaces. */
+export const DEFAULT_PAIRED_METHODS: readonly string[] = ['web/listProviders']
+
 export const DEFAULT_PAIRED_ROUTES: readonly string[] = [
   'remote.mux', 'file', 'session.export', 'present.host', 'changes.summary', 'changes.diff',
 ]
@@ -227,6 +230,8 @@ export interface EndpointAuthority {
   privilegedMethods: ReadonlySet<string>
   /** Gateway namespaces a paired device may reach; anything else is pinned. */
   pairedNamespaces: ReadonlySet<string>
+  /** Exact Gateway methods allowed without opening their entire namespace. */
+  pairedMethods: ReadonlySet<string>
   /** Namespace-less `/api/<name>` routes a paired device may reach; anything else is pinned. */
   pairedRoutes: ReadonlySet<string>
 }
@@ -235,6 +240,7 @@ export interface EndpointAuthority {
 export const DEFAULT_ENDPOINT_AUTHORITY: EndpointAuthority = {
   privilegedMethods: new Set(DEFAULT_PRIVILEGED_METHODS),
   pairedNamespaces: new Set(DEFAULT_PAIRED_NAMESPACES),
+  pairedMethods: new Set(DEFAULT_PAIRED_METHODS),
   pairedRoutes: new Set(DEFAULT_PAIRED_ROUTES),
 }
 
@@ -275,6 +281,8 @@ export interface Config extends WebServerConfig {
   privilegedMethods?: string[]
   /** Gateway namespaces a paired device may reach; anything else is pinned. */
   pairedNamespaces?: string[]
+  /** Exact Gateway methods permitted from otherwise pinned namespaces. */
+  pairedMethods?: string[]
   /** Namespace-less `/api/<name>` routes a paired device may reach; anything else is pinned. */
   pairedRoutes?: string[]
 }
@@ -296,6 +304,7 @@ export const Config: z<Config> = z.intersect([
     apiPathPrefix: z.string().default(DEFAULT_API_PATH_PREFIX),
     privilegedMethods: z.array(String).default([...DEFAULT_PRIVILEGED_METHODS]),
     pairedNamespaces: z.array(String).default([...DEFAULT_PAIRED_NAMESPACES]),
+    pairedMethods: z.array(String).default([...DEFAULT_PAIRED_METHODS]),
     pairedRoutes: z.array(String).default([...DEFAULT_PAIRED_ROUTES]),
   }),
 ])
@@ -317,7 +326,7 @@ export function isPrivilegedEndpoint(
   if (authority.privilegedMethods.has(endpoint)) return true
   const separator = endpoint.indexOf('/')
   if (separator === -1) return !authority.pairedRoutes.has(endpoint)
-  return !authority.pairedNamespaces.has(endpoint.slice(0, separator))
+  return !authority.pairedMethods.has(endpoint) && !authority.pairedNamespaces.has(endpoint.slice(0, separator))
 }
 
 /** Whether a response header name is `Set-Cookie`, however it is cased. */
@@ -733,6 +742,7 @@ export class GatedWebServer extends WebServer {
     this.authority = {
       privilegedMethods: new Set(config.privilegedMethods ?? DEFAULT_PRIVILEGED_METHODS),
       pairedNamespaces: new Set(config.pairedNamespaces ?? DEFAULT_PAIRED_NAMESPACES),
+      pairedMethods: new Set(config.pairedMethods ?? DEFAULT_PAIRED_METHODS),
       pairedRoutes: new Set(config.pairedRoutes ?? DEFAULT_PAIRED_ROUTES),
     }
     this.installResourceReadAdapter()
