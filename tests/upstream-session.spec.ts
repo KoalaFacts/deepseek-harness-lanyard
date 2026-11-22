@@ -162,6 +162,27 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     expect(JSON.parse(listed.body)).toMatchObject({ type: 'server-response', result: { ok: true, value: 'session/list' } })
   })
 
+  it('allows only the reviewed web/listProviders method for a signed-in LAN phone over TLS', async () => {
+    const { connection, call, port } = await compose()
+    const lan = LAN as string
+    const { cookie } = await pair(call, lan, pairingLink(connection, 'https', port, lan) as string)
+    expect(cookie).toMatch(/^dsh-auth-[A-Za-z0-9_-]+=v1\\./)
+
+    const anonymous = await call(lan, 'POST', '/api/web/listProviders', rpc, envelope('web/listProviders'))
+    expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
+
+    const listed = await call(lan, 'POST', '/api/web/listProviders', { ...rpc, cookie }, envelope('web/listProviders'))
+    expect(listed.status).toBe(200)
+    expect(JSON.parse(listed.body)).toMatchObject({
+      type: 'server-response', result: { ok: true, value: 'web/listProviders' },
+    })
+
+    for (const method of ['web/readSettings', 'web/listProviders/extra', 'web/ListProviders']) {
+      const denied = await call(lan, 'POST', `/api/${method}`, { ...rpc, cookie }, envelope(method))
+      expect([method, denied.status, denied.body]).toEqual([method, 403, REFUSAL_BODY])
+    }
+  })
+
   it('marks the session cookie Secure, which upstream leaves to the carrier', async () => {
     // Upstream mints `HttpOnly; SameSite=Strict` only. A browser scopes cookies
     // by host rather than scheme or port, so an unmarked one would ride any
