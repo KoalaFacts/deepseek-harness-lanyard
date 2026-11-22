@@ -166,7 +166,7 @@ describe.skipIf(LAN === undefined)('lanyard over the installed dsh-client-connec
     const { connection, call, port } = await compose()
     const lan = LAN as string
     const { cookie } = await pair(call, lan, pairingLink(connection, 'https', port, lan) as string)
-    expect(cookie).toMatch(/^dsh-auth-[A-Za-z0-9_-]+=v1\\./)
+    expect(cookie).toMatch(/^dsh-auth-[A-Za-z0-9_-]+=v1\./)
 
     const anonymous = await call(lan, 'POST', '/api/web/listProviders', rpc, envelope('web/listProviders'))
     expect([anonymous.status, anonymous.body]).toEqual([403, REFUSAL_BODY])
