@@ -120,6 +120,35 @@ describe('admit', () => {
   })
 })
 
+describe('reviewed web Gateway method', () => {
+  it('admits only listProviders, never the web namespace as a whole', () => {
+    expect(isPrivilegedEndpoint('web/listProviders')).toBe(false)
+    for (const method of [
+      'web/readSettings', 'web/updateSettings', 'web/listProviders/extra',
+      'web/ListProviders', 'web/listProviders%2Fextra', 'web%2FlistProviders',
+      'web/listProviders/', 'web/', 'web',
+    ]) {
+      expect([method, isPrivilegedEndpoint(method)]).toEqual([method, true])
+    }
+  })
+
+  it('keeps privileged pins above exact paired-method exceptions', () => {
+    const authority = {
+      privilegedMethods: new Set(['web/listProviders']),
+      pairedNamespaces: new Set<string>(),
+      pairedMethods: new Set(['web/listProviders']),
+      pairedRoutes: new Set<string>(),
+    }
+    expect(isPrivilegedEndpoint('web/listProviders', authority)).toBe(true)
+  })
+
+  it('does not bypass upstream session admission', () => {
+    expect(admit(req({}, '192.168.1.5'), upstream)).toBe(false)
+    expect(admit(req({ cookie: SESSION }, '192.168.1.5'), upstream)).toBe(true)
+    expect(isPrivilegedEndpoint('web/listProviders')).toBe(false)
+  })
+})
+
 describe('isPrivilegedEndpoint', () => {
   it('pins every namespace of the configuration plane', () => {
     for (const m of [
