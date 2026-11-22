@@ -64,6 +64,8 @@ jobs:
       - run: npm run test:mutation:connection-lookup
       # A delayed pairing announcement must never reuse an obsolete launch-token issuer.
       - run: npm run test:mutation:pairing-readiness
+      # Kill both exact-method removal and broad web-namespace admission mutants.
+      - run: node scripts/mutate-web-list-providers.ts
       # A main-branch CI tarball lets someone test a real install before npm
       # publication. Only the already-built, 32-file-gated payload is packed;
       # never run lifecycle scripts or upload installable PR artifacts.
