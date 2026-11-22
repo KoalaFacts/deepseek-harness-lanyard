@@ -30,7 +30,7 @@ const LAN = lanIpv4Addresses()[0]
 const OWN_FIELDS = {
   networkPort: true, tlsCertPath: true, tlsKeyPath: true, publicPaths: true, publicPathExcludedSuffixes: true,
   loopbackOnlyPaths: true, fallbackAdmission: true, apiPathPrefix: true, privilegedMethods: true,
-  pairedNamespaces: true, pairedRoutes: true, tls: true,
+  pairedMethods: true, pairedNamespaces: true, pairedRoutes: true, tls: true,
 } satisfies Record<Exclude<keyof Config, keyof WebServerConfig> | 'tls', true>
 let ctx: Context | undefined
 afterEach(async () => { await ctx?.fiber.dispose(); ctx = undefined; vi.restoreAllMocks() })
